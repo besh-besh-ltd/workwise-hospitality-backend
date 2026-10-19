@@ -812,10 +812,11 @@ async function retireIneligibleRoleStep({ instanceId, stepId, roleId, resource, 
  *   every instance step is known to come from, so the caller can re-point
  *   `policy_step_id` at that level's new row BY INSTANCE STEP ID.
  *   `unmatchedDiffEntries` are `{type: 'UNMATCHED_SKIPPED', diff_type,
- *   step_order, policy_step_id}` for diff entries that found no instance step
- *   (or, for STEP_ADDED, no reliable place — then step_order/policy_step_id are
- *   the NEW level's) — a reconciliation this instance did NOT receive. Same
- *   reporting standard as PART 1's `unresolvedSteps` in revalidateApproverMembership.
+ *   step_order, policy_step_id}` for removals / modifications / moves that
+ *   found no instance step — a reconciliation this instance did NOT receive.
+ *   Same reporting standard as PART 1's `unresolvedSteps` in
+ *   revalidateApproverMembership. Additions are never unmatched: one that
+ *   cannot be placed is appended (`stepsAdded[].placement === 'appended'`).
  */
 export async function applyDiffToInstance(instance, diff, policy, changedBy, t, mapping = {}) {
   const { instanceLinks = null, oldStepIdByOrder = null, stepIdMap = null, newOrderById = null } = mapping;
@@ -1135,10 +1136,13 @@ export async function applyDiffToInstance(instance, diff, policy, changedBy, t, 
   // step (so after the one built from the preceding level). Steps of levels
   // this edit removes anchor nothing — they are about to go. That needs every
   // live instance step to be attributable to a level; if one is not, or the
-  // two neighbours sit in the instance in the opposite order, the addition is
-  // recorded UNMATCHED_SKIPPED and not inserted — the same fail-closed rule as
-  // the matcher above. Callers that pass no new-policy map (direct callers of
-  // this exported function) get the policy ordinal.
+  // two neighbours sit in the instance in the opposite order, the level is
+  // APPENDED after every existing step instead (`placement: 'appended'`).
+  // An added level is never dropped: dropping it lets an edit that also closes
+  // the current step complete the instance with the new approver never asked.
+  // Appended levels are PENDING, so closing the current step advances onto the
+  // first of them. Callers that pass no new-policy map (direct callers of this
+  // exported function) get the policy ordinal.
   //
   // WHAT it becomes, by where it lands relative to the current step:
   //   before it — its following level's step is already completed, i.e. it is
@@ -1163,9 +1167,11 @@ export async function applyDiffToInstance(instance, diff, policy, changedBy, t, 
   }
 
   let renumberOffset = 0;
+  const afterLastStep = () => Math.max(0, ...instanceSteps.map(s => s.step_order)) + 1;
   for (const d of additions) {
     const newOrder = stepOrderOf(d.newStep);
     let insertPosition;
+    let placement;
     if (placeByNeighbours) {
       let pred = null;
       let succ = null;
@@ -1178,21 +1184,17 @@ export async function applyDiffToInstance(instance, diff, policy, changedBy, t, 
         }
       }
       if (!additionsPlaceable || (!pred && !succ) || (pred && succ && pred.step_order >= succ.step_order)) {
-        logger.warn(`[PropagateMatch] instance ${instance.id}: STEP_ADDED policy step_order=${newOrder} (policy_step_id=${d.newStep.id}) cannot be placed between attributable neighbours (placeable=${additionsPlaceable}) — UNMATCHED_SKIPPED, this level was not added`);
-        result.unmatchedDiffEntries.push({
-          type: 'UNMATCHED_SKIPPED',
-          diff_type: 'STEP_ADDED',
-          step_order: newOrder,
-          policy_step_id: d.newStep.id == null ? null : Number(d.newStep.id)
-        });
-        continue;
+        insertPosition = afterLastStep();
+        placement = 'appended';
+        logger.warn(`[PropagateAdd] instance ${instance.id}: STEP_ADDED policy step_order=${newOrder} (policy_step_id=${d.newStep.id}) has no reliable place between its neighbours (placeable=${additionsPlaceable}) — APPENDED as PENDING at step ${insertPosition}`);
+      } else {
+        insertPosition = succ ? succ.step_order : afterLastStep();
+        placement = 'neighbours';
       }
-      insertPosition = succ
-        ? succ.step_order
-        : Math.max(...instanceSteps.map(s => s.step_order)) + 1;
     } else {
       insertPosition = d.step_order + renumberOffset;
       renumberOffset++;
+      placement = 'ordinal';
     }
 
     const currentOrder = instance.current_step;
@@ -1219,11 +1221,11 @@ export async function applyDiffToInstance(instance, diff, policy, changedBy, t, 
     newOrderOfStep.set(row.id, newOrder);
 
     if (insideCompletedPrefix) {
-      const reported = { step_order: insertPosition, status: 'SKIPPED' };
+      const reported = { step_order: insertPosition, placement, status: 'SKIPPED' };
       result.stepsAdded.push(reported);
       skippedAdditions.push({ row, newStep: d.newStep, reported });
     } else {
-      result.stepsAdded.push({ step_order: insertPosition, ...(await fillAddedStep(row, d.newStep)) });
+      result.stepsAdded.push({ step_order: insertPosition, placement, ...(await fillAddedStep(row, d.newStep)) });
     }
   }
 

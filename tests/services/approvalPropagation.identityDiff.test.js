@@ -172,6 +172,10 @@ const POLICIES = {
   // to process P2 (fixture RFQ policies are all department NULL).
   reorder: { id: 65413, hotel: IDS.hotels.A2, dept: IDS.departments.fb, process: IDS.processes.A_P2 },
   twoEdits: { id: 65414, hotel: IDS.hotels.A3, dept: IDS.departments.fb, process: IDS.processes.A_P2 },
+  unplacedPartlyLinked: { id: 65415, hotel: IDS.hotels.A2, dept: IDS.departments.hk, process: IDS.processes.A_P2 },
+  unplacedInverted: { id: 65416, hotel: IDS.hotels.A3, dept: IDS.departments.hk, process: IDS.processes.A_P2 },
+  unplacedAfterCurrent: { id: 65417, hotel: IDS.hotels.A2, dept: IDS.departments.eng, process: IDS.processes.A_P2 },
+  unplacedWithModification: { id: 65418, hotel: IDS.hotels.A3, dept: IDS.departments.eng, process: IDS.processes.A_P2 },
 };
 const POLICY_IDS = Object.values(POLICIES).map((p) => p.id);
 
@@ -191,6 +195,10 @@ const POLICY_STEPS = [
   [POLICIES.removeLast, [[65521, 1, "USER", A_ID], [65522, 2, "USER", B_ID]]],
   [POLICIES.reorder, [[65531, 1, "USER", A_ID], [65532, 2, "USER", B_ID]]],
   [POLICIES.twoEdits, [[65541, 1, "USER", A_ID], [65542, 2, "USER", D_ID], [65543, 3, "USER", B_ID]]],
+  [POLICIES.unplacedPartlyLinked, [[65551, 1, "USER", A_ID], [65552, 2, "USER", B_ID]]],
+  [POLICIES.unplacedInverted, [[65561, 1, "USER", A_ID], [65562, 2, "USER", C_ID], [65563, 3, "USER", B_ID]]],
+  [POLICIES.unplacedAfterCurrent, [[65571, 1, "USER", A_ID], [65572, 2, "USER", B_ID]]],
+  [POLICIES.unplacedWithModification, [[65581, 1, "USER", A_ID], [65582, 2, "ROLE", ROLE_CAN_APPROVE]]],
 ];
 
 // Instances are built at A2 / Procurement whatever the policy's own tuple.
@@ -719,6 +727,123 @@ describe("an edit that adds levels never lets an in-flight approval skip or fini
     expect(res.status).toBe(200);
 
     expect((await instanceRow(instance.id)).status).toBe("APPROVED");
+  });
+});
+
+describe("an added level with no reliable place is appended, never dropped", () => {
+  const shape = async (instanceId) =>
+    (await instanceStepsOf(instanceId)).map((s) => [s.step_order, s.status, s.policy_step_id]);
+  const unlinkStep = (instanceId, order) =>
+    db.none(
+      `UPDATE tbl_approval_instance_steps SET policy_step_id = NULL
+        WHERE approval_instance_id = $1 AND step_order = $2`,
+      [instanceId, order]
+    );
+  const addedReport = async (instanceId) => (await lastChangeSummary(instanceId)).stepsAdded;
+
+  it("partly-linked legacy [A,B] -> [C,A] waiting at B: C is appended and current, nothing completes", async () => {
+    const policy = POLICIES.unplacedPartlyLinked;
+    const instance = await makeInstance(policy);
+    await approveStep(instance.id, A_ID);
+    await unlinkStep(instance.id, 1); // A's step lost its link to an earlier save
+
+    const client = await httpClient(ADMIN_ID);
+    const res = await editPolicy(client, policy, [step(1, "USER", C_ID), step(2, "USER", A_ID)]);
+    expect(res.status).toBe(200);
+
+    // A's step cannot be attributed, so C has no reliable place. Dropping C
+    // while B (the last pending level) is removed would complete the instance
+    // and fire its post-approval handler with C never asked.
+    const newIds = await policyStepIds(policy.id);
+    expect(await shape(instance.id)).toEqual([
+      [1, "APPROVED", null], // A — unattributable, left alone
+      [2, "REMOVED", null], // B
+      [3, "PENDING", newIds[1]], // C — appended, current
+    ]);
+    expect(await instanceRow(instance.id)).toMatchObject({ status: "PENDING", current_step: 3 });
+    expect(await approverStatusAt(instance.id, 3, C_ID)).toBe("PENDING");
+    expect(await addedReport(instance.id)).toEqual([
+      expect.objectContaining({ step_order: 3, placement: "appended", status: "PENDING" }),
+    ]);
+    expect((await lastChangeSummary(instance.id)).autoCompleted).toBe(false);
+  });
+
+  it("[A,C,B] -> [C,X,A] waiting at B: X's neighbours are inverted, so X is appended and current", async () => {
+    const policy = POLICIES.unplacedInverted;
+    const instance = await makeInstance(policy);
+    await approveStep(instance.id, A_ID);
+    await approveStep(instance.id, C_ID);
+    expect(await instanceRow(instance.id)).toMatchObject({ status: "PENDING", current_step: 3 });
+
+    // X sits between C and A in the new policy, but A's step comes BEFORE C's
+    // in the instance — there is no position honouring both.
+    const client = await httpClient(ADMIN_ID);
+    const res = await editPolicy(client, policy, [step(1, "USER", C_ID), step(2, "USER", D_ID), step(3, "USER", A_ID)]);
+    expect(res.status).toBe(200);
+
+    const newIds = await policyStepIds(policy.id);
+    expect(await shape(instance.id)).toEqual([
+      [1, "APPROVED", newIds[3]], // A
+      [2, "APPROVED", newIds[1]], // C
+      [3, "REMOVED", null], // B
+      [4, "PENDING", newIds[2]], // X — appended, current
+    ]);
+    expect(await instanceRow(instance.id)).toMatchObject({ status: "PENDING", current_step: 4 });
+    expect(await approverStatusAt(instance.id, 4, D_ID)).toBe("PENDING");
+    expect(await addedReport(instance.id)).toEqual([
+      expect.objectContaining({ step_order: 4, placement: "appended", status: "PENDING" }),
+    ]);
+  });
+
+  it("an appended level waits behind a current step that is still pending", async () => {
+    const policy = POLICIES.unplacedAfterCurrent;
+    const instance = await makeInstance(policy);
+    await approveStep(instance.id, A_ID);
+    await unlinkStep(instance.id, 1);
+
+    const client = await httpClient(ADMIN_ID);
+    const res = await editPolicy(client, policy, [step(1, "USER", A_ID), step(2, "USER", B_ID), step(3, "USER", C_ID)]);
+    expect(res.status).toBe(200);
+
+    const newIds = await policyStepIds(policy.id);
+    expect(await shape(instance.id)).toEqual([
+      [1, "APPROVED", null],
+      [2, "PENDING", newIds[2]], // B — still current
+      [3, "PENDING", newIds[3]], // C — appended after it
+    ]);
+    expect(await instanceRow(instance.id)).toMatchObject({ status: "PENDING", current_step: 2 });
+    expect(await approverStatusAt(instance.id, 3, C_ID)).toBe("PENDING");
+    expect(await addedReport(instance.id)).toEqual([
+      expect.objectContaining({ step_order: 3, placement: "appended", status: "PENDING" }),
+    ]);
+  });
+
+  it("a modification that completes the current step advances onto the appended level", async () => {
+    // Level 2 is ROLE 4 with rule ALL; B has approved it, the others have not.
+    const policy = POLICIES.unplacedWithModification;
+    const instance = await makeInstance(policy);
+    await approveStep(instance.id, A_ID);
+    await approveStep(instance.id, B_ID);
+    expect(await instanceRow(instance.id)).toMatchObject({ status: "PENDING", current_step: 2 });
+    await unlinkStep(instance.id, 1);
+
+    // ALL -> ANY completes level 2 on B's approval; C is added with no place.
+    const client = await httpClient(ADMIN_ID);
+    const res = await editPolicy(client, policy, [
+      step(1, "USER", A_ID),
+      { ...step(2, "ROLE", ROLE_CAN_APPROVE), decision_rule: "ANY" },
+      step(3, "USER", C_ID),
+    ]);
+    expect(res.status).toBe(200);
+
+    const newIds = await policyStepIds(policy.id);
+    expect(await shape(instance.id)).toEqual([
+      [1, "APPROVED", null],
+      [2, "APPROVED", newIds[2]], // completed by the rule change
+      [3, "PENDING", newIds[3]], // C — appended, now current
+    ]);
+    expect(await instanceRow(instance.id)).toMatchObject({ status: "PENDING", current_step: 3 });
+    expect(await approverStatusAt(instance.id, 3, C_ID)).toBe("PENDING");
   });
 });
 
