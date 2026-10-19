@@ -798,6 +798,11 @@ async function retireIneligibleRoleStep({ instanceId, stepId, roleId, resource, 
  * @param {Map}    [mapping.oldStepIdByOrder] — Map<old step_order, old policy
  *        step id> covering EVERY old policy step. Omitted → the ordinal
  *        fallback is never used.
+ * @param {Map}    [mapping.stepIdMap] — old policy step id → new policy step id
+ *        for every paired level.
+ * @param {Map}    [mapping.newOrderById] — new policy step id → step_order for
+ *        every level of the edited policy. With stepIdMap, added levels are
+ *        placed by their neighbours; omitted → by the policy ordinal.
  *
  * @returns {{ approversAdded: Array, approversRemoved: Array,
  *             approversKeptApproved: Array, stepsAdded: Array, stepsRemoved: Array,
@@ -807,12 +812,13 @@ async function retireIneligibleRoleStep({ instanceId, stepId, roleId, resource, 
  *   every instance step is known to come from, so the caller can re-point
  *   `policy_step_id` at that level's new row BY INSTANCE STEP ID.
  *   `unmatchedDiffEntries` are `{type: 'UNMATCHED_SKIPPED', diff_type,
- *   step_order, policy_step_id}` for diff entries that found no instance step —
- *   a reconciliation this instance did NOT receive. Same reporting standard as
- *   PART 1's `unresolvedSteps` in revalidateApproverMembership.
+ *   step_order, policy_step_id}` for diff entries that found no instance step
+ *   (or, for STEP_ADDED, no reliable place — then step_order/policy_step_id are
+ *   the NEW level's) — a reconciliation this instance did NOT receive. Same
+ *   reporting standard as PART 1's `unresolvedSteps` in revalidateApproverMembership.
  */
 export async function applyDiffToInstance(instance, diff, policy, changedBy, t, mapping = {}) {
-  const { instanceLinks = null, oldStepIdByOrder = null } = mapping;
+  const { instanceLinks = null, oldStepIdByOrder = null, stepIdMap = null, newOrderById = null } = mapping;
   // Steps / approvers of this live instance are about to change — announce
   // after commit (de-duplicated per transaction, dropped on rollback).
   notifyApprovalChanged({ instanceIds: instance.id }, t);
@@ -855,8 +861,9 @@ export async function applyDiffToInstance(instance, diff, policy, changedBy, t, 
   // All entities are department-scoped
   const resolveDeptId = instance.department_id;
 
-  // Process diffs in order. Handle STEP_ADDED renumbering carefully.
-  // Sort diffs: process removals first, then modifications, then additions (to avoid renumbering conflicts)
+  // Applied in this order: moves (bookkeeping only), additions, removals,
+  // modifications. Additions go first so that removing the current level
+  // advances onto an added one instead of completing the instance.
   const removals = diff.filter(d => d.type === 'STEP_REMOVED');
   const modifications = diff.filter(d => d.type === 'STEP_MODIFIED');
   const moves = diff.filter(d => d.type === 'STEP_MOVED');
@@ -955,6 +962,271 @@ export async function applyDiffToInstance(instance, diff, policy, changedBy, t, 
     result.stepsMoved.push({ instance_step_id: instStep.id, step_order: instStep.step_order, from: d.from, to: d.to });
   }
 
+  // ── HELPERS SHARED BY ADDITIONS, REMOVALS AND MODIFICATIONS ──
+
+  // Open a gap at `fromOrder`. Two statements, not `step_order = step_order + 1`:
+  // idx_unique_instance_step_order is checked row by row, so a one-statement
+  // shift of two or more rows collides with itself and the edit fails.
+  const shiftInstanceSteps = async (fromOrder) => {
+    await t.none(
+      `UPDATE tbl_approval_instance_steps SET step_order = -(step_order + 1)
+        WHERE approval_instance_id = $1 AND step_order >= $2`,
+      [instance.id, fromOrder]
+    );
+    await t.none(
+      `UPDATE tbl_approval_instance_steps SET step_order = -step_order
+        WHERE approval_instance_id = $1 AND step_order < 0`,
+      [instance.id]
+    );
+    // Later loops compare in-memory step_order with current_step.
+    for (const s of instanceSteps) if (s.step_order >= fromOrder) s.step_order += 1;
+  };
+
+  // Resolve and attach approvers to an added step that is (now) PENDING.
+  // Returns the stepsAdded report fields for it.
+  const fillAddedStep = async (stepRow, newStep) => {
+    // Same eligibility rule creation uses — see policyStepApproverEligibility.
+    // Without this, editing a live policy could install an approver that
+    // creating the same instance would have dropped, and that approver is
+    // binding (submitApprovalAction re-checks nothing). An ineligible source
+    // resolves to NOBODY here, so the step takes the "resolves to nobody"
+    // branch below: it stalls rather than silently granting authority.
+    const addEligibility = await policyStepApproverEligibility(
+      newStep, instance.entity_type,
+      {
+        hospitality_company_id: instance.hospitality_company_id,
+        hotel_id: instance.hotel_id,
+        department_id: resolveDeptId,
+        process_id: instance.process_id || null,
+      }, t
+    );
+    if (!addEligibility.eligible) {
+      logger.warn(
+        `[PropagateGate] STEP_ADDED: policy step ${newStep.id} source ` +
+        `${newStep.approver_source_type}/${newStep.approver_source_id} is INELIGIBLE ` +
+        `for ${instance.entity_type} (${addEligibility.reason}, resource '${addEligibility.resource}') — ` +
+        `resolving to nobody on instance ${instance.id} instead of installing them.`
+      );
+    }
+
+    const newResolvedIds = addEligibility.eligible
+      ? await resolveApprovers(
+          newStep, instance.hospitality_company_id, instance.hotel_id,
+          resolveDeptId, t, null, instance.process_id || null
+        )
+      : [];
+
+    if (newResolvedIds.length === 0) {
+      // A NEW authority that resolves to nobody RIGHT NOW must BLOCK, not
+      // vanish. The step stays PENDING with zero approvers so the instance
+      // stalls until somebody is granted the role.
+      //
+      // This used to be written SKIPPED, and that voided the final authority
+      // on two production POs (138699 / 138701): an admin added a 4th level at
+      // 20:57 and granted the role ten hours later; the level was already
+      // SKIPPED, the add-approver reconciler only looks at PENDING steps (see
+      // revalidateApproverMembership PART 2), so the grant never reached it.
+      // PENDING is what makes this recoverable. A stalled approval is visible
+      // and fixable; a bypassed one is neither.
+      logger.error(
+        {
+          instance_id: instance.id,
+          entity_type: instance.entity_type,
+          entity_id: instance.entity_id,
+          step_order: stepRow.step_order,
+          policy_step_id: newStep.id,
+          approver_source_type: newStep.approver_source_type,
+          approver_source_id: newStep.approver_source_id,
+        },
+        '[ApprovalPropagation] BLOCKED: a policy step was added to a live instance but resolves to no approvers. The approval cannot proceed until somebody holds that role in scope.'
+      );
+      await t.none(
+        `INSERT INTO tbl_approval_actions
+           (approval_instance_id, approval_instance_step_id, approver_user_id, action, comment)
+         VALUES ($1, $2, $3, 'STEP_ADDED', $4)`,
+        [
+          instance.id,
+          stepRow.id,
+          instance.initiated_by,
+          `Step ${stepRow.step_order} added by a policy change but resolves to no approver in this scope — approval is blocked here until the role is granted.`,
+        ]
+      );
+      return { status: 'PENDING', blocked: true, reason: 'NO_APPROVERS_RESOLVED' };
+    }
+
+    for (const userId of newResolvedIds) {
+      const isInitiator = userId === instance.initiated_by;
+      await t.none(
+        `INSERT INTO tbl_approval_step_approvers
+         (approval_instance_step_id, approver_user_id, status, added_mid_flight, acted_at, comment)
+         VALUES ($1, $2, $3, true, $4, NULL)`,
+        [stepRow.id, userId, isInitiator ? 'APPROVED' : 'PENDING', isInitiator ? new Date() : null]
+      );
+      if (isInitiator) {
+        await t.none(
+          `INSERT INTO tbl_approval_actions
+           (approval_instance_id, approval_instance_step_id, approver_user_id, action, comment)
+           VALUES ($1, $2, $3, 'APPROVE', NULL)`,
+          [instance.id, stepRow.id, userId]
+        );
+      }
+      result.approversAdded.push({ user_id: userId, step_order: stepRow.step_order, auto_approved: isInitiator });
+    }
+    await t.none(
+      `INSERT INTO tbl_approval_actions
+       (approval_instance_id, approval_instance_step_id, approver_user_id, action, comment)
+       VALUES ($1, $2, $3, 'STEP_ADDED', 'Step added due to policy change')`,
+      [instance.id, stepRow.id, changedBy]
+    );
+    return { status: 'PENDING', approverCount: newResolvedIds.length };
+  };
+
+  // Added levels written SKIPPED because they landed inside the completed
+  // prefix: { row, newStep, reported }.
+  const skippedAdditions = [];
+
+  // The step at current_step just closed (removed, or completed by a
+  // modification). Move on — except that an edit which ADDS levels never leaves
+  // the instance completed: if nothing PENDING remains ahead, the added levels
+  // that were written SKIPPED are the only authority left, so they become
+  // PENDING and the first of them current. Removing the last pending level with
+  // NO additions still completes the instance — that is what the admin asked for.
+  const advancePastClosedStep = async () => {
+    if (skippedAdditions.length > 0) {
+      const pendingAhead = await t.oneOrNone(
+        `SELECT 1 FROM tbl_approval_instance_steps
+          WHERE approval_instance_id = $1 AND status = 'PENDING' AND step_order > $2 LIMIT 1`,
+        [instance.id, instance.current_step]
+      );
+      if (!pendingAhead) {
+        const revived = skippedAdditions.splice(0).sort((a, b) => a.row.step_order - b.row.step_order);
+        for (const a of revived) {
+          await t.none(
+            `UPDATE tbl_approval_instance_steps SET status = 'PENDING', completed_at = NULL WHERE id = $1`,
+            [a.row.id]
+          );
+          a.row.status = 'PENDING';
+          Object.assign(a.reported, await fillAddedStep(a.row, a.newStep), { revived: true });
+        }
+        instance.current_step = revived[0].row.step_order;
+        await t.none(
+          `UPDATE tbl_approval_instances SET current_step = $1 WHERE id = $2`,
+          [instance.current_step, instance.id]
+        );
+        logger.warn(`[PropagateAdd] instance ${instance.id}: the edit left no pending level, so ${revived.length} added level(s) placed before the current step were made PENDING instead of SKIPPED; current_step=${instance.current_step}`);
+        return;
+      }
+    }
+    const adv = await advanceInstanceToNextStep(instance.id, t);
+    if (adv.instanceCompleted) {
+      result.autoCompleted = true;
+    } else if (adv.nextStepOrder) {
+      instance.current_step = adv.nextStepOrder;
+    }
+  };
+
+  // --- STEP ADDITIONS (before removals, so a removal never completes an
+  //     instance the edit also extended) ---
+  //
+  // WHERE an added level goes. With the full new policy known (`stepIdMap` +
+  // `newOrderById`, i.e. every real policy edit), it goes by its NEIGHBOURS in
+  // the new policy: immediately before the instance step built from the
+  // nearest following level; with no following level, after every existing
+  // step (so after the one built from the preceding level). Steps of levels
+  // this edit removes anchor nothing — they are about to go. That needs every
+  // live instance step to be attributable to a level; if one is not, or the
+  // two neighbours sit in the instance in the opposite order, the addition is
+  // recorded UNMATCHED_SKIPPED and not inserted — the same fail-closed rule as
+  // the matcher above. Callers that pass no new-policy map (direct callers of
+  // this exported function) get the policy ordinal.
+  //
+  // WHAT it becomes, by where it lands relative to the current step:
+  //   before it — its following level's step is already completed, i.e. it is
+  //               inside the completed prefix → SKIPPED (but see
+  //               advancePastClosedStep: never if that would finish the instance);
+  //   at it     — its following level IS the current step → PENDING and
+  //               current; the old current step waits after it;
+  //   after it  → PENDING.
+  const placeByNeighbours = Boolean(stepIdMap && newOrderById);
+  const newOrderOfStep = new Map(); // live instance step id -> its level's new step_order
+  let additionsPlaceable = true;
+  if (placeByNeighbours && additions.length > 0) {
+    const originOf = new Map(result.stepOrigins.map(o => [o.instance_step_id, o.policy_step_id]));
+    for (const s of instanceSteps) {
+      if (s.status === 'REMOVED') continue;
+      if (!originOf.has(s.id)) { additionsPlaceable = false; break; }
+      const newId = stepIdMap.get(originOf.get(s.id));
+      // A level removed by this edit has no new position; its step is about
+      // to be removed and anchors nothing.
+      if (newId != null && newOrderById.has(Number(newId))) newOrderOfStep.set(s.id, newOrderById.get(Number(newId)));
+    }
+  }
+
+  let renumberOffset = 0;
+  for (const d of additions) {
+    const newOrder = stepOrderOf(d.newStep);
+    let insertPosition;
+    if (placeByNeighbours) {
+      let pred = null;
+      let succ = null;
+      if (additionsPlaceable) {
+        for (const s of instanceSteps) {
+          const o = newOrderOfStep.get(s.id);
+          if (o === undefined) continue;
+          if (o < newOrder && (!pred || o > newOrderOfStep.get(pred.id))) pred = s;
+          if (o > newOrder && (!succ || o < newOrderOfStep.get(succ.id))) succ = s;
+        }
+      }
+      if (!additionsPlaceable || (!pred && !succ) || (pred && succ && pred.step_order >= succ.step_order)) {
+        logger.warn(`[PropagateMatch] instance ${instance.id}: STEP_ADDED policy step_order=${newOrder} (policy_step_id=${d.newStep.id}) cannot be placed between attributable neighbours (placeable=${additionsPlaceable}) — UNMATCHED_SKIPPED, this level was not added`);
+        result.unmatchedDiffEntries.push({
+          type: 'UNMATCHED_SKIPPED',
+          diff_type: 'STEP_ADDED',
+          step_order: newOrder,
+          policy_step_id: d.newStep.id == null ? null : Number(d.newStep.id)
+        });
+        continue;
+      }
+      insertPosition = succ
+        ? succ.step_order
+        : Math.max(...instanceSteps.map(s => s.step_order)) + 1;
+    } else {
+      insertPosition = d.step_order + renumberOffset;
+      renumberOffset++;
+    }
+
+    const currentOrder = instance.current_step;
+    await shiftInstanceSteps(insertPosition);
+    if (insertPosition < currentOrder) {
+      // The current step moved down one place.
+      instance.current_step += 1;
+      await t.none(
+        `UPDATE tbl_approval_instances SET current_step = $1 WHERE id = $2`,
+        [instance.current_step, instance.id]
+      );
+    }
+    // insertPosition === currentOrder: current_step now names the added step.
+
+    const insideCompletedPrefix = insertPosition < currentOrder;
+    const row = await t.one(
+      `INSERT INTO tbl_approval_instance_steps
+       (approval_instance_id, step_order, decision_rule, status, policy_step_id, added_mid_flight, completed_at)
+       VALUES ($1, $2, $3, $4, $5, true, ${insideCompletedPrefix ? 'NOW()' : 'NULL'}) RETURNING *`,
+      [instance.id, insertPosition, d.newStep.decision_rule || 'ANY',
+        insideCompletedPrefix ? 'SKIPPED' : 'PENDING', d.newStep.id]
+    );
+    instanceSteps.push(row);
+    newOrderOfStep.set(row.id, newOrder);
+
+    if (insideCompletedPrefix) {
+      const reported = { step_order: insertPosition, status: 'SKIPPED' };
+      result.stepsAdded.push(reported);
+      skippedAdditions.push({ row, newStep: d.newStep, reported });
+    } else {
+      result.stepsAdded.push({ step_order: insertPosition, ...(await fillAddedStep(row, d.newStep)) });
+    }
+  }
+
   // --- STEP REMOVALS ---
   for (const d of removals) {
     const instStep = findInstanceStepForDiff(d);
@@ -1011,12 +1283,7 @@ export async function applyDiffToInstance(instance, diff, policy, changedBy, t, 
 
     // If this was the current step, advance
     if (instStep.step_order === instance.current_step) {
-      const adv = await advanceInstanceToNextStep(instance.id, t);
-      if (adv.instanceCompleted) {
-        result.autoCompleted = true;
-      } else if (adv.nextStepOrder) {
-        instance.current_step = adv.nextStepOrder;
-      }
+      await advancePastClosedStep();
     }
   }
 
@@ -1210,209 +1477,11 @@ export async function applyDiffToInstance(instance, diff, policy, changedBy, t, 
     // Re-evaluate step completion after any modification
     if (d.sourceChanged || d.ruleChanged) {
       const evalResult = await reEvaluateInstanceStep(instStep.id, t);
+      if (evalResult.completed) instStep.status = evalResult.status;
       if (evalResult.completed && instStep.step_order === instance.current_step) {
-        const adv = await advanceInstanceToNextStep(instance.id, t);
-        if (adv.instanceCompleted) {
-          result.autoCompleted = true;
-        } else if (adv.nextStepOrder) {
-          instance.current_step = adv.nextStepOrder;
-        }
+        await advancePastClosedStep();
       }
     }
-  }
-
-  // --- STEP ADDITIONS (with renumbering) ---
-  // Process additions in ascending order to handle renumbering correctly.
-  //
-  // Insert POSITION stays ordinal, deliberately. A STEP_ADDED entry describes a
-  // policy step that did not exist before, so there is no `policy_step_id` on
-  // any instance step that could point at it — the id-first precedence used for
-  // removals/modifications has nothing to match. The neighbouring steps' links
-  // (stepOrigins) could in principle place it relative to them, but that needs
-  // a policy→instance position map this change does not build. The ordinal is
-  // the mapping used here.
-  //
-  // Residual risk, stated plainly: on an instance whose numbering diverged, a
-  // step can be inserted one position off, and a position below current_step is
-  // inserted as SKIPPED rather than PENDING — i.e. an approval that should have
-  // been collected is not. The approver SET is still correct (resolveApprovers
-  // runs fresh against the new policy step), so this is a sequencing error, not
-  // a wrong-approver error. Fixing it properly needs the full new step list
-  // threaded through applyDiffToInstance and a policy→instance position map;
-  // that is a larger change than this defect and is left out on purpose.
-  let renumberOffset = 0;
-  for (const d of additions) {
-    const insertPosition = d.step_order + renumberOffset;
-    const currentStep = instance.current_step;
-
-    // Shift existing instance steps at >= insertPosition
-    await t.none(
-      `UPDATE tbl_approval_instance_steps
-       SET step_order = step_order + 1
-       WHERE approval_instance_id = $1 AND step_order >= $2`,
-      [instance.id, insertPosition]
-    );
-
-    // Update current_step if it was shifted
-    if (currentStep >= insertPosition) {
-      instance.current_step += 1;
-      await t.none(
-        `UPDATE tbl_approval_instances SET current_step = $1 WHERE id = $2`,
-        [instance.current_step, instance.id]
-      );
-    }
-
-    const isPastStep = insertPosition < instance.current_step;
-
-    if (isPastStep) {
-      // Past step — insert as SKIPPED
-      await t.one(
-        `INSERT INTO tbl_approval_instance_steps
-         (approval_instance_id, step_order, decision_rule, status, policy_step_id, added_mid_flight, completed_at)
-         VALUES ($1, $2, $3, 'SKIPPED', $4, true, NOW()) RETURNING id`,
-        [instance.id, insertPosition, d.newStep.decision_rule || 'ANY', d.newStep.id]
-      );
-      result.stepsAdded.push({ step_order: insertPosition, status: 'SKIPPED' });
-    } else {
-      // Future step — insert as PENDING with resolved approvers
-      // Same eligibility rule creation uses — see
-      // policyStepApproverEligibility. Without this, editing a live policy
-      // could install an approver that creating the same instance would have
-      // dropped, and that approver is binding (submitApprovalAction re-checks
-      // nothing). An ineligible source resolves to NOBODY here, so the step
-      // below takes the existing "resolves to nobody" branch: it stalls rather
-      // than silently granting authority.
-      const addEligibility = await policyStepApproverEligibility(
-        d.newStep, instance.entity_type,
-        {
-          hospitality_company_id: instance.hospitality_company_id,
-          hotel_id: instance.hotel_id,
-          department_id: resolveDeptId,
-          process_id: instance.process_id || null,
-        }, t
-      );
-      if (!addEligibility.eligible) {
-        logger.warn(
-          `[PropagateGate] STEP_ADDED: policy step ${d.newStep.id} source ` +
-          `${d.newStep.approver_source_type}/${d.newStep.approver_source_id} is INELIGIBLE ` +
-          `for ${instance.entity_type} (${addEligibility.reason}, resource '${addEligibility.resource}') — ` +
-          `resolving to nobody on instance ${instance.id} instead of installing them.`
-        );
-      }
-
-      const newResolvedIds = addEligibility.eligible
-        ? await resolveApprovers(
-            d.newStep, instance.hospitality_company_id, instance.hotel_id,
-            resolveDeptId, t, null, instance.process_id || null
-          )
-        : [];
-
-      if (newResolvedIds.length === 0) {
-        // A NEW authority that resolves to nobody RIGHT NOW must BLOCK, not
-        // vanish. It is inserted PENDING with zero approvers so the instance
-        // stalls until somebody is granted the role.
-        //
-        // This used to insert SKIPPED, and the comment claimed it matched
-        // createApprovalInstance. It does not: creation DROPS such a step (it
-        // never exists and never consumes a step number), whereas this path
-        // wrote a terminal row that silently satisfied a mandatory level.
-        //
-        // That difference voided the final authority on two production POs
-        // (138699 / 138701). An admin added a 4th approval level at 20:57 and
-        // granted the role ten hours later; the level had already been written
-        // SKIPPED, the add-approver reconciler only looks at PENDING steps
-        // (see revalidateApproverMembership PART 2), so the grant could never
-        // reach it, and both POs completed without their final approver.
-        //
-        // Inserting PENDING is what makes this recoverable: the same reconciler
-        // now finds the step the moment the role is granted and fills it in.
-        // Failing closed on a financial control is the right trade — a stalled
-        // approval is visible and fixable; a bypassed one is neither.
-        const blockedStep = await t.one(
-          `INSERT INTO tbl_approval_instance_steps
-           (approval_instance_id, step_order, decision_rule, status, policy_step_id, added_mid_flight)
-           VALUES ($1, $2, $3, 'PENDING', $4, true) RETURNING id`,
-          [instance.id, insertPosition, d.newStep.decision_rule || 'ANY', d.newStep.id]
-        );
-
-        // Say so loudly. The old path emitted nothing — no log, no audit row,
-        // only an undifferentiated count in the change summary — which is why
-        // this went unnoticed for a week.
-        logger.error(
-          {
-            instance_id: instance.id,
-            entity_type: instance.entity_type,
-            entity_id: instance.entity_id,
-            step_order: insertPosition,
-            policy_step_id: d.newStep.id,
-            approver_source_type: d.newStep.approver_source_type,
-            approver_source_id: d.newStep.approver_source_id,
-          },
-          '[ApprovalPropagation] BLOCKED: a policy step was added to a live instance but resolves to no approvers. The approval cannot proceed until somebody holds that role in scope.'
-        );
-
-        await t.none(
-          `INSERT INTO tbl_approval_actions
-             (approval_instance_id, approval_instance_step_id, approver_user_id, action, comment)
-           VALUES ($1, $2, $3, 'STEP_ADDED', $4)`,
-          [
-            instance.id,
-            blockedStep.id,
-            instance.initiated_by,
-            `Step ${insertPosition} added by a policy change but resolves to no approver in this scope — approval is blocked here until the role is granted.`,
-          ]
-        );
-
-        result.stepsAdded.push({
-          step_order: insertPosition,
-          status: 'PENDING',
-          blocked: true,
-          reason: 'NO_APPROVERS_RESOLVED',
-        });
-      } else {
-        const newInstStep = await t.one(
-          `INSERT INTO tbl_approval_instance_steps
-           (approval_instance_id, step_order, decision_rule, status, policy_step_id, added_mid_flight)
-           VALUES ($1, $2, $3, 'PENDING', $4, true) RETURNING *`,
-          [instance.id, insertPosition, d.newStep.decision_rule || 'ANY', d.newStep.id]
-        );
-
-        for (const userId of newResolvedIds) {
-          const isInitiator = userId === instance.initiated_by;
-          const status = isInitiator ? 'APPROVED' : 'PENDING';
-          const comment = null;
-
-          await t.none(
-            `INSERT INTO tbl_approval_step_approvers
-             (approval_instance_step_id, approver_user_id, status, added_mid_flight, acted_at, comment)
-             VALUES ($1, $2, $3, true, $4, $5)`,
-            [newInstStep.id, userId, status, isInitiator ? new Date() : null, comment]
-          );
-
-          if (isInitiator) {
-            await t.none(
-              `INSERT INTO tbl_approval_actions
-               (approval_instance_id, approval_instance_step_id, approver_user_id, action, comment)
-               VALUES ($1, $2, $3, 'APPROVE', NULL)`,
-              [instance.id, newInstStep.id, userId]
-            );
-          }
-
-          result.approversAdded.push({ user_id: userId, step_order: insertPosition, auto_approved: isInitiator });
-        }
-
-        await t.none(
-          `INSERT INTO tbl_approval_actions
-           (approval_instance_id, approval_instance_step_id, approver_user_id, action, comment)
-           VALUES ($1, $2, $3, 'STEP_ADDED', 'Step added due to policy change')`,
-          [instance.id, newInstStep.id, changedBy]
-        );
-
-        result.stepsAdded.push({ step_order: insertPosition, status: 'PENDING', approverCount: newResolvedIds.length });
-      }
-    }
-
-    renumberOffset++;
   }
 
   return result;
@@ -1443,10 +1512,10 @@ function stepIdMapFromDiff(diff) {
  * after the old rows were deleted. A step in the diff carries its old row; a
  * step absent from the diff was paired by identity with nothing changed —
  * position included, or it would be STEP_MOVED — so its old step_order is its
- * new row's step_order, which is readable in this transaction. Returns null
- * (ordinal fallback disabled) if any of that cannot be established.
+ * new row's step_order (`newOrderById`). Returns null (ordinal fallback
+ * disabled) if any of that cannot be established.
  */
-async function rebuildOldStepIdByOrder(diff, stepIdMap, t) {
+function rebuildOldStepIdByOrder(diff, stepIdMap, newOrderById) {
   const byOrder = new Map();
   const inDiff = new Set();
   for (const d of diff) {
@@ -1454,31 +1523,30 @@ async function rebuildOldStepIdByOrder(diff, stepIdMap, t) {
     inDiff.add(Number(d.oldStep.id));
     byOrder.set(stepOrderOf(d.oldStep), Number(d.oldStep.id));
   }
-  const unchanged = [...stepIdMap].filter(([oldId]) => !inDiff.has(Number(oldId)));
-  if (unchanged.length > 0) {
-    const rows = await t.any(
-      'SELECT id, step_order FROM tbl_approval_policy_steps WHERE id = ANY($1::int[])',
-      [unchanged.map(([, newId]) => Number(newId))]
-    );
-    const orderOfNew = new Map(rows.map(r => [Number(r.id), Number(r.step_order)]));
-    for (const [oldId, newId] of unchanged) {
-      const order = orderOfNew.get(Number(newId));
-      if (order === undefined || byOrder.has(order)) return null;
-      byOrder.set(order, Number(oldId));
-    }
+  for (const [oldId, newId] of stepIdMap) {
+    if (inDiff.has(Number(oldId))) continue;
+    const order = newOrderById.get(Number(newId));
+    if (order === undefined || byOrder.has(order)) return null;
+    byOrder.set(order, Number(oldId));
   }
   return byOrder;
 }
 
-/** Re-point instance steps at new policy step rows, by instance step id. */
-async function repointInstanceSteps(stepIds, newPolicyStepIds, t) {
+/**
+ * Re-point instance steps at new policy step rows, by instance step id —
+ * confined to one instance, or to the pending instances of one policy.
+ */
+async function repointInstanceSteps(stepIds, newPolicyStepIds, t, { instanceId = null, policyId = null }) {
   if (stepIds.length === 0) return;
   await t.none(
     `UPDATE tbl_approval_instance_steps ais
         SET policy_step_id = m.new_policy_step_id
        FROM unnest($1::int[], $2::int[]) AS m(instance_step_id, new_policy_step_id)
-      WHERE ais.id = m.instance_step_id`,
-    [stepIds, newPolicyStepIds]
+      WHERE ais.id = m.instance_step_id
+        AND ($3::int IS NULL OR ais.approval_instance_id = $3)
+        AND ($4::int IS NULL OR ais.approval_instance_id IN (
+              SELECT id FROM tbl_approval_instances WHERE approval_policy_id = $4 AND status = 'PENDING'))`,
+    [stepIds, newPolicyStepIds, instanceId, policyId]
   );
 }
 
@@ -1514,7 +1582,7 @@ export async function propagatePolicyChangeToInstances({ policyId, diff, changed
         stepIds.push(instanceStepId);
         newIds.push(Number(newId));
       }
-      await repointInstanceSteps(stepIds, newIds, t);
+      await repointInstanceSteps(stepIds, newIds, t, { policyId });
       linksRestored = stepIds.length;
     }
     return { instancesAffected: 0, details: [], linksRestored };
@@ -1539,7 +1607,19 @@ export async function propagatePolicyChangeToInstances({ policyId, diff, changed
   }
 
   const newStepIdFor = stepIdMap || stepIdMapFromDiff(diff);
-  const oldStepIdByOrder = stepIdMap ? await rebuildOldStepIdByOrder(diff, stepIdMap, t) : null;
+  // With the full old→new map the new policy is known end to end: read its
+  // rows (inserted in this transaction) for their step_order. That places
+  // added levels by their neighbours and rebuilds the old ordinal map.
+  let newOrderById = null;
+  let oldStepIdByOrder = null;
+  if (stepIdMap) {
+    const newRows = await t.any(
+      'SELECT id, step_order FROM tbl_approval_policy_steps WHERE approval_policy_id = $1',
+      [policyId]
+    );
+    newOrderById = new Map(newRows.map(r => [Number(r.id), Number(r.step_order)]));
+    oldStepIdByOrder = rebuildOldStepIdByOrder(diff, stepIdMap, newOrderById);
+  }
 
   const details = [];
   const allApproversAdded = [];
@@ -1557,7 +1637,7 @@ export async function propagatePolicyChangeToInstances({ policyId, diff, changed
     );
 
     const { stepOrigins, ...instanceResult } = await applyDiffToInstance(
-      instance, diff, policy, changedBy, t, { instanceLinks, oldStepIdByOrder }
+      instance, diff, policy, changedBy, t, { instanceLinks, oldStepIdByOrder, stepIdMap, newOrderById }
     );
 
     // Re-point EVERY instance step whose originating level is known at that
@@ -1574,7 +1654,8 @@ export async function propagatePolicyChangeToInstances({ policyId, diff, changed
     await repointInstanceSteps(
       stepsRelinked.map(r => r.instance_step_id),
       stepsRelinked.map(r => r.to_policy_step_id),
-      t
+      t,
+      { instanceId: instance.id }
     );
 
     // Update policy_version on instance

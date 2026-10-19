@@ -887,7 +887,10 @@ const hospitalityApprovalController = {
           const previewDiff = computePolicyStepDiff(oldSteps, proposedSteps);
           logger.info(`[PolicyUpdate] Pre-flight diff: ${previewDiff.length} changes — ${JSON.stringify(previewDiff.map(summarizeDiffEntry))}`);
 
-          if (previewDiff.length > 0 && !confirmed_approval_impact) {
+          // A diff of only STEP_MOVED changes nothing on any pending instance —
+          // propagation just re-points links — so it is not an impact to warn about.
+          const changesPendingApprovals = previewDiff.some(d => d.type !== 'STEP_MOVED');
+          if (changesPendingApprovals && !confirmed_approval_impact) {
             const pendingInstances = await getPendingInstancesForPolicy(id);
             logger.info(`[PolicyUpdate] Pre-flight pending instances for policy ${id}: ${pendingInstances.length}`);
 

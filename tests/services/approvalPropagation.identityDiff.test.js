@@ -142,7 +142,9 @@ const ADMIN_ID = 85401; // performs every edit; user_type 7 for requireCompanyAd
 const A_ID = 85402;
 const B_ID = 85403;
 const C_ID = 85404;
-const ALL_USERS = [ADMIN_ID, A_ID, B_ID, C_ID];
+const D_ID = 85405;
+const APPROVERS = [A_ID, B_ID, C_ID, D_ID];
+const ALL_USERS = [ADMIN_ID, ...APPROVERS];
 
 // Role 4 (Tender Approver) holds rfq.read + rfq.approve; role 2 (Tender
 // Creator) holds rfq.read only — a ROLE step naming it is DROPPED when an
@@ -161,6 +163,15 @@ const POLICIES = {
   published: { id: 65405, hotel: IDS.hotels.A2, dept: IDS.departments.eng },
   sameApproverTwice: { id: 65406, hotel: IDS.hotels.A3, dept: IDS.departments.eng },
   resave: { id: 65407, hotel: IDS.hotels.A1, dept: IDS.departments.fb },
+  addBeforeCurrent: { id: 65408, hotel: IDS.hotels.A1, dept: IDS.departments.proc },
+  replaceCurrent: { id: 65409, hotel: IDS.hotels.A1, dept: IDS.departments.eng },
+  addInFrontAndRemoveCurrent: { id: 65410, hotel: IDS.hotels.A1, dept: IDS.departments.hk },
+  addInFront: { id: 65411, hotel: IDS.hotels.A2, dept: IDS.departments.proc },
+  removeLast: { id: 65412, hotel: IDS.hotels.A3, dept: IDS.departments.proc },
+  // Every process-NULL tuple at hospitality A is now taken; this one is scoped
+  // to process P2 (fixture RFQ policies are all department NULL).
+  reorder: { id: 65413, hotel: IDS.hotels.A2, dept: IDS.departments.fb, process: IDS.processes.A_P2 },
+  twoEdits: { id: 65414, hotel: IDS.hotels.A3, dept: IDS.departments.fb, process: IDS.processes.A_P2 },
 };
 const POLICY_IDS = Object.values(POLICIES).map((p) => p.id);
 
@@ -173,6 +184,13 @@ const POLICY_STEPS = [
   [POLICIES.published, [[65451, 1, "USER", A_ID], [65452, 2, "USER", B_ID]]],
   [POLICIES.sameApproverTwice, [[65461, 1, "USER", A_ID], [65462, 2, "USER", B_ID], [65463, 3, "USER", A_ID]]],
   [POLICIES.resave, [[65471, 1, "USER", A_ID], [65472, 2, "USER", B_ID]]],
+  [POLICIES.addBeforeCurrent, [[65481, 1, "USER", A_ID], [65482, 2, "USER", B_ID]]],
+  [POLICIES.replaceCurrent, [[65491, 1, "USER", A_ID], [65492, 2, "USER", B_ID], [65493, 3, "USER", C_ID]]],
+  [POLICIES.addInFrontAndRemoveCurrent, [[65501, 1, "USER", A_ID], [65502, 2, "USER", B_ID]]],
+  [POLICIES.addInFront, [[65511, 1, "USER", A_ID], [65512, 2, "USER", B_ID]]],
+  [POLICIES.removeLast, [[65521, 1, "USER", A_ID], [65522, 2, "USER", B_ID]]],
+  [POLICIES.reorder, [[65531, 1, "USER", A_ID], [65532, 2, "USER", B_ID]]],
+  [POLICIES.twoEdits, [[65541, 1, "USER", A_ID], [65542, 2, "USER", D_ID], [65543, 3, "USER", B_ID]]],
 ];
 
 // Instances are built at A2 / Procurement whatever the policy's own tuple.
@@ -317,9 +335,10 @@ beforeAll(async () => {
      VALUES ($1, 'Identity Admin', 'identity.admin@test.local', '9000085401', 'x', 7, 1, $5),
             ($2, 'Identity A',     'identity.a@test.local',     '9000085402', 'x', 2, 1, $5),
             ($3, 'Identity B',     'identity.b@test.local',     '9000085403', 'x', 2, 1, $5),
-            ($4, 'Identity C',     'identity.c@test.local',     '9000085404', 'x', 2, 1, $5)
+            ($4, 'Identity C',     'identity.c@test.local',     '9000085404', 'x', 2, 1, $5),
+            ($6, 'Identity D',     'identity.d@test.local',     '9000085405', 'x', 2, 1, $5)
      ON CONFLICT (id) DO NOTHING`,
-    [ADMIN_ID, A_ID, B_ID, C_ID, IDS.companies.A]
+    [ADMIN_ID, A_ID, B_ID, C_ID, IDS.companies.A, D_ID]
   );
   await db.none(`UPDATE tbl_users SET user_type = 7, status = 1 WHERE id = $1`, [ADMIN_ID]);
 
@@ -328,12 +347,12 @@ beforeAll(async () => {
   // a USER step naming them qualifies and a ROLE step on role 4 resolves them.
   await db.none(
     `INSERT INTO tbl_hospitality_user_mappings (user_id, hospitality_company_id, hospitality_hotel_id, mapping_type)
-     VALUES ($1, $5, NULL, 0), ($2, $5, $6, 1), ($3, $5, $6, 1), ($4, $5, $6, 1)
+     VALUES ($1, $5, NULL, 0), ($2, $5, $6, 1), ($3, $5, $6, 1), ($4, $5, $6, 1), ($7, $5, $6, 1)
      ON CONFLICT DO NOTHING`,
-    [ADMIN_ID, A_ID, B_ID, C_ID, IDS.hospitality.A, INSTANCE_HOTEL]
+    [ADMIN_ID, A_ID, B_ID, C_ID, IDS.hospitality.A, INSTANCE_HOTEL, D_ID]
   );
-  await db.none(`DELETE FROM tbl_user_role_scopes WHERE user_id = ANY($1::int[])`, [[A_ID, B_ID, C_ID]]);
-  for (const userId of [A_ID, B_ID, C_ID]) {
+  await db.none(`DELETE FROM tbl_user_role_scopes WHERE user_id = ANY($1::int[])`, [APPROVERS]);
+  for (const userId of APPROVERS) {
     await db.none(
       `INSERT INTO tbl_user_role_scopes (user_id, role_id, company_id, hotel_id, department_id, process_id)
        VALUES ($1, $2, $3, NULL, $4, NULL)`,
@@ -366,9 +385,9 @@ beforeAll(async () => {
     await db.none(
       `INSERT INTO tbl_approval_policies
          (id, entity_type, hospitality_company_id, hotel_id, department_id, process_id, is_active, created_by)
-       VALUES ($1, 'RFQ', $2, $3, $4, NULL, true, $5)
+       VALUES ($1, 'RFQ', $2, $3, $4, $6, true, $5)
        ON CONFLICT (id) DO NOTHING`,
-      [policy.id, IDS.hospitality.A, policy.hotel, policy.dept, ADMIN_ID]
+      [policy.id, IDS.hospitality.A, policy.hotel, policy.dept, ADMIN_ID, policy.process ?? null]
     );
     for (const [stepId, order, sourceType, sourceId] of rows) {
       await db.none(
@@ -547,6 +566,159 @@ describe("editing a live policy never auto-completes an in-flight approval", () 
     const newIds = await policyStepIds(policy.id);
     expect(newIds[1]).not.toBe(65471);
     expect((await instanceStepsOf(instance.id)).map((s) => s.policy_step_id)).toEqual([newIds[1], newIds[2]]);
+  });
+});
+
+describe("an edit that adds levels never lets an in-flight approval skip or finish early", () => {
+  // Every case: A has approved level 1, the instance is waiting on B.
+  async function waitingOnB(policy) {
+    const instance = await makeInstance(policy);
+    await approveStep(instance.id, A_ID);
+    expect(await instanceRow(instance.id)).toMatchObject({ status: "PENDING", current_step: 2 });
+    return instance;
+  }
+  const shape = async (instanceId) =>
+    (await instanceStepsOf(instanceId)).map((s) => [s.step_order, s.status, s.policy_step_id]);
+
+  it("[A,B] -> [A,X,B] waiting at B: X becomes the current step and B waits after it", async () => {
+    const policy = POLICIES.addBeforeCurrent;
+    const instance = await waitingOnB(policy);
+
+    const client = await httpClient(ADMIN_ID);
+    const res = await editPolicy(client, policy, [step(1, "USER", A_ID), step(2, "USER", C_ID), step(3, "USER", B_ID)]);
+    expect(res.status).toBe(200);
+
+    // Placed by position, X landed on the current step's number, the current
+    // step was pushed down and X was written SKIPPED — never asked.
+    const newIds = await policyStepIds(policy.id);
+    expect(await shape(instance.id)).toEqual([
+      [1, "APPROVED", newIds[1]],
+      [2, "PENDING", newIds[2]], // X — the added level, current
+      [3, "PENDING", newIds[3]], // B — still owed, after X
+    ]);
+    expect(await instanceRow(instance.id)).toMatchObject({ status: "PENDING", current_step: 2 });
+    expect(await approverStatusAt(instance.id, 2, C_ID)).toBe("PENDING");
+    expect(await approverStatusAt(instance.id, 3, B_ID)).toBe("PENDING");
+
+    await approveStep(instance.id, C_ID);
+    expect(await instanceRow(instance.id)).toMatchObject({ status: "PENDING", current_step: 3 });
+    await approveStep(instance.id, B_ID);
+    expect((await instanceRow(instance.id)).status).toBe("APPROVED");
+  });
+
+  it("[A,B,C] -> [A,C,D] waiting at B: the instance moves on to C and D waits after it", async () => {
+    const policy = POLICIES.replaceCurrent;
+    const instance = await waitingOnB(policy);
+
+    const client = await httpClient(ADMIN_ID);
+    const res = await editPolicy(client, policy, [step(1, "USER", A_ID), step(2, "USER", C_ID), step(3, "USER", D_ID)]);
+    expect(res.status).toBe(200);
+
+    const newIds = await policyStepIds(policy.id);
+    expect(await shape(instance.id)).toEqual([
+      [1, "APPROVED", newIds[1]],
+      [2, "REMOVED", null], // B — its level was removed
+      [3, "PENDING", newIds[2]], // C — now current
+      [4, "PENDING", newIds[3]], // D — added after C, not skipped
+    ]);
+    expect(await instanceRow(instance.id)).toMatchObject({ status: "PENDING", current_step: 3 });
+    expect(await approverStatusAt(instance.id, 4, D_ID)).toBe("PENDING");
+  });
+
+  it("[A,B] -> [C,A] with A approved, waiting at B: C becomes the current step, nothing completes", async () => {
+    const policy = POLICIES.addInFrontAndRemoveCurrent;
+    const instance = await waitingOnB(policy);
+
+    const client = await httpClient(ADMIN_ID);
+    const res = await editPolicy(client, policy, [step(1, "USER", C_ID), step(2, "USER", A_ID)]);
+    expect(res.status).toBe(200);
+
+    // C lands before A's completed step, but removing B leaves nothing pending:
+    // writing C off as SKIPPED would complete the instance (and fire its
+    // post-approval handler) with C never asked.
+    const newIds = await policyStepIds(policy.id);
+    expect(await shape(instance.id)).toEqual([
+      [1, "PENDING", newIds[1]], // C — the added level, current
+      [2, "APPROVED", newIds[2]], // A
+      [3, "REMOVED", null], // B
+    ]);
+    expect(await instanceRow(instance.id)).toMatchObject({ status: "PENDING", current_step: 1 });
+    expect(await approverStatusAt(instance.id, 1, C_ID)).toBe("PENDING");
+    expect((await lastChangeSummary(instance.id)).autoCompleted).toBe(false);
+  });
+
+  it("[A,B] -> [X,A,B] with A approved, waiting at B: X lands in the completed prefix and is skipped", async () => {
+    const policy = POLICIES.addInFront;
+    const instance = await waitingOnB(policy);
+
+    const client = await httpClient(ADMIN_ID);
+    const res = await editPolicy(client, policy, [step(1, "USER", C_ID), step(2, "USER", A_ID), step(3, "USER", B_ID)]);
+    expect(res.status).toBe(200);
+
+    const newIds = await policyStepIds(policy.id);
+    expect(await shape(instance.id)).toEqual([
+      [1, "SKIPPED", newIds[1]], // X — the instance is already past this point
+      [2, "APPROVED", newIds[2]], // A
+      [3, "PENDING", newIds[3]], // B — still current
+    ]);
+    expect(await instanceRow(instance.id)).toMatchObject({ status: "PENDING", current_step: 3 });
+    expect(await approverStatusAt(instance.id, 1, C_ID)).toBeUndefined();
+  });
+
+  it("[A,B] -> [B,A] (a pure reorder) raises no impact warning and only re-links", async () => {
+    const policy = POLICIES.reorder;
+    const instance = await waitingOnB(policy);
+    const approversBefore = await approverRows(instance.id);
+
+    const client = await httpClient(ADMIN_ID);
+    const res = await editPolicy(client, policy, [step(1, "USER", B_ID), step(2, "USER", A_ID)], { confirmed: false });
+    expect(res.status).toBe(200);
+    expect(res.body.code).toBeUndefined();
+    expect(res.body.status).toBe(1);
+
+    const newIds = await policyStepIds(policy.id);
+    expect(await shape(instance.id)).toEqual([
+      [1, "APPROVED", newIds[2]], // A's step, linked to A's new level 2
+      [2, "PENDING", newIds[1]], // B's step, linked to B's new level 1
+    ]);
+    expect(await approverRows(instance.id)).toEqual(approversBefore);
+    expect(await instanceRow(instance.id)).toMatchObject({ status: "PENDING", current_step: 2 });
+  });
+
+  it("a level added in front of the current step lands there even past an earlier removed step", async () => {
+    // [A, D, B]: A approves; a first edit drops D (instance moves on to B,
+    // leaving D's step REMOVED between A and B); a second edit adds X before B.
+    const policy = POLICIES.twoEdits;
+    const instance = await waitingOnB(policy); // waiting on D at step 2
+    const client = await httpClient(ADMIN_ID);
+    expect((await editPolicy(client, policy, [step(1, "USER", A_ID), step(2, "USER", B_ID)])).status).toBe(200);
+    expect(await instanceRow(instance.id)).toMatchObject({ status: "PENDING", current_step: 3 });
+
+    const res = await editPolicy(client, policy, [step(1, "USER", A_ID), step(2, "USER", C_ID), step(3, "USER", B_ID)]);
+    expect(res.status).toBe(200);
+
+    // X goes immediately before B — the current step — and so becomes current.
+    // Placed right after A instead, it would sit before the REMOVED step, read
+    // as "inside the completed prefix", and be skipped.
+    const newIds = await policyStepIds(policy.id);
+    expect(await shape(instance.id)).toEqual([
+      [1, "APPROVED", newIds[1]],
+      [2, "REMOVED", null],
+      [3, "PENDING", newIds[2]], // X — current
+      [4, "PENDING", newIds[3]], // B
+    ]);
+    expect(await instanceRow(instance.id)).toMatchObject({ status: "PENDING", current_step: 3 });
+  });
+
+  it("[A,B] -> [A] waiting at B: removing the last pending level with no additions still completes", async () => {
+    const policy = POLICIES.removeLast;
+    const instance = await waitingOnB(policy);
+
+    const client = await httpClient(ADMIN_ID);
+    const res = await editPolicy(client, policy, [step(1, "USER", A_ID)]);
+    expect(res.status).toBe(200);
+
+    expect((await instanceRow(instance.id)).status).toBe("APPROVED");
   });
 });
 
