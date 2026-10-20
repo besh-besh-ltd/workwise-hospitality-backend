@@ -1605,7 +1605,7 @@ export async function getProcessBlockers(processId, t = db) {
     ),
     t.one(
       `SELECT COUNT(*)::int AS n FROM tbl_arc
-        WHERE process_id = $1 AND status NOT IN ('expired', 'terminated', 'closed_no_award')`,
+        WHERE process_id = $1 AND status NOT IN ('expired', 'terminated', 'closed_no_award', 'committee_rejected')`,
       [processId]
     ),
     t.one(`SELECT COUNT(*)::int AS n FROM tbl_user_role_scopes WHERE process_id = $1`, [processId]),
@@ -1627,25 +1627,36 @@ export function hasProcessBlockers(b) {
 }
 
 /**
- * Soft delete a process (mark as inactive). Callers refuse earlier with
- * getProcessBlockers; this re-checks so no other caller can bypass the guard.
- * @param {number} id - Process ID
+ * Check-and-deactivate in ONE transaction, holding a row lock on the process,
+ * so a concurrent deactivation cannot race the blockers read.
+ *
+ * Known limit: creators of dependents (policies, RFQs, ARCs, role grants) do
+ * not lock the process row, so a dependent inserted between the check and the
+ * commit can still slip through. Closing that fully needs those writers to
+ * take FOR SHARE on the process row; out of scope here.
+ *
+ * @returns {Promise<{deactivated: true} | {deactivated: false, blockers: object}>}
  */
-export async function deleteApprovalProcess(id) {
+export async function deactivateApprovalProcessIfUnused(id) {
   if (!id) throw new Error('Process ID is required');
+  return db.tx(async (t) => {
+    await t.oneOrNone('SELECT id FROM tbl_approval_processes WHERE id = $1 FOR UPDATE', [id]);
+    const blockers = await getProcessBlockers(id, t);
+    if (hasProcessBlockers(blockers)) return { deactivated: false, blockers };
+    await t.none('UPDATE tbl_approval_processes SET is_active = false, updated_at = NOW() WHERE id = $1', [id]);
+    return { deactivated: true };
+  });
+}
 
-  const blockers = await getProcessBlockers(id);
-  if (hasProcessBlockers(blockers)) {
+/** Soft delete a process; throws PROCESS_IN_USE (with .blockers) when it is still in use. */
+export async function deleteApprovalProcess(id) {
+  const r = await deactivateApprovalProcessIfUnused(id);
+  if (!r.deactivated) {
     const err = new Error('This process is still in use');
     err.code = 'PROCESS_IN_USE';
-    err.blockers = blockers;
+    err.blockers = r.blockers;
     throw err;
   }
-
-  return db.none(
-    'UPDATE tbl_approval_processes SET is_active = false, updated_at = NOW() WHERE id = $1',
-    [id]
-  );
 }
 
 // ============= APPROVAL POLICIES =============

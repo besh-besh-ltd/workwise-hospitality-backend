@@ -21,8 +21,7 @@ import generalModel, {
   createApprovalProcess,
   getApprovalProcesses,
   updateApprovalProcess,
-  getProcessBlockers,
-  hasProcessBlockers,
+  deactivateApprovalProcessIfUnused,
   getPolicyCoverage,
   deleteApprovalProcess,
   getDepartmentSubGraphPreview,
@@ -2143,9 +2142,16 @@ const processController = {
       // process_type is fixed at creation: a PUT carrying it is ignored.
 
       // Deactivating via PUT must obey the same in-use guard as DELETE.
+      // Check + deactivate happen atomically in the model; remaining fields
+      // (name/description) are applied by the update below.
       if (is_active === false || is_active === 'false' || is_active === 0) {
-        const blockers = await getProcessBlockers(parseInt(id));
-        if (hasProcessBlockers(blockers)) return respondProcessInUse(res, blockers);
+        const r = await deactivateApprovalProcessIfUnused(parseInt(id));
+        if (!r.deactivated) return respondProcessInUse(res, r.blockers);
+        delete patch.is_active;
+        if (Object.keys(patch).length === 0) {
+          const row = await db.oneOrNone('SELECT * FROM tbl_approval_processes WHERE id = $1', [parseInt(id)]);
+          return res.json({ status: 1, data: row });
+        }
       }
 
       const data = await updateApprovalProcess(parseInt(id), patch);
@@ -2171,8 +2177,6 @@ const processController = {
       // SECURITY: same cross-tenant hole as updateProcess, but destructive —
       // deactivating a process silently unroutes every policy hanging off it.
       if (!(await guardProcessTenant(req, res, parseInt(id)))) return;
-      const blockers = await getProcessBlockers(parseInt(id));
-      if (hasProcessBlockers(blockers)) return respondProcessInUse(res, blockers);
       await deleteApprovalProcess(parseInt(id));
       res.json({ status: 1, message: 'Process deactivated successfully' });
     } catch (e) {

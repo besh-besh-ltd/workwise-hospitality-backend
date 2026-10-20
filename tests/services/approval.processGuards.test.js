@@ -102,6 +102,38 @@ describe("DELETE process refuses while in use", () => {
     expect(res.status).toBe(200);
   });
 
+  it("an ARC in a terminal status (committee_rejected) does not block; a non-terminal one (tech_eval_rejected) does", async () => {
+    const arc = async (status) => {
+      const base = await db.one(`SELECT category_id, department_id FROM tbl_arc LIMIT 1`).catch(() => null);
+      const cat = base?.category_id ?? (await db.one(`SELECT id AS category_id FROM tbl_category LIMIT 1`)).category_id;
+      const dept = base?.department_id ?? (await db.one(`SELECT id AS department_id FROM tbl_department LIMIT 1`)).department_id;
+      const { id } = await db.one(
+        `INSERT INTO tbl_arc (arc_number, title, category_id, hospitality_company_id, hotel_id, department_id,
+                              process_id, status, created_by)
+         VALUES ($1, 'guard arc', $2, $3, $4, $5, $6, $7, $8) RETURNING id`,
+        [`GUARD-${Date.now()}-${Math.floor(Math.random() * 1e6)}`, cat, IDS.hospitality.A, IDS.hotels.A1, dept, processId, status, ADMIN]
+      );
+      return Number(id);
+    };
+    const client = await httpClient(ADMIN);
+    const terminal = await arc("committee_rejected");
+    try {
+      const ok = await client.put(`${PROC_URL}/${processId}`).send({ is_active: false });
+      expect(ok.status).toBe(200);
+      await db.none(`UPDATE tbl_approval_processes SET is_active = true WHERE id=$1`, [processId]);
+      const open = await arc("tech_eval_rejected");
+      try {
+        const res = await client.delete(`${PROC_URL}/${processId}`);
+        expect(res.status).toBe(409);
+        expect(res.body.data.blockers.open_arcs).toBe(1);
+      } finally {
+        await db.none(`DELETE FROM tbl_arc WHERE id = $1`, [open]);
+      }
+    } finally {
+      await db.none(`DELETE FROM tbl_arc WHERE id = $1`, [terminal]);
+    }
+  });
+
   it("a role grant blocks it", async () => {
     grantIds.push(await grantRoleScope(db, {
       userId: IDS.users.a1_proc_buyer, roleId: 2, companyId: IDS.hospitality.A, processId,
