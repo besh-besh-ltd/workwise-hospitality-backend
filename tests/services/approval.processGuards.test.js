@@ -212,6 +212,17 @@ describe("GET policy-coverage", () => {
     expect(res.body.data.process_free).toContain("TENDER");
   });
 
+  it("a policy sitting on an INACTIVE process is not reported under that process", async () => {
+    await newPolicy("RFQ", processId);
+    // Deactivated behind the guard's back (legacy data): the process can no
+    // longer be picked, so its policies must not read as coverage.
+    await db.none(`UPDATE tbl_approval_processes SET is_active = false WHERE id = $1`, [processId]);
+    const client = await httpClient(ADMIN);
+    const res = await client.get(`${COVERAGE_URL}?hotel_id=${IDS.hotels.A1}`);
+    expect(res.status).toBe(200);
+    expect(Object.keys(res.body.data.by_process)).not.toContain(String(processId));
+  });
+
   it("a policy at another hotel does not count for this hotel", async () => {
     await newPolicy("RFQ", processId, IDS.hotels.A2);
     const client = await httpClient(ADMIN);

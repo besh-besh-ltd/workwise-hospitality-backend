@@ -1985,6 +1985,9 @@ export async function findBestMatchingPoliciesWithSteps(entityTypes, { hospitali
  * (department_id IS NULL), hotel-specific or hotel-wide, process-specific or
  * process-free. A process-free policy matches every process, so its types
  * appear under `process_free` and are also folded into every `by_process`.
+ * `by_process` is keyed by the ACTIVE processes in scope only: a policy that
+ * still sits on an inactive (or out-of-scope) process covers nothing anyone
+ * can pick, so it is not reported.
  *
  * @param {object} p
  * @param {number|number[]|null} p.hospitalityCompanyId company, companies, or null = all
@@ -2019,7 +2022,8 @@ export async function getPolicyCoverage({ hospitalityCompanyId, hotelId = null }
   for (const pr of processes) byProcess[String(pr.id)] = new Set(free);
   for (const r of policies) {
     if (r.process_id === null) continue;
-    (byProcess[String(r.process_id)] ||= new Set()).add(r.entity_type);
+    const types = byProcess[String(r.process_id)];
+    if (types) types.add(r.entity_type); // absent = inactive / out-of-scope process
   }
   const out = {};
   for (const [k, v] of Object.entries(byProcess)) out[k] = [...v].sort();

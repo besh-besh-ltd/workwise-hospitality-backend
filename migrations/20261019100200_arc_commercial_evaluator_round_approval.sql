@@ -13,6 +13,8 @@
 -- missing (stage has none), with NOT EXISTS because tbl_permissions has no unique
 -- key. Fully idempotent.
 
+BEGIN;
+
 INSERT INTO public.tbl_permissions (resource, action, ordering)
 SELECT 'arc-comm'::public.resource_type, 'approve'::public.permission_action_type, 0
 WHERE NOT EXISTS (
@@ -34,3 +36,5 @@ WHERE r.created_by IS NULL
     SELECT 1 FROM public.tbl_role_permissions rp
     WHERE rp.role_id = r.id AND rp.permission_id = p.id
   );
+
+COMMIT;
