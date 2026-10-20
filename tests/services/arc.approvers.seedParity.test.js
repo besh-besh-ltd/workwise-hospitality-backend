@@ -292,9 +292,16 @@ describe("20261019100200_arc_commercial_evaluator_round_approval", () => {
              (SELECT id FROM tbl_permissions WHERE resource::text='arc-comm' AND action::text='approve')`
         );
         await client.query(`DELETE FROM tbl_permissions WHERE resource::text='arc-comm' AND action::text='approve'`);
-        await client.query(
-          `UPDATE tbl_roles SET id = 99025 WHERE created_by IS NULL AND title='ARC Commercial Evaluator'`
-        ).catch(() => {});
+        // No FK on role_id, so move the role AND its remaining grants together.
+        const oldId = (await client.query(
+          `SELECT id FROM tbl_roles WHERE created_by IS NULL AND title='ARC Commercial Evaluator'`
+        )).rows[0].id;
+        await client.query(`UPDATE tbl_role_permissions SET role_id = 99025 WHERE role_id = $1`, [oldId]);
+        await client.query(`UPDATE tbl_roles SET id = 99025 WHERE id = $1`, [oldId]);
+        const moved = (await client.query(
+          `SELECT id FROM tbl_roles WHERE created_by IS NULL AND title='ARC Commercial Evaluator'`
+        )).rows;
+        expect(moved).toEqual([{ id: 99025 }]);
         expect((await client.query(COUNTS_SQL)).rows[0]).toEqual({ perms: 0, grants: 0 });
 
         await client.query(MIG);

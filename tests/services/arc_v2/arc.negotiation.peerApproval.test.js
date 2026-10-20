@@ -31,6 +31,8 @@ const D = (days) => new Date(Date.now() + days * 86400_000).toISOString();
 describe("ARC negotiation — Commercial Evaluators approve peers' rounds", () => {
   let roleId;
   const arcIds = [];
+  let originalUsers = [];
+  let insertedCategoryDept = false;
 
   async function seedArc(num, hotel) {
     const arc = await db.one(
@@ -90,13 +92,19 @@ describe("ARC negotiation — Commercial Evaluators approve peers' rounds", () =
     );
 
   beforeAll(async () => {
+    originalUsers = await db.any(
+      `SELECT id, user_type, status FROM tbl_users WHERE id = ANY($1::int[])`,
+      [[EVAL_1, EVAL_2, EVAL_3, VENDOR_A]]
+    );
     await db.none(`UPDATE tbl_users SET user_type = 2, status = 1 WHERE id = ANY($1::int[])`,
       [[EVAL_1, EVAL_2, EVAL_3]]);
     await db.none(`UPDATE tbl_users SET user_type = 3, status = 1 WHERE id = $1`, [VENDOR_A]);
-    await db.none(
-      `INSERT INTO tbl_category_department (category_id, department_id) VALUES ($1, $2) ON CONFLICT DO NOTHING`,
-      [CATEGORY, DEPT]
-    );
+    insertedCategoryDept = !(await db.oneOrNone(
+      `SELECT 1 FROM tbl_category_department WHERE category_id=$1 AND department_id=$2`, [CATEGORY, DEPT]));
+    if (insertedCategoryDept) {
+      await db.none(
+        `INSERT INTO tbl_category_department (category_id, department_id) VALUES ($1, $2)`, [CATEGORY, DEPT]);
+    }
 
     // The REAL system role, found by title (ids differ per environment).
     roleId = (await db.one(
@@ -112,6 +120,10 @@ describe("ARC negotiation — Commercial Evaluators approve peers' rounds", () =
         [SCOPE_BASE + i, scopes[i][0], roleId, HC, scopes[i][1]]
       );
     }
+    const mine = await db.any(
+      `SELECT id FROM tbl_user_role_scopes WHERE id >= $1 AND id < $2 AND role_id = $3`,
+      [SCOPE_BASE, SCOPE_BASE + 3, roleId]);
+    expect(mine).toHaveLength(3);
 
     for (const [pid, hotel] of [[POLICY_ALL, HOTEL]]) {
       await db.none(
@@ -133,6 +145,12 @@ describe("ARC negotiation — Commercial Evaluators approve peers' rounds", () =
   });
 
   afterAll(async () => {
+    for (const u of originalUsers) {
+      await db.none(`UPDATE tbl_users SET user_type=$2, status=$3 WHERE id=$1`, [u.id, u.user_type, u.status]);
+    }
+    if (insertedCategoryDept) {
+      await db.none(`DELETE FROM tbl_category_department WHERE category_id=$1 AND department_id=$2`, [CATEGORY, DEPT]);
+    }
     for (const aid of arcIds) {
       const rounds = await db.any(
         `SELECT id FROM tbl_negotiation_rounds WHERE source_type='ARC' AND source_id=$1`, [aid]);
