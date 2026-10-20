@@ -405,5 +405,30 @@ describe("GET /rfq/quote-comparison-view/:id — stage_actors", () => {
       expect(res.body.approval_chain[0].role).toBe("Approver");
       expect(res.body.approval_chain[0].role).not.toBe(stepUser.name);
     });
+
+    it("labels an approver 'Approver' when the instance step has no resolvable policy step", async () => {
+      // The seeded policy has one step; add a second instance step beyond it.
+      const rfq = await seedRfq({ bidEnd: await istOffsetString("-3 hours") });
+      const instId = await seedPendingQuoteApproval(rfq, [IDS.users.a1_proc_commApp]);
+      await db.none(`UPDATE tbl_approval_instances SET current_step = 2 WHERE id = $1`, [instId]);
+      await db.none(`UPDATE tbl_approval_instance_steps SET status = 'APPROVED' WHERE approval_instance_id = $1`, [instId]);
+      const step2 = await db.one(
+        `INSERT INTO tbl_approval_instance_steps (approval_instance_id, step_order, decision_rule, status)
+         VALUES ($1, 2, 'ANY', 'PENDING') RETURNING id`, [instId]);
+      await db.none(
+        `INSERT INTO tbl_approval_step_approvers (approval_instance_step_id, approver_user_id, status, created_at)
+         VALUES ($1, $2, 'PENDING', (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Kolkata'))`,
+        [step2.id, IDS.users.a1_proc_techApp]);
+
+      const res = await fetchView(IDS.users.a1_proc_buyer, rfq.rfq_id);
+      expect(res.status).toBe(200);
+      const chain2 = res.body.approval_chain.find((c) => c.num === 2);
+      expect(chain2.role).toBe("Approver");
+      const actor = res.body.stage_actors.actors.find((a) => a.user_id === IDS.users.a1_proc_techApp);
+      expect(actor.role).toBe("Approver");
+      const node2 = res.body.products.flatMap((p) => (p.approval ? p.approval.trail : []))
+        .find((n) => n.key === "step-2");
+      expect(node2.role).toBe("Approver");
+    });
   });
 });

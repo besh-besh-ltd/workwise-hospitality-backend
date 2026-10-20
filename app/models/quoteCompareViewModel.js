@@ -1229,9 +1229,9 @@ async function fetchQualifyingRoleTitles(userIds, { companyId, hotelId, entityTy
 // instance step id -> label, ONE batched statement regardless of how many
 // steps. ROLE source -> that role's title. USER source -> title of the role the
 // named user holds that qualifies them for the step, else "Approver" (never the
-// user's name). DEPARTMENT source -> "Approver". A step whose policy step can
-// no longer be resolved is left out of the map (the caller shows no role rather
-// than a wrong one).
+// user's name). DEPARTMENT source, or a step whose policy step can no longer be
+// resolved (policy deleted/shortened) -> "Approver", so the UI never shows a
+// blank line under an approver.
 async function fetchStepRoleLabels(instanceStepIds, t = db) {
   const out = new Map();
   const ids = [...new Set((instanceStepIds || []).map(Number))].filter((n) => Number.isInteger(n) && n > 0);
@@ -1249,14 +1249,13 @@ async function fetchStepRoleLabels(instanceStepIds, t = db) {
        JOIN tbl_approval_instances ai ON ai.id = ais.approval_instance_id
        ${POLICY_STEP_RESOLUTION_SQL}
        LEFT JOIN tbl_roles r ON ps.approver_source_type = 'ROLE' AND r.id = ps.approver_source_id
-      WHERE ais.id = ANY($1::int[])
-        AND ps.matched_policy_step_id IS NOT NULL`,
+      WHERE ais.id = ANY($1::int[])`,
     [ids, resourceMap]
   );
   for (const r of rows) {
     const type = String(r.approver_source_type || "").toUpperCase();
     if (type === "ROLE") {
-      if (r.role_title) out.set(Number(r.step_id), r.role_title);
+      out.set(Number(r.step_id), r.role_title || APPROVER_FALLBACK_LABEL);
     } else if (type === "USER") {
       out.set(Number(r.step_id), r.user_role_title || APPROVER_FALLBACK_LABEL);
     } else {
