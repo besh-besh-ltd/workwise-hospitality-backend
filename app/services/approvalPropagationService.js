@@ -439,30 +439,50 @@ export async function reEvaluateInstanceStep(instanceStepId, t) {
 
   // No approvers left → auto-complete.
   //
-  // But FIRST distinguish the two ways a step can have nobody on it, because
+  // But FIRST distinguish the three ways a step can have nobody on it, because
   // they mean opposite things:
   //
-  //   * It HAD approvers and they were all removed mid-flight. Auto-completing
-  //     is the established behaviour — the step existed and was overtaken by a
-  //     membership change.
+  //   * It HAD approvers and a MEMBERSHIP change removed the last of them
+  //     (role revoked, user deactivated, …). Auto-completing is the
+  //     established behaviour — the step existed and was overtaken by that
+  //     change, and simulateApproverImpact warned about it beforehand.
   //   * It NEVER had a single approver row. That is a step that was added but
   //     could not be filled — it is BLOCKED, waiting for somebody to hold the
   //     role. Auto-approving it would manufacture consent nobody gave, and
   //     would silently undo the blocking behaviour in applyDiffToInstance.
+  //   * A POLICY EDIT emptied it: the edit pointed the level at an approver who
+  //     resolves to nobody in this scope and tombstoned the old approvers
+  //     (removal_reason 'policy_change'). The step still exists in the edited
+  //     policy — it is BLOCKED exactly like the never-filled one. Counting
+  //     those tombstones as "had approvers" approved it, so an edit completed
+  //     the approval and fired its post-approval handler. A policy edit never
+  //     completes a live approval.
   //
-  // The filtered query above cannot tell them apart (a fully-removed step and a
-  // never-populated step both return zero), so count the tombstones too.
+  // The filtered query above cannot tell them apart (all three return zero),
+  // so read the tombstones: how many, and what removed the last of them.
   if (approvers.length === 0) {
-    const everHad = await t.one(
-      `SELECT count(*)::int AS n FROM tbl_approval_step_approvers
-        WHERE approval_instance_step_id = $1`,
+    const history = await t.one(
+      `WITH r AS (
+         SELECT removal_reason, removed_at FROM tbl_approval_step_approvers
+          WHERE approval_instance_step_id = $1
+       )
+       SELECT (SELECT count(*)::int FROM r) AS n,
+              COALESCE((SELECT bool_or(removal_reason = 'policy_change') FROM r
+                         WHERE removed_at = (SELECT max(removed_at) FROM r)), false) AS emptied_by_policy_edit`,
       [instanceStepId]
     );
 
-    if (everHad.n === 0) {
+    if (history.n === 0) {
       logger.warn(
         { instance_step_id: instanceStepId },
         '[ApprovalPropagation] step has never had an approver — leaving it PENDING (blocked) rather than auto-approving an authority nobody exercised'
+      );
+      return { completed: false, status: 'PENDING', blocked: true };
+    }
+    if (history.emptied_by_policy_edit) {
+      logger.warn(
+        { instance_step_id: instanceStepId },
+        '[ApprovalPropagation] step was emptied by a policy edit (its level resolves to nobody) — leaving it PENDING (blocked) rather than approving it through the tombstones'
       );
       return { completed: false, status: 'PENDING', blocked: true };
     }
@@ -619,13 +639,13 @@ async function dispatchPostApprovalHandler(instanceId, changedBy, reason) {
  *
  * ── WHY THIS FAILS OPEN ON AN UNKNOWN RESOURCE ──
  * `tbl_permissions.resource` is the `resource_type` ENUM, and
- * ENTITY_APPROVE_RESOURCE_MAP still does not cover every entity type —
- * ARC_AMENDMENT and INDENT, for instance, fall back to
- * `entity_type.toLowerCase()`, which yields `arc_amendment` / `indent`, neither
- * of them enum members. (ARC_TECH and ARC_COMMITTEE WERE in that group; both are
- * mapped now — see the resource table on ENTITY_APPROVE_RESOURCE_MAP in
- * generalModel.js.) A "false" for an unmapped resource says nothing about the
- * role — it says the map has a hole.
+ * ENTITY_APPROVE_RESOURCE_MAP still does not cover every entity type — INDENT,
+ * for instance, falls back to `entity_type.toLowerCase()`, which yields
+ * `indent`, not an enum member. (ARC_TECH, ARC_COMMITTEE and ARC_AMENDMENT WERE
+ * in that group; all three are mapped now — ARC_AMENDMENT to 'arc' — see the
+ * resource table on ENTITY_APPROVE_RESOURCE_MAP in generalModel.js.) A "false"
+ * for an unmapped resource says nothing about the role — it says the map has a
+ * hole.
  *
  * `roleHasReadAndApprovePermission` no longer RAISES on such a value: it casts
  * the column (`p.resource::text = $2`) so an unknown resource returns false.
@@ -639,8 +659,8 @@ async function dispatchPostApprovalHandler(instanceId, changedBy, reason) {
  * catalogue can actually EXPRESS the requirement — i.e. when BOTH
  * `<resource>.read` and `<resource>.approve` rows exist:
  *
- *   RESOURCE_NOT_IN_CATALOGUE   neither row exists (e.g. 'indent',
- *                               'arc_amendment'). The map has a hole.
+ *   RESOURCE_NOT_IN_CATALOGUE   neither row exists (e.g. 'indent'). The map
+ *                               has a hole.
  *   RESOURCE_CANNOT_SATISFY_GATE  one of the two exists, the other does not.
  *
  * The second case is not hypothetical: production's `tender` resource holds
@@ -817,6 +837,15 @@ async function retireIneligibleRoleStep({ instanceId, stepId, roleId, resource, 
  *   Same reporting standard as PART 1's `unresolvedSteps` in
  *   revalidateApproverMembership. Additions are never unmatched: one that
  *   cannot be placed is appended (`stepsAdded[].placement === 'appended'`).
+ *   A position-paired modification that lands on a closed step is reported as
+ *   an addition (`stepsAdded[].converted_from === 'STEP_MODIFIED'`,
+ *   `replaces_instance_step_id`), not in `stepsModified`. An added or modified
+ *   level that resolves to nobody carries `blocked: true, reason:
+ *   'NO_APPROVERS_RESOLVED'`: its step is PENDING and nobody can approve it.
+ *
+ * INVARIANT: a policy edit never completes a live approval. The only edit
+ * that may close the instance is an explicit removal of its last pending
+ * level with nothing added (`autoCompleted`).
  */
 export async function applyDiffToInstance(instance, diff, policy, changedBy, t, mapping = {}) {
   const { instanceLinks = null, oldStepIdByOrder = null, stepIdMap = null, newOrderById = null } = mapping;
@@ -983,17 +1012,17 @@ export async function applyDiffToInstance(instance, diff, policy, changedBy, t, 
     for (const s of instanceSteps) if (s.step_order >= fromOrder) s.step_order += 1;
   };
 
-  // Resolve and attach approvers to an added step that is (now) PENDING.
-  // Returns the stepsAdded report fields for it.
-  const fillAddedStep = async (stepRow, newStep) => {
-    // Same eligibility rule creation uses — see policyStepApproverEligibility.
-    // Without this, editing a live policy could install an approver that
-    // creating the same instance would have dropped, and that approver is
-    // binding (submitApprovalAction re-checks nothing). An ineligible source
-    // resolves to NOBODY here, so the step takes the "resolves to nobody"
-    // branch below: it stalls rather than silently granting authority.
-    const addEligibility = await policyStepApproverEligibility(
-      newStep, instance.entity_type,
+  // Who the EDITED policy's level names, in this instance's scope. Same
+  // eligibility rule creation uses — see policyStepApproverEligibility.
+  // Without it, editing a live policy could install an approver that creating
+  // the same instance would have dropped, and that approver is binding
+  // (submitApprovalAction re-checks nothing). An ineligible source resolves to
+  // NOBODY. Both callers treat nobody the same way — fillAddedStep and the
+  // STEP_MODIFIED path BLOCK the step (PENDING, an audit row saying why, a
+  // `blocked` report); neither ever approves it.
+  const resolveEditedLevel = async (policyStep, diffType) => {
+    const eligibility = await policyStepApproverEligibility(
+      policyStep, instance.entity_type,
       {
         hospitality_company_id: instance.hospitality_company_id,
         hotel_id: instance.hotel_id,
@@ -1001,21 +1030,25 @@ export async function applyDiffToInstance(instance, diff, policy, changedBy, t, 
         process_id: instance.process_id || null,
       }, t
     );
-    if (!addEligibility.eligible) {
+    if (!eligibility.eligible) {
       logger.warn(
-        `[PropagateGate] STEP_ADDED: policy step ${newStep.id} source ` +
-        `${newStep.approver_source_type}/${newStep.approver_source_id} is INELIGIBLE ` +
-        `for ${instance.entity_type} (${addEligibility.reason}, resource '${addEligibility.resource}') — ` +
+        `[PropagateGate] ${diffType}: policy step ${policyStep.id} source ` +
+        `${policyStep.approver_source_type}/${policyStep.approver_source_id} is INELIGIBLE ` +
+        `for ${instance.entity_type} (${eligibility.reason}, resource '${eligibility.resource}') — ` +
         `resolving to nobody on instance ${instance.id} instead of installing them.`
       );
+      return [];
     }
+    return resolveApprovers(
+      policyStep, instance.hospitality_company_id, instance.hotel_id,
+      resolveDeptId, t, null, instance.process_id || null
+    );
+  };
 
-    const newResolvedIds = addEligibility.eligible
-      ? await resolveApprovers(
-          newStep, instance.hospitality_company_id, instance.hotel_id,
-          resolveDeptId, t, null, instance.process_id || null
-        )
-      : [];
+  // Resolve and attach approvers to an added step that is (now) PENDING.
+  // Returns the stepsAdded report fields for it.
+  const fillAddedStep = async (stepRow, newStep) => {
+    const newResolvedIds = await resolveEditedLevel(newStep, 'STEP_ADDED');
 
     if (newResolvedIds.length === 0) {
       // A NEW authority that resolves to nobody RIGHT NOW must BLOCK, not
@@ -1126,6 +1159,34 @@ export async function applyDiffToInstance(instance, diff, policy, changedBy, t, 
     }
   };
 
+  // ── A POSITION PAIR THAT LANDS ON A CLOSED STEP IS AN ADDITION ──
+  // A position-paired STEP_MODIFIED (sourceChanged) says "a DIFFERENT approver
+  // now sits at this level". When the instance step built from that level is
+  // already closed (APPROVED, SKIPPED, REMOVED, …) there is nothing left on it
+  // to modify — and dropping the change let an edit that also closes the
+  // current step complete the instance with the new approver never asked:
+  // [A,B] → [C] pairs A↔C onto A's approved step and removes B, and the
+  // instance finished. For THIS instance such a pair is the removal of the old
+  // level plus the ADDITION of the new one: the closed step stays as history,
+  // no longer linked to the level (it is left out of `stepOrigins`, and it
+  // anchors nothing below), and the new source goes through the additions
+  // below — R1 placement, then R2/R3: inside the completed prefix → SKIPPED
+  // (revived as current if the instance would otherwise complete), at or after
+  // the current step → PENDING.
+  const retiredStepIds = new Set();
+  const convertedModifications = new Set();
+  const convertedAdditions = [];
+  for (const d of modifications) {
+    if (!d.sourceChanged) continue;
+    const instStep = findInstanceStepForDiff(d);
+    if (!instStep || instStep.status === 'PENDING') continue;
+    retiredStepIds.add(instStep.id);
+    convertedModifications.add(d);
+    convertedAdditions.push({ type: 'STEP_ADDED', step_order: stepOrderOf(d.newStep), newStep: d.newStep, replaces: instStep });
+    logger.info(`[PropagateModify] instance ${instance.id}: position-paired level change (policy step_order=${stepOrderOf(d.oldStep)} → ${stepOrderOf(d.newStep)}) lands on closed instance step id=${instStep.id} (${instStep.status}) — the new source is ADDED instead`);
+  }
+  const allAdditions = [...additions, ...convertedAdditions].sort((a, b) => a.step_order - b.step_order);
+
   // --- STEP ADDITIONS (before removals, so a removal never completes an
   //     instance the edit also extended) ---
   //
@@ -1154,11 +1215,13 @@ export async function applyDiffToInstance(instance, diff, policy, changedBy, t, 
   const placeByNeighbours = Boolean(stepIdMap && newOrderById);
   const newOrderOfStep = new Map(); // live instance step id -> its level's new step_order
   let additionsPlaceable = true;
-  if (placeByNeighbours && additions.length > 0) {
+  if (placeByNeighbours && allAdditions.length > 0) {
     const originOf = new Map(result.stepOrigins.map(o => [o.instance_step_id, o.policy_step_id]));
     for (const s of instanceSteps) {
       if (s.status === 'REMOVED') continue;
       if (!originOf.has(s.id)) { additionsPlaceable = false; break; }
+      // Attributable, but its level was replaced by this edit (see above).
+      if (retiredStepIds.has(s.id)) continue;
       const newId = stepIdMap.get(originOf.get(s.id));
       // A level removed by this edit has no new position; its step is about
       // to be removed and anchors nothing.
@@ -1168,7 +1231,7 @@ export async function applyDiffToInstance(instance, diff, policy, changedBy, t, 
 
   let renumberOffset = 0;
   const afterLastStep = () => Math.max(0, ...instanceSteps.map(s => s.step_order)) + 1;
-  for (const d of additions) {
+  for (const d of allAdditions) {
     const newOrder = stepOrderOf(d.newStep);
     let insertPosition;
     let placement;
@@ -1220,12 +1283,16 @@ export async function applyDiffToInstance(instance, diff, policy, changedBy, t, 
     instanceSteps.push(row);
     newOrderOfStep.set(row.id, newOrder);
 
+    // A converted position pair names the closed step it took over from.
+    const replaced = d.replaces
+      ? { converted_from: 'STEP_MODIFIED', replaces_instance_step_id: d.replaces.id }
+      : {};
     if (insideCompletedPrefix) {
-      const reported = { step_order: insertPosition, placement, status: 'SKIPPED' };
+      const reported = { step_order: insertPosition, placement, status: 'SKIPPED', ...replaced };
       result.stepsAdded.push(reported);
       skippedAdditions.push({ row, newStep: d.newStep, reported });
     } else {
-      result.stepsAdded.push({ step_order: insertPosition, placement, ...(await fillAddedStep(row, d.newStep)) });
+      result.stepsAdded.push({ step_order: insertPosition, placement, ...replaced, ...(await fillAddedStep(row, d.newStep)) });
     }
   }
 
@@ -1289,21 +1356,58 @@ export async function applyDiffToInstance(instance, diff, policy, changedBy, t, 
     }
   }
 
+  // A modified level whose EDITED authority resolves to nobody in this scope
+  // BLOCKS its step — exactly like fillAddedStep's 0-approver addition: the
+  // step stays PENDING, an audit row says why, the change log reports it
+  // `blocked`, and it is NOT re-evaluated. Re-evaluating it approved the step
+  // through the tombstones of the approvers this edit had just removed (or
+  // through an approval given under the authority the edit replaced), so an
+  // edit completed a live approval and fired its post-approval handler.
+  // PENDING keeps it recoverable: a later edit naming somebody who holds the
+  // level, or a grant reaching it, fills it.
+  const blockModifiedStep = async (instStep, d, reported) => {
+    logger.error(
+      {
+        instance_id: instance.id,
+        entity_type: instance.entity_type,
+        entity_id: instance.entity_id,
+        step_order: instStep.step_order,
+        policy_step_id: d.newStep?.id,
+        approver_source_type: d.newStep?.approver_source_type,
+        approver_source_id: d.newStep?.approver_source_id,
+      },
+      '[ApprovalPropagation] BLOCKED: a policy edit points a live level at an approver who resolves to nobody in this scope. The approval cannot proceed until somebody holds that level.'
+    );
+    await t.none(
+      `INSERT INTO tbl_approval_actions
+         (approval_instance_id, approval_instance_step_id, approver_user_id, action, comment)
+       VALUES ($1, $2, $3, 'POLICY_CHANGE', $4)`,
+      [
+        instance.id,
+        instStep.id,
+        changedBy,
+        `Step ${instStep.step_order} changed by a policy edit but resolves to no approver in this scope — approval is blocked here until somebody holds that level.`,
+      ]
+    );
+    Object.assign(reported, { blocked: true, reason: 'NO_APPROVERS_RESOLVED' });
+  };
+
   // --- STEP MODIFICATIONS (approver/rule changes) ---
   for (const d of modifications) {
+    // Landed on a closed step: handled above as an addition of the new source.
+    if (convertedModifications.has(d)) continue;
     const instStep = findInstanceStepForDiff(d);
     if (!instStep) continue;
 
     // Recorded regardless of the step's status — it is the change log's account
     // of which step this level change landed on. (Re-pointing `policy_step_id`
     // is driven by `stepOrigins`, which covers every attributable step.)
-    if (d.newStep?.id) {
-      result.stepsModified.push({
-        step_order: instStep.step_order,
-        instance_step_id: instStep.id,
-        new_policy_step_id: d.newStep.id
-      });
-    }
+    const modifiedReport = {
+      step_order: instStep.step_order,
+      instance_step_id: instStep.id,
+      new_policy_step_id: d.newStep?.id
+    };
+    if (d.newStep?.id) result.stepsModified.push(modifiedReport);
 
     if (instStep.status !== 'PENDING') {
       // Historical (APPROVED/REJECTED) or dead (REMOVED/SKIPPED) — audit note
@@ -1316,6 +1420,9 @@ export async function applyDiffToInstance(instance, diff, policy, changedBy, t, 
       // backstop for a step that was REMOVED by an earlier propagation.
       continue;
     }
+
+    // Set when the edited level resolves to nobody here → the step is BLOCKED.
+    let resolvesToNobody = false;
 
     // Handle approver source change
     if (d.sourceChanged) {
@@ -1334,38 +1441,14 @@ export async function applyDiffToInstance(instance, diff, policy, changedBy, t, 
       );
       const currentApproverIds = currentApproverRows.map(r => r.approver_user_id);
 
-      // Same eligibility rule creation uses — see
-      // policyStepApproverEligibility. Without this, editing a live policy
-      // could install an approver that creating the same instance would have
-      // dropped, and that approver is binding (submitApprovalAction re-checks
-      // nothing). An ineligible source resolves to NOBODY here, so the step
-      // below takes the existing "resolves to nobody" branch: it stalls rather
-      // than silently granting authority.
-      const modEligibility = await policyStepApproverEligibility(
-        d.newStep, instance.entity_type,
-        {
-          hospitality_company_id: instance.hospitality_company_id,
-          hotel_id: instance.hotel_id,
-          department_id: resolveDeptId,
-          process_id: instance.process_id || null,
-        }, t
-      );
-      if (!modEligibility.eligible) {
-        logger.warn(
-          `[PropagateGate] STEP_MODIFIED: policy step ${d.newStep.id} source ` +
-          `${d.newStep.approver_source_type}/${d.newStep.approver_source_id} is INELIGIBLE ` +
-          `for ${instance.entity_type} (${modEligibility.reason}, resource '${modEligibility.resource}') — ` +
-          `resolving to nobody on instance ${instance.id} instead of installing them.`
-        );
-      }
-
-      // Resolve NEW approvers (from new policy step definition)
-      const newResolvedIds = modEligibility.eligible
-        ? await resolveApprovers(
-            d.newStep, instance.hospitality_company_id, instance.hotel_id,
-            resolveDeptId, t, null, instance.process_id || null
-          )
-        : [];
+      // Resolve NEW approvers (from the new policy step definition), with the
+      // creation-time eligibility rule (resolveEditedLevel). NOBODY — an
+      // ineligible source, or nobody holding it here — still tombstones the
+      // old approvers below (they no longer hold this level), and then the
+      // step is BLOCKED (blockModifiedStep): it stays PENDING and is never
+      // approved through those tombstones.
+      const newResolvedIds = await resolveEditedLevel(d.newStep, 'STEP_MODIFIED');
+      if (newResolvedIds.length === 0) resolvesToNobody = true;
 
       logger.info(`[PropagateModify] Current DB approvers (non-REMOVED): [${currentApproverIds.join(',')}], New resolved: [${newResolvedIds.join(',')}]`);
 
@@ -1476,6 +1559,26 @@ export async function applyDiffToInstance(instance, diff, policy, changedBy, t, 
       });
     }
 
+    // A rule-only change keeps the level's approver, but that approver may
+    // already resolve to nobody (a step blocked by an earlier edit). With no
+    // live PENDING approver left on the step, relaxing the rule must not
+    // complete it through history — check who the level names now.
+    if (!d.sourceChanged && d.ruleChanged) {
+      const livePending = await t.oneOrNone(
+        `SELECT 1 FROM tbl_approval_step_approvers
+          WHERE approval_instance_step_id = $1 AND status = 'PENDING' LIMIT 1`,
+        [instStep.id]
+      );
+      if (!livePending && (await resolveEditedLevel(d.newStep, 'STEP_MODIFIED')).length === 0) {
+        resolvesToNobody = true;
+      }
+    }
+
+    if (resolvesToNobody) {
+      await blockModifiedStep(instStep, d, modifiedReport);
+      continue;
+    }
+
     // Re-evaluate step completion after any modification
     if (d.sourceChanged || d.ruleChanged) {
       const evalResult = await reEvaluateInstanceStep(instStep.id, t);
@@ -1484,6 +1587,13 @@ export async function applyDiffToInstance(instance, diff, policy, changedBy, t, 
         await advancePastClosedStep();
       }
     }
+  }
+
+  // A closed step whose level a position pair replaced is history, not the new
+  // level's step: leave it out of the re-pointing, so it does not end up
+  // linked to the level its successor (the added step) now carries.
+  if (retiredStepIds.size > 0) {
+    result.stepOrigins = result.stepOrigins.filter(o => !retiredStepIds.has(o.instance_step_id));
   }
 
   return result;
@@ -1692,6 +1802,9 @@ export async function propagatePolicyChangeToInstances({ policyId, diff, changed
       // instance step claimed them. Surfaced alongside the applied counts so a
       // partial reconciliation is visible in the propagation summary.
       unmatched_diff_entries: instanceResult.unmatchedDiffEntries.length,
+      // Steps this edit left PENDING with nobody able to approve them (an
+      // added or modified level that resolves to nobody here).
+      steps_blocked: [...instanceResult.stepsAdded, ...instanceResult.stepsModified].filter(r => r.blocked).length,
       auto_completed: instanceResult.autoCompleted
     });
 

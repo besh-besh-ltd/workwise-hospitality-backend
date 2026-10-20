@@ -25,7 +25,11 @@ import { ROLE_IDS } from "../fixtures/users.js";
 import { approveStep } from "../helpers/approval.js";
 import { makeRFQ } from "../factories/rfq.js";
 import { createApprovalInstance } from "../../app/models/generalModel.js";
-import { pairPolicySteps, computePolicyStepDiff } from "../../app/services/approvalPropagationService.js";
+import {
+  pairPolicySteps,
+  computePolicyStepDiff,
+  reEvaluateInstanceStep,
+} from "../../app/services/approvalPropagationService.js";
 
 // ===========================================================================
 // Pure pairing / diff
@@ -143,8 +147,10 @@ const A_ID = 85402;
 const B_ID = 85403;
 const C_ID = 85404;
 const D_ID = 85405;
+// Holds nothing anywhere: a level naming E resolves to NOBODY at the unit.
+const E_ID = 85406;
 const APPROVERS = [A_ID, B_ID, C_ID, D_ID];
-const ALL_USERS = [ADMIN_ID, ...APPROVERS];
+const ALL_USERS = [ADMIN_ID, ...APPROVERS, E_ID];
 
 // Role 4 (Tender Approver) holds rfq.read + rfq.approve; role 2 (Tender
 // Creator) holds rfq.read only — a ROLE step naming it is DROPPED when an
@@ -176,6 +182,10 @@ const POLICIES = {
   unplacedInverted: { id: 65416, hotel: IDS.hotels.A3, dept: IDS.departments.hk, process: IDS.processes.A_P2 },
   unplacedAfterCurrent: { id: 65417, hotel: IDS.hotels.A2, dept: IDS.departments.eng, process: IDS.processes.A_P2 },
   unplacedWithModification: { id: 65418, hotel: IDS.hotels.A3, dept: IDS.departments.eng, process: IDS.processes.A_P2 },
+  sourceToNobody: { id: 65419, hotel: IDS.hotels.A1, dept: IDS.departments.fb, process: IDS.processes.A_P2 },
+  sourceToNobodyKeptApproval: { id: 65420, hotel: IDS.hotels.A1, dept: IDS.departments.hk, process: IDS.processes.A_P2 },
+  pairedOntoApproved: { id: 65421, hotel: IDS.hotels.A1, dept: IDS.departments.eng, process: IDS.processes.A_P2 },
+  pairedOntoApprovedBeforeCurrent: { id: 65422, hotel: IDS.hotels.A1, dept: IDS.departments.proc, process: IDS.processes.A_P2 },
 };
 const POLICY_IDS = Object.values(POLICIES).map((p) => p.id);
 
@@ -199,6 +209,10 @@ const POLICY_STEPS = [
   [POLICIES.unplacedInverted, [[65561, 1, "USER", A_ID], [65562, 2, "USER", C_ID], [65563, 3, "USER", B_ID]]],
   [POLICIES.unplacedAfterCurrent, [[65571, 1, "USER", A_ID], [65572, 2, "USER", B_ID]]],
   [POLICIES.unplacedWithModification, [[65581, 1, "USER", A_ID], [65582, 2, "ROLE", ROLE_CAN_APPROVE]]],
+  [POLICIES.sourceToNobody, [[65591, 1, "USER", A_ID], [65592, 2, "USER", B_ID]]],
+  [POLICIES.sourceToNobodyKeptApproval, [[65601, 1, "USER", A_ID], [65602, 2, "ROLE", ROLE_CAN_APPROVE]]],
+  [POLICIES.pairedOntoApproved, [[65611, 1, "USER", A_ID], [65612, 2, "USER", B_ID]]],
+  [POLICIES.pairedOntoApprovedBeforeCurrent, [[65621, 1, "USER", A_ID], [65622, 2, "USER", B_ID]]],
 ];
 
 // Instances are built at A2 / Procurement whatever the policy's own tuple.
@@ -344,9 +358,10 @@ beforeAll(async () => {
             ($2, 'Identity A',     'identity.a@test.local',     '9000085402', 'x', 2, 1, $5),
             ($3, 'Identity B',     'identity.b@test.local',     '9000085403', 'x', 2, 1, $5),
             ($4, 'Identity C',     'identity.c@test.local',     '9000085404', 'x', 2, 1, $5),
-            ($6, 'Identity D',     'identity.d@test.local',     '9000085405', 'x', 2, 1, $5)
+            ($6, 'Identity D',     'identity.d@test.local',     '9000085405', 'x', 2, 1, $5),
+            ($7, 'Identity E',     'identity.e@test.local',     '9000085406', 'x', 2, 1, $5)
      ON CONFLICT (id) DO NOTHING`,
-    [ADMIN_ID, A_ID, B_ID, C_ID, IDS.companies.A, D_ID]
+    [ADMIN_ID, A_ID, B_ID, C_ID, IDS.companies.A, D_ID, E_ID]
   );
   await db.none(`UPDATE tbl_users SET user_type = 7, status = 1 WHERE id = $1`, [ADMIN_ID]);
 
@@ -726,6 +741,175 @@ describe("an edit that adds levels never lets an in-flight approval skip or fini
     const res = await editPolicy(client, policy, [step(1, "USER", A_ID)]);
     expect(res.status).toBe(200);
 
+    // An explicit removal with nothing added: the admin's edit no longer
+    // requires B, so the instance completes and its post-approval handler runs.
+    expect((await instanceRow(instance.id)).status).toBe("APPROVED");
+    expect(res.body.propagation.instances_auto_completed).toBe(1);
+    expect((await lastChangeSummary(instance.id)).autoCompleted).toBe(true);
+  });
+});
+
+describe("a policy edit never completes a live approval through a position-paired level", () => {
+  const shape = async (instanceId) =>
+    (await instanceStepsOf(instanceId)).map((s) => [s.step_order, s.status, s.policy_step_id]);
+  async function waitingOnB(policy) {
+    const instance = await makeInstance(policy);
+    await approveStep(instance.id, A_ID);
+    expect(await instanceRow(instance.id)).toMatchObject({ status: "PENDING", current_step: 2 });
+    return instance;
+  }
+  const actionsOnStep = (instanceStepId) =>
+    db.any(
+      `SELECT action, approver_user_id, comment FROM tbl_approval_actions
+        WHERE approval_instance_step_id = $1 ORDER BY id`,
+      [instanceStepId]
+    );
+
+  it("[A,B] -> [A,E] waiting at B, nobody holds E here: the step stays PENDING and BLOCKED, never approved", async () => {
+    const policy = POLICIES.sourceToNobody;
+    const instance = await waitingOnB(policy);
+    const client = await httpClient(ADMIN_ID);
+
+    const res = await editPolicy(client, policy, [step(1, "USER", A_ID), step(2, "USER", E_ID)]);
+    expect(res.status).toBe(200);
+
+    // B no longer holds the level, so B's row is tombstoned. Counting that
+    // tombstone as "had approvers, all removed" approved the step, the
+    // instance ran off the end and its post-approval handler fired with
+    // nobody at level 2 having approved anything.
+    const newIds = await policyStepIds(policy.id);
+    expect(await shape(instance.id)).toEqual([
+      [1, "APPROVED", newIds[1]],
+      [2, "PENDING", newIds[2]], // E's level — blocked, waiting for somebody to hold it
+    ]);
+    expect(await instanceRow(instance.id)).toMatchObject({ status: "PENDING", current_step: 2 });
+    expect(res.body.propagation.instances_auto_completed).toBe(0);
+    expect(await approverStatusAt(instance.id, 2, B_ID)).toBe("REMOVED");
+    expect(await approverStatusAt(instance.id, 2, E_ID)).toBeUndefined();
+
+    // Blocked exactly like an added level that resolves to nobody: an audit
+    // row saying why, and a blocked entry in the change log.
+    const step2 = (await instanceStepsOf(instance.id))[1];
+    const actions = await actionsOnStep(step2.id);
+    expect(actions).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ action: "POLICY_CHANGE", approver_user_id: ADMIN_ID, comment: expect.stringMatching(/resolves to no approver/i) }),
+      ])
+    );
+    const summary = await lastChangeSummary(instance.id);
+    expect(summary.autoCompleted).toBe(false);
+    expect(summary.stepsModified).toEqual([
+      expect.objectContaining({ instance_step_id: step2.id, blocked: true, reason: "NO_APPROVERS_RESOLVED" }),
+    ]);
+
+    // No later re-evaluation approves it through the tombstone either.
+    const evalResult = await db.tx((t) => reEvaluateInstanceStep(step2.id, t));
+    expect(evalResult).toMatchObject({ completed: false, blocked: true });
+
+    // A later rule-only edit of the blocked level does not complete it.
+    const relax = await editPolicy(client, policy, [
+      step(1, "USER", A_ID),
+      { ...step(2, "USER", E_ID), decision_rule: "ANY" },
+    ]);
+    expect(relax.status).toBe(200);
+    expect(await instanceRow(instance.id)).toMatchObject({ status: "PENDING", current_step: 2 });
+    expect((await instanceStepsOf(instance.id))[1].status).toBe("PENDING");
+    expect(relax.body.propagation.instances_auto_completed).toBe(0);
+
+    // Recoverable: naming somebody who does hold the level fills the step,
+    // and the instance completes only on that person's approval.
+    const fill = await editPolicy(client, policy, [step(1, "USER", A_ID), step(2, "USER", C_ID)]);
+    expect(fill.status).toBe(200);
+    expect(await approverStatusAt(instance.id, 2, C_ID)).toBe("PENDING");
+    expect(await instanceRow(instance.id)).toMatchObject({ status: "PENDING", current_step: 2 });
+    await approveStep(instance.id, C_ID);
+    expect((await instanceRow(instance.id)).status).toBe("APPROVED");
+  });
+
+  it("[A, R4 ALL] -> [A,E] with one R4 holder already approved: the earlier approval does not complete the new level", async () => {
+    const policy = POLICIES.sourceToNobodyKeptApproval;
+    const instance = await waitingOnB(policy); // level 2 = every role-4 holder, rule ALL
+    await approveStep(instance.id, B_ID);
+    expect(await instanceRow(instance.id)).toMatchObject({ status: "PENDING", current_step: 2 });
+
+    const client = await httpClient(ADMIN_ID);
+    const res = await editPolicy(client, policy, [step(1, "USER", A_ID), step(2, "USER", E_ID)]);
+    expect(res.status).toBe(200);
+
+    // B's approval stands as history, everyone else is tombstoned: "every
+    // live approver approved" read that as complete under rule ALL.
+    expect(await approverStatusAt(instance.id, 2, B_ID)).toBe("APPROVED");
+    expect(await approverStatusAt(instance.id, 2, C_ID)).toBe("REMOVED");
+    expect(await instanceRow(instance.id)).toMatchObject({ status: "PENDING", current_step: 2 });
+    expect((await instanceStepsOf(instance.id))[1].status).toBe("PENDING");
+    expect(res.body.propagation.instances_auto_completed).toBe(0);
+    expect((await lastChangeSummary(instance.id)).stepsModified).toEqual([
+      expect.objectContaining({ blocked: true, reason: "NO_APPROVERS_RESOLVED" }),
+    ]);
+
+    // Relaxing E's level to ANY must not let B's earlier approval complete it.
+    const relax = await editPolicy(client, policy, [
+      step(1, "USER", A_ID),
+      { ...step(2, "USER", E_ID), decision_rule: "ANY" },
+    ]);
+    expect(relax.status).toBe(200);
+    expect(await instanceRow(instance.id)).toMatchObject({ status: "PENDING", current_step: 2 });
+    expect(relax.body.propagation.instances_auto_completed).toBe(0);
+    expect((await lastChangeSummary(instance.id)).stepsModified).toEqual([
+      expect.objectContaining({ blocked: true, reason: "NO_APPROVERS_RESOLVED" }),
+    ]);
+  });
+
+  it("[A,B] -> [C] with A approved, waiting at B: C is asked, the instance does not complete", async () => {
+    const policy = POLICIES.pairedOntoApproved;
+    const instance = await waitingOnB(policy);
+
+    const client = await httpClient(ADMIN_ID);
+    const res = await editPolicy(client, policy, [step(1, "USER", C_ID)]);
+    expect(res.status).toBe(200);
+
+    // Position pairing reads this as "level 1 changed A→C, level 2 removed".
+    // Level 1's step is already APPROVED, so the change was dropped there; B's
+    // removal then left nothing pending and the instance completed with C
+    // never asked. C's level is an ADDITION to this instance.
+    const newIds = await policyStepIds(policy.id);
+    expect(await shape(instance.id)).toEqual([
+      [1, "APPROVED", null], // A — history; its level is gone from the policy
+      [2, "REMOVED", null], // B
+      [3, "PENDING", newIds[1]], // C — added, current
+    ]);
+    expect(await instanceRow(instance.id)).toMatchObject({ status: "PENDING", current_step: 3 });
+    expect(await approverStatusAt(instance.id, 3, C_ID)).toBe("PENDING");
+    expect(res.body.propagation.instances_auto_completed).toBe(0);
+    const summary = await lastChangeSummary(instance.id);
+    expect(summary.autoCompleted).toBe(false);
+    expect(summary.stepsAdded).toEqual([
+      expect.objectContaining({ step_order: 3, status: "PENDING", replaces_instance_step_id: (await instanceStepsOf(instance.id))[0].id }),
+    ]);
+
+    await approveStep(instance.id, C_ID);
+    expect((await instanceRow(instance.id)).status).toBe("APPROVED");
+  });
+
+  it("[A,B] -> [C,B] with A approved, waiting at B: C is placed in front of B and becomes current", async () => {
+    const policy = POLICIES.pairedOntoApprovedBeforeCurrent;
+    const instance = await waitingOnB(policy);
+
+    const client = await httpClient(ADMIN_ID);
+    const res = await editPolicy(client, policy, [step(1, "USER", C_ID), step(2, "USER", B_ID)]);
+    expect(res.status).toBe(200);
+
+    const newIds = await policyStepIds(policy.id);
+    expect(await shape(instance.id)).toEqual([
+      [1, "APPROVED", null], // A — history
+      [2, "PENDING", newIds[1]], // C — immediately before B, so current
+      [3, "PENDING", newIds[2]], // B — still owed, after C
+    ]);
+    expect(await instanceRow(instance.id)).toMatchObject({ status: "PENDING", current_step: 2 });
+
+    await approveStep(instance.id, C_ID);
+    expect(await instanceRow(instance.id)).toMatchObject({ status: "PENDING", current_step: 3 });
+    await approveStep(instance.id, B_ID);
     expect((await instanceRow(instance.id)).status).toBe("APPROVED");
   });
 });
