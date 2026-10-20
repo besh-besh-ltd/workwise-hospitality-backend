@@ -2,7 +2,7 @@
 // qualifiers. The frontend reads the same copy table; the backend's emails,
 // in-app notifications and error messages must say the same words.
 
-import { describe, it, expect, afterAll, beforeEach, jest } from "@jest/globals";
+import { describe, it, expect, afterAll, afterEach, beforeEach, jest } from "@jest/globals";
 
 const sentMails = [];
 const dispatched = [];
@@ -28,7 +28,12 @@ const { stageLabel, entityLabel, ENTITY_LABELS, STAGE_LABELS } = await import(
 const { sendApprovalStepNotification } = await import(
   "../../app/helper/sendEmailFunctions/approvalEmails.js"
 );
-const { withTx, closeDb } = await import("../setup/db.js");
+const { sendApprovalCancelledNotification } = await import(
+  "../../app/helper/sendEmailFunctions/approvalEmails.js"
+);
+const { dispatchPropagationEmails } = await import("../../app/services/approvalPropagationService.js");
+const { db, withTx, closeDb } = await import("../setup/db.js");
+const { makeApprovalInstanceWithApprover, cleanupApprovalInstances } = await import("../helpers/dashboardSeed.js");
 const { createApprovalInstance } = await import("../../app/models/generalModel.js");
 const { IDS } = await import("../fixtures/ids.js");
 
@@ -48,6 +53,7 @@ describe("stageLabel", () => {
     ["TECHNICAL", "Technical Approval"],
     ["NEGOTIATION", "Negotiation Round Approval"],
     ["NEGOTIATION_QUOTE", "Final Vendor Approval"],
+    ["PO", "Purchase Order Approval"],
     ["ARC", "Unit ARC · Publish Approval"],
     ["ARC_PUBLISH", "Unit ARC · Publish Approval"],
     ["ARC_TECH", "Unit ARC · Technical Approval"],
@@ -154,5 +160,70 @@ describe("refusal text uses the stage label, data keeps the raw enum", () => {
       expect(err.message).toContain("Final Vendor Approval");
       expect(err.message).not.toContain("NEGOTIATION_QUOTE");
     });
+  });
+});
+
+describe("Group ARC wording on mid-flight and cancellation notices", () => {
+  const ENTITY_ID = 9_820_001;
+  let policyId;
+
+  const seed = async (policyType) => {
+    const policy = await db.one(
+      `INSERT INTO tbl_approval_policies
+         (entity_type, hospitality_company_id, hotel_id, department_id, process_id,
+          is_active, created_by, is_master)
+       VALUES ($1, $2, NULL, NULL, NULL, true, $3, false) RETURNING id`,
+      [policyType, IDS.hospitality.A, IDS.users.companyA_admin]
+    );
+    policyId = policy.id;
+    const { instance_id } = await makeApprovalInstanceWithApprover(db, {
+      entity_type: "ARC_TECH",
+      entity_id: ENTITY_ID,
+      approver_user_id: IDS.users.a1_proc_techApp,
+      policy_id: policy.id,
+      hospitality: IDS.hospitality.A,
+      hotel: IDS.hotels.A1,
+    });
+    return instance_id;
+  };
+
+  afterEach(async () => {
+    await cleanupApprovalInstances(db, "ARC_TECH", [ENTITY_ID]);
+    if (policyId) await db.none(`DELETE FROM tbl_approval_policies WHERE id = $1`, [policyId]);
+    policyId = null;
+  });
+
+  const removedPayload = (instance_id) => ({
+    approversRemoved: [
+      { instance_id, user_id: IDS.users.a1_proc_techApp, entity_type: "ARC_TECH",
+        entity_id: ENTITY_ID, metadata: {}, step_order: 1 },
+    ],
+  });
+
+  it("approver-removed notice says Group ARC for an ARC_GROUP_* policy", async () => {
+    const id = await seed("ARC_GROUP_TECH");
+    await dispatchPropagationEmails(removedPayload(id), IDS.users.companyA_admin, "policy_change");
+    const all = [...sentMails.map((m) => m.subject + " " + m.html), ...dispatched.map((d) => d.title)].join("\n");
+    expect(all).toContain("Group ARC technical evaluation");
+    expect(all).not.toContain("Unit ARC");
+  });
+
+  it("the same notice says Unit ARC for a unit policy", async () => {
+    const id = await seed("ARC_TECH");
+    await dispatchPropagationEmails(removedPayload(id), IDS.users.companyA_admin, "policy_change");
+    const all = [...sentMails.map((m) => m.subject + " " + m.html), ...dispatched.map((d) => d.title)].join("\n");
+    expect(all).toContain("Unit ARC technical evaluation");
+    expect(all).toContain("unit ARC technical evaluation");
+  });
+
+  it("cancellation email says Group ARC when told the instance is a group one", async () => {
+    await sendApprovalCancelledNotification({
+      entityType: "ARC_TECH",
+      entityIdentifier: "ARC-1",
+      reason: "closed",
+      approvers: [{ user_id: 42, user_name: "Asha", user_email: "asha@example.com" }],
+      extraContext: { rfq_id: 1, arc_id: 1, is_group: true },
+    });
+    expect(sentMails[0].subject).toContain("Group ARC technical evaluation");
   });
 });

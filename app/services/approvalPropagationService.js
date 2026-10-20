@@ -2776,6 +2776,21 @@ export async function dispatchPropagationEmails(emailData, changedBy, changeReas
     const changedByUser = await db.oneOrNone('SELECT name FROM tbl_users WHERE id = $1', [changedBy]);
     const changedByName = changedByUser?.name || 'Administrator';
 
+    // Group ARC instances keep unit entity types; only their policy says "group".
+    const allIds = [...new Set([
+      ...(emailData.approversRemoved || []), ...(emailData.approversKeptApproved || []),
+      ...(emailData.approversAdded || []),
+    ].map(a => a.instance_id).filter(Boolean))];
+    const groupRows = allIds.length
+      ? await db.any(
+          `SELECT ai.id FROM tbl_approval_instances ai
+             JOIN tbl_approval_policies pol ON pol.id = ai.approval_policy_id
+            WHERE ai.id = ANY($1::int[]) AND pol.entity_type LIKE 'ARC\\_GROUP%'`,
+          [allIds])
+      : [];
+    const groupInstanceIds = new Set(groupRows.map(r => Number(r.id)));
+    const isGroupInst = (id) => groupInstanceIds.has(Number(id));
+
     // 1. Removal notifications
     if (emailData.approversRemoved?.length > 0) {
       const byInstance = {};
@@ -2793,7 +2808,7 @@ export async function dispatchPropagationEmails(emailData, changedBy, changeReas
           changedByName, changeReason,
           stepOrder: inst.step_order,
           approvers: inst.approvers,
-          extraContext: { rfq_id: metadata?.rfq_id || inst.entity_id }
+          extraContext: { rfq_id: metadata?.rfq_id || inst.entity_id, is_group: isGroupInst(inst.instance_id) }
         });
       }
     }
@@ -2815,7 +2830,7 @@ export async function dispatchPropagationEmails(emailData, changedBy, changeReas
           changedByName, changeReason,
           stepOrder: inst.step_order,
           approvers: inst.approvers,
-          extraContext: { rfq_id: metadata?.rfq_id || inst.entity_id }
+          extraContext: { rfq_id: metadata?.rfq_id || inst.entity_id, is_group: isGroupInst(inst.instance_id) }
         });
       }
     }
@@ -2845,7 +2860,7 @@ export async function dispatchPropagationEmails(emailData, changedBy, changeReas
             stepOrder: inst.step_order, totalSteps: parseInt(totalSteps.count),
             initiatorName: initiator?.name || 'Unknown',
             approvers: currentStepApprovers,
-            extraContext: { rfq_id: metadata?.rfq_id || inst.entity_id }
+            extraContext: { rfq_id: metadata?.rfq_id || inst.entity_id, is_group: isGroupInst(inst.instance_id) }
           });
         }
       }
@@ -2888,7 +2903,7 @@ export async function dispatchPropagationEmails(emailData, changedBy, changeReas
               stepsRemoved: 0, stepsAdded: 0, rulesChanged: 0
             },
             approvers: toNotify,
-            extraContext: { rfq_id: metadata?.rfq_id || instance.entity_id }
+            extraContext: { rfq_id: metadata?.rfq_id || instance.entity_id, is_group: isGroupInst(instanceId) }
           });
         }
       }

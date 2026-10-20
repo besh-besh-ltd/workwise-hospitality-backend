@@ -18,7 +18,10 @@ async function isGroupInstance(instance) {
   try {
     const pol = await db.oneOrNone('SELECT entity_type FROM tbl_approval_policies WHERE id = $1', [instance.approval_policy_id]);
     return isGroupArcPolicy(pol);
-  } catch { return false; }
+  } catch (err) {
+    logger.error({ err }, 'isGroupInstance lookup failed; defaulting to Unit ARC wording');
+    return false;
+  }
 }
 
 
@@ -2803,20 +2806,20 @@ export async function createApprovalInstance({
           );
         } else if (s.reason === 'ENTITY_TYPE_NOT_IN_RESOURCE_MAP' || s.reason === 'RESOURCE_NOT_IN_CATALOGUE') {
           lines.push(
-            `Step ${s.step_order}: ${who} cannot be checked because ${stageLabel(entity_type)} has no ` +
+            `Step ${s.step_order}: ${who} cannot be checked because ${stageLabel(entity_type, { isGroup: isGroupArcPolicy(policy) })} has no ` +
             `permission resource configured. This needs a platform fix, not a policy change.`
           );
         } else {
           // ROLE_LACKS_READ_AND_APPROVE / USER_LACKS_READ_AND_APPROVE
           lines.push(
-            `Step ${s.step_order}: ${who} can never approve this ${stageLabel(entity_type)} step — ` +
+            `Step ${s.step_order}: ${who} can never approve this ${stageLabel(entity_type, { isGroup: isGroupArcPolicy(policy) })} step — ` +
             `missing ${s.resource}.approve and/or ${s.resource}.read.`
           );
         }
       }
 
       const err = new Error(
-        `Nobody can approve this ${stageLabel(entity_type)} step${whereText}, so it cannot be submitted yet — ` +
+        `Nobody can approve this ${stageLabel(entity_type, { isGroup: isGroupArcPolicy(policy) })} step${whereText}, so it cannot be submitted yet — ` +
         `approval policy ${policy.id} resolved to zero usable approval steps. ` +
         `All ${policySteps.length} step(s) were dropped:\n` +
         lines.map(l => `  • ${l}`).join('\n') +

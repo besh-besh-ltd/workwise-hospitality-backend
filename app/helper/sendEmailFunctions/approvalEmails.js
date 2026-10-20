@@ -144,6 +144,12 @@ export const sendRfqCreationNotification = async ({
  * @param {Array} params.approvers - Array of { user_id, user_name, user_email }
  * @param {Object} params.extraContext - Optional additional context (e.g., { rfq_id })
  */
+// Sentence-case a noun phrase without breaking the ARC acronym ("Unit ARC ...").
+const lowerFirst = (text) => {
+  const s = String(text || '');
+  return /^[A-Z]{2,}/.test(s) ? s : s.charAt(0).toLowerCase() + s.slice(1);
+};
+
 export const sendApprovalStepNotification = async ({
   entityType,
   entityId,
@@ -1179,7 +1185,7 @@ export const sendApproverRemovedNotification = async ({
             </div>
           </div>
 
-          <p>Your approval is no longer needed for this ${label.toLowerCase()}. No further action is required from you.</p>
+          <p>Your approval is no longer needed for this ${lowerFirst(label)}. No further action is required from you.</p>
 
           <p style="text-align:center; margin-top:30px;">
             <strong>— Phileein Hospitality Team</strong>
@@ -1266,7 +1272,7 @@ export const sendApprovalStandsNotification = async ({
           <div style="background-color:#DCFCE7; border-left:4px solid #16A34A; padding:12px 16px; margin:16px 0; border-radius:4px;">
             <span style="color:#166534; font-weight:600;">Your prior approval still counts — no action required</span>
             <div style="color:#15803D; font-size:13px; margin-top:4px;">
-              You already approved this ${label.toLowerCase()} before the policy change, so your decision remains recorded and effective.
+              You already approved this ${lowerFirst(label)} before the policy change, so your decision remains recorded and effective.
             </div>
           </div>
 

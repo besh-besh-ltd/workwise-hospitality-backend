@@ -269,7 +269,7 @@ export const STAGE_LABELS = Object.freeze({
   TECHNICAL:         'Technical Approval',
   NEGOTIATION:       'Negotiation Round Approval',
   NEGOTIATION_QUOTE: 'Final Vendor Approval',
-  PO:                'PO Approval',
+  PO:                'Purchase Order Approval',
   MR:                'Material Requisition Approval',
   ARC:               'ARC · Publish Approval',
   ARC_PUBLISH:       'ARC · Publish Approval',
