@@ -1,6 +1,6 @@
 import db from '../config/dbConn.js';
 import { sendApprovalNotification, sendPONotificationToVendor } from '../controllers/po/purchaseOrderEmails.js';
-import { APPROVAL_DECISIONS, PO_STATUSES } from '../util/constants.js';
+import { APPROVAL_DECISIONS, PO_STATUSES, RFQ_STATUSES } from '../util/constants.js';
 import { sendApprovalStepNotification } from '../helper/sendEmailFunctions/approvalEmails.js';
 import { approvalStepEmailContext } from '../helper/approvalEmailContext.js';
 import { approvalActionUrl, entityLabel, stageLabel, buyerHome } from '../services/notificationLinks.js';
@@ -1519,7 +1519,8 @@ export async function getApprovalProcesses({
 export async function updateApprovalProcess(id, patch) {
   if (!id) throw new Error('Process ID is required');
 
-  const allowedFields = ['name', 'description', 'is_active', 'process_type'];
+  // process_type is fixed at creation; a PUT carrying it is ignored.
+  const allowedFields = ['name', 'description', 'is_active'];
   const sets = [];
   const vals = [];
   let idx = 1;
@@ -1562,34 +1563,83 @@ export async function updateApprovalProcess(id, patch) {
   );
 }
 
+const OPEN_RFQ_LIST_LIMIT = 20;
+
 /**
- * Soft delete a process (mark as inactive)
- * Validates that no active policies or pending approvals reference it
+ * Everything that still depends on a process. A process may be deactivated
+ * only when every field is empty/zero.
+ *
+ * Open RFQ = anything not CLOSED (2) or WITHDRAWN (5), drafts and NULL status
+ * included. Open ARC = anything not expired / terminated / closed_no_award.
+ *
+ * @returns {Promise<{policies: {id:number, entity_type:string, hotel_name:string|null}[],
+ *   pending_instances:number, open_rfqs:{id:number, rfq_no:number}[], open_rfq_count:number,
+ *   open_arcs:number, role_grants:number}>}
+ */
+export async function getProcessBlockers(processId, t = db) {
+  const closedRfq = [RFQ_STATUSES.CLOSED, RFQ_STATUSES.WITHDRAWN];
+  const [policies, pending, rfqCount, rfqs, arcs, grants] = await Promise.all([
+    t.any(
+      `SELECT p.id, p.entity_type, h.name AS hotel_name
+         FROM tbl_approval_policies p
+         LEFT JOIN tbl_hospitality_company_hotels h ON h.id = p.hotel_id
+        WHERE p.process_id = $1 AND p.is_active = true
+        ORDER BY p.id`,
+      [processId]
+    ),
+    t.one(
+      `SELECT COUNT(*)::int AS n FROM tbl_approval_instances
+        WHERE process_id = $1 AND status = 'PENDING'`,
+      [processId]
+    ),
+    t.one(
+      `SELECT COUNT(*)::int AS n FROM tbl_rfq
+        WHERE process_id = $1 AND (status IS NULL OR status NOT IN ($2, $3))`,
+      [processId, ...closedRfq]
+    ),
+    t.any(
+      `SELECT id, rfq_no FROM tbl_rfq
+        WHERE process_id = $1 AND (status IS NULL OR status NOT IN ($2, $3))
+        ORDER BY id DESC LIMIT ${OPEN_RFQ_LIST_LIMIT}`,
+      [processId, ...closedRfq]
+    ),
+    t.one(
+      `SELECT COUNT(*)::int AS n FROM tbl_arc
+        WHERE process_id = $1 AND status NOT IN ('expired', 'terminated', 'closed_no_award')`,
+      [processId]
+    ),
+    t.one(`SELECT COUNT(*)::int AS n FROM tbl_user_role_scopes WHERE process_id = $1`, [processId]),
+  ]);
+  return {
+    policies: policies.map((r) => ({ id: Number(r.id), entity_type: r.entity_type, hotel_name: r.hotel_name })),
+    pending_instances: pending.n,
+    open_rfqs: rfqs.map((r) => ({ id: Number(r.id), rfq_no: Number(r.rfq_no) })),
+    open_rfq_count: rfqCount.n,
+    open_arcs: arcs.n,
+    role_grants: grants.n,
+  };
+}
+
+/** True when any blocker from getProcessBlockers is present. */
+export function hasProcessBlockers(b) {
+  return b.policies.length > 0 || b.pending_instances > 0 || b.open_rfq_count > 0
+    || b.open_arcs > 0 || b.role_grants > 0;
+}
+
+/**
+ * Soft delete a process (mark as inactive). Callers refuse earlier with
+ * getProcessBlockers; this re-checks so no other caller can bypass the guard.
  * @param {number} id - Process ID
  */
 export async function deleteApprovalProcess(id) {
   if (!id) throw new Error('Process ID is required');
 
-  // Check if there are active policies using this process
-  const activePolicies = await db.oneOrNone(`
-    SELECT COUNT(*) as count
-    FROM tbl_approval_policies
-    WHERE process_id = $1 AND is_active = true
-  `, [id]);
-
-  if (activePolicies && parseInt(activePolicies.count) > 0) {
-    throw new Error(`Cannot delete process: ${activePolicies.count} active policies are using it`);
-  }
-
-  // Check if there are pending instances using this process
-  const pendingInstances = await db.oneOrNone(`
-    SELECT COUNT(*) as count
-    FROM tbl_approval_instances
-    WHERE process_id = $1 AND status = 'PENDING'
-  `, [id]);
-
-  if (pendingInstances && parseInt(pendingInstances.count) > 0) {
-    throw new Error(`Cannot delete process: ${pendingInstances.count} pending approvals exist`);
+  const blockers = await getProcessBlockers(id);
+  if (hasProcessBlockers(blockers)) {
+    const err = new Error('This process is still in use');
+    err.code = 'PROCESS_IN_USE';
+    err.blockers = blockers;
+    throw err;
   }
 
   return db.none(
@@ -1915,6 +1965,54 @@ export async function findBestMatchingPoliciesWithSteps(entityTypes, { hospitali
     if (r.step) out.get(type).steps.push(r.step);
   }
   return out;
+}
+
+/**
+ * Which entity types have an ACTIVE policy that would actually match, per
+ * process, at a hotel (or anywhere in scope when hotelId is null). Uses the
+ * same predicate as findBestMatchingPolicy: master policies only
+ * (department_id IS NULL), hotel-specific or hotel-wide, process-specific or
+ * process-free. A process-free policy matches every process, so its types
+ * appear under `process_free` and are also folded into every `by_process`.
+ *
+ * @param {object} p
+ * @param {number|number[]|null} p.hospitalityCompanyId company, companies, or null = all
+ * @param {number|null} [p.hotelId]
+ */
+export async function getPolicyCoverage({ hospitalityCompanyId, hotelId = null }, t = db) {
+  const companyIds = hospitalityCompanyId === null || hospitalityCompanyId === undefined
+    ? null
+    : [].concat(hospitalityCompanyId).map(Number);
+
+  const policies = await t.any(
+    `SELECT DISTINCT p.entity_type, p.process_id
+       FROM tbl_approval_policies p
+      WHERE p.is_active = true
+        AND p.department_id IS NULL
+        AND ($1::int[] IS NULL OR p.hospitality_company_id = ANY($1::int[]))
+        AND ($2::int IS NULL OR p.hotel_id = $2 OR p.hotel_id IS NULL)`,
+    [companyIds, hotelId]
+  );
+  const processes = await t.any(
+    `SELECT pr.id
+       FROM tbl_approval_processes pr
+      WHERE pr.is_active = true
+        AND pr.company_id IN (
+          SELECT hc.buyer_company_id FROM tbl_hospitality_companies hc
+           WHERE $1::int[] IS NULL OR hc.id = ANY($1::int[]))`,
+    [companyIds]
+  );
+
+  const free = new Set(policies.filter((r) => r.process_id === null).map((r) => r.entity_type));
+  const byProcess = {};
+  for (const pr of processes) byProcess[String(pr.id)] = new Set(free);
+  for (const r of policies) {
+    if (r.process_id === null) continue;
+    (byProcess[String(r.process_id)] ||= new Set()).add(r.entity_type);
+  }
+  const out = {};
+  for (const [k, v] of Object.entries(byProcess)) out[k] = [...v].sort();
+  return { hotel_id: hotelId, process_free: [...free].sort(), by_process: out };
 }
 
 /**

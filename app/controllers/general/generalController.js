@@ -21,6 +21,9 @@ import generalModel, {
   createApprovalProcess,
   getApprovalProcesses,
   updateApprovalProcess,
+  getProcessBlockers,
+  hasProcessBlockers,
+  getPolicyCoverage,
   deleteApprovalProcess,
   getDepartmentSubGraphPreview,
   checkIfUserIsFinalApprover,
@@ -521,6 +524,15 @@ async function guardInstanceTenant(req, res, instanceId) {
  * tenant could rename or deactivate another tenant's procurement process and
  * silently break every policy routed through it.
  */
+function respondProcessInUse(res, blockers) {
+  return res.status(409).json({
+    status: 0,
+    code: 'PROCESS_IN_USE',
+    message: 'This process is still in use',
+    data: { blockers },
+  });
+}
+
 async function guardProcessTenant(req, res, processId) {
   const proc = await getApprovalProcessTenant(processId);
   const notFound = () => {
@@ -1109,6 +1121,41 @@ const hospitalityApprovalController = {
     } catch (e) {
       logError(e);
       res.status(400).json({ status: 3, message: e.message || e?.detail || 'Failed to save approval policy' });
+    }
+  },
+
+  /**
+   * Entity types that have an active matching policy, per process.
+   * GET /hospitality/approval/policy-coverage?hotel_id=
+   * Company is derived server-side from the hotel (or the caller's whole scope).
+   */
+  async getPolicyCoverage(req, res) {
+    try {
+      const scopeIds = await resolveApprovalCompanyScope(req);
+      const raw = req.query.hotel_id;
+      let hotelId = null;
+      let companyArg;
+      if (raw !== undefined && raw !== null && raw !== '') {
+        hotelId = parseInt(raw, 10);
+        const hotel = Number.isFinite(hotelId)
+          ? await db.oneOrNone(
+              `SELECT hospitality_company_id FROM tbl_hospitality_company_hotels
+                WHERE id = $1 AND COALESCE(is_deleted, 0) = 0`,
+              [hotelId]
+            )
+          : null;
+        if (!hotel || !inCompanyScope(scopeIds, hotel.hospitality_company_id)) {
+          return res.status(404).json({ status: 2, message: 'Business unit not found' });
+        }
+        companyArg = Number(hotel.hospitality_company_id);
+      } else {
+        companyArg = scopeIds; // null = super admin, [] = nothing
+      }
+      const data = await getPolicyCoverage({ hospitalityCompanyId: companyArg, hotelId });
+      res.json({ status: 1, data });
+    } catch (e) {
+      logError(e);
+      res.status(400).json({ status: 3, message: e.message });
     }
   },
 
@@ -2084,7 +2131,7 @@ const processController = {
   async updateProcess(req, res) {
     try {
       const { id } = req.params;
-      const { name, description, is_active, process_type } = req.body;
+      const { name, description, is_active } = req.body;
 
       // SECURITY: tbl_approval_processes was mutable by id across tenants.
       if (!(await guardProcessTenant(req, res, parseInt(id)))) return;
@@ -2093,7 +2140,13 @@ const processController = {
       if (name !== undefined) patch.name = name;
       if (description !== undefined) patch.description = description;
       if (is_active !== undefined) patch.is_active = is_active;
-      if (process_type !== undefined) patch.process_type = process_type;
+      // process_type is fixed at creation: a PUT carrying it is ignored.
+
+      // Deactivating via PUT must obey the same in-use guard as DELETE.
+      if (is_active === false || is_active === 'false' || is_active === 0) {
+        const blockers = await getProcessBlockers(parseInt(id));
+        if (hasProcessBlockers(blockers)) return respondProcessInUse(res, blockers);
+      }
 
       const data = await updateApprovalProcess(parseInt(id), patch);
 
@@ -2118,9 +2171,12 @@ const processController = {
       // SECURITY: same cross-tenant hole as updateProcess, but destructive —
       // deactivating a process silently unroutes every policy hanging off it.
       if (!(await guardProcessTenant(req, res, parseInt(id)))) return;
+      const blockers = await getProcessBlockers(parseInt(id));
+      if (hasProcessBlockers(blockers)) return respondProcessInUse(res, blockers);
       await deleteApprovalProcess(parseInt(id));
       res.json({ status: 1, message: 'Process deactivated successfully' });
     } catch (e) {
+      if (e.code === 'PROCESS_IN_USE') return respondProcessInUse(res, e.blockers);
       logError(e);
       res.status(400).json({ status: 3, message: e.message });
     }

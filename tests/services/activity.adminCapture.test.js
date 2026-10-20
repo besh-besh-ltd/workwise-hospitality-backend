@@ -230,7 +230,7 @@ describe("company-wide administration", () => {
     const deleteEvent = await waitForEvent(since, "/general/hospitality/approval/processes/:id");
     expect(deleteEvent.event_key).toBe("approval_process_deleted");
     expect(deleteEvent.severity).toBe("critical");
-    expect(deleteEvent.summary).toBe('Platform Admin A deleted the approval workflow "Capex Approvals v2"');
+    expect(deleteEvent.summary).toBe('Platform Admin A deactivated the approval workflow "Capex Approvals v2"');
   });
 
   it("records creating and changing a custom role, by title", async () => {

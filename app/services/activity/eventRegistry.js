@@ -507,7 +507,7 @@ export const EVENTS = [
     method: 'DELETE', path: '/general/hospitality/approval/processes/:id', key: 'approval_process_deleted',
     category: CATEGORIES.APPROVAL_CONFIG, severity: 'critical',
     entity: { type: 'APPROVAL_PROCESS', id: P('id') }, scope: SCOPE.entity('APPROVAL_PROCESS'),
-    summary: (c) => `${c.actor} deleted the approval workflow "${c.entityLabel || `#${c.entityId}`}"`,
+    summary: (c) => `${c.actor} deactivated the approval workflow "${c.entityLabel || `#${c.entityId}`}"`,
   }),
 
   // The legacy approval hierarchy (pre-policy engine). Its tables are empty on
