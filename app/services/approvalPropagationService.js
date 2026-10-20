@@ -838,8 +838,9 @@ async function retireIneligibleRoleStep({ instanceId, stepId, roleId, resource, 
  *   revalidateApproverMembership. Additions are never unmatched: one that
  *   cannot be placed is appended (`stepsAdded[].placement === 'appended'`).
  *   A position-paired modification that lands on a closed step is reported as
- *   an addition (`stepsAdded[].converted_from === 'STEP_MODIFIED'`,
- *   `replaces_instance_step_id`), not in `stepsModified`. An added or modified
+ *   an addition placed at that step (`stepsAdded[].converted_from ===
+ *   'STEP_MODIFIED'`, `placement: 'replaced_step'`, `replaces_instance_step_id`),
+ *   not in `stepsModified`. An added or modified
  *   level that resolves to nobody carries `blocked: true, reason:
  *   'NO_APPROVERS_RESOLVED'`: its step is PENDING and nobody can approve it.
  *
@@ -1170,9 +1171,12 @@ export async function applyDiffToInstance(instance, diff, policy, changedBy, t, 
   // level plus the ADDITION of the new one: the closed step stays as history,
   // no longer linked to the level (it is left out of `stepOrigins`, and it
   // anchors nothing below), and the new source goes through the additions
-  // below — R1 placement, then R2/R3: inside the completed prefix → SKIPPED
-  // (revived as current if the instance would otherwise complete), at or after
-  // the current step → PENDING.
+  // below, placed AT the closed step's position (`placement:
+  // 'replaced_step'`, controller ruling). Then R2/R3: inside the completed
+  // prefix → SKIPPED, so [A,B] → [C,B] waiting at B does not send the approval
+  // back to level 1; revived as the current PENDING step only if the instance
+  // would otherwise complete ([A,B] → [C]). A closed step after the current
+  // one (a dead SKIPPED/REMOVED step ahead) puts the new level ahead → PENDING.
   const retiredStepIds = new Set();
   const convertedModifications = new Set();
   const convertedAdditions = [];
@@ -1235,7 +1239,16 @@ export async function applyDiffToInstance(instance, diff, policy, changedBy, t, 
     const newOrder = stepOrderOf(d.newStep);
     let insertPosition;
     let placement;
-    if (placeByNeighbours) {
+    if (d.replaces) {
+      // A converted position pair takes the place of the closed step it
+      // replaces (that step moves down one). Before the current step that is
+      // inside the completed prefix → SKIPPED: the approval is not sent back
+      // to a level it has passed. R3 still revives it if this edit would
+      // otherwise complete the instance.
+      insertPosition = d.replaces.step_order;
+      placement = 'replaced_step';
+      if (!placeByNeighbours) renumberOffset++;
+    } else if (placeByNeighbours) {
       let pred = null;
       let succ = null;
       if (additionsPlaceable) {

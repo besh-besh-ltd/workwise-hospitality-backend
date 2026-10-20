@@ -860,9 +860,10 @@ describe("a policy edit never completes a live approval through a position-paire
     ]);
   });
 
-  it("[A,B] -> [C] with A approved, waiting at B: C is asked, the instance does not complete", async () => {
+  it("[A,B] -> [C] with A approved, waiting at B: B goes, C is revived as current, the instance does not complete", async () => {
     const policy = POLICIES.pairedOntoApproved;
     const instance = await waitingOnB(policy);
+    const aStepId = (await instanceStepsOf(instance.id))[0].id;
 
     const client = await httpClient(ADMIN_ID);
     const res = await editPolicy(client, policy, [step(1, "USER", C_ID)]);
@@ -871,44 +872,64 @@ describe("a policy edit never completes a live approval through a position-paire
     // Position pairing reads this as "level 1 changed A→C, level 2 removed".
     // Level 1's step is already APPROVED, so the change was dropped there; B's
     // removal then left nothing pending and the instance completed with C
-    // never asked. C's level is an ADDITION to this instance.
+    // never asked. C's level is an ADDITION placed at A's position — inside
+    // the completed prefix, so SKIPPED (R2) — and, because removing B would
+    // otherwise complete the instance, revived as the current step (R3).
     const newIds = await policyStepIds(policy.id);
     expect(await shape(instance.id)).toEqual([
-      [1, "APPROVED", null], // A — history; its level is gone from the policy
-      [2, "REMOVED", null], // B
-      [3, "PENDING", newIds[1]], // C — added, current
+      [1, "PENDING", newIds[1]], // C — at A's position, revived, current
+      [2, "APPROVED", null], // A — history; its level is gone from the policy
+      [3, "REMOVED", null], // B
     ]);
-    expect(await instanceRow(instance.id)).toMatchObject({ status: "PENDING", current_step: 3 });
-    expect(await approverStatusAt(instance.id, 3, C_ID)).toBe("PENDING");
+    expect(await instanceRow(instance.id)).toMatchObject({ status: "PENDING", current_step: 1 });
+    expect(await approverStatusAt(instance.id, 1, C_ID)).toBe("PENDING");
     expect(res.body.propagation.instances_auto_completed).toBe(0);
     const summary = await lastChangeSummary(instance.id);
     expect(summary.autoCompleted).toBe(false);
     expect(summary.stepsAdded).toEqual([
-      expect.objectContaining({ step_order: 3, status: "PENDING", replaces_instance_step_id: (await instanceStepsOf(instance.id))[0].id }),
+      expect.objectContaining({
+        status: "PENDING",
+        revived: true,
+        placement: "replaced_step",
+        converted_from: "STEP_MODIFIED",
+        replaces_instance_step_id: aStepId,
+      }),
     ]);
 
     await approveStep(instance.id, C_ID);
     expect((await instanceRow(instance.id)).status).toBe("APPROVED");
   });
 
-  it("[A,B] -> [C,B] with A approved, waiting at B: C is placed in front of B and becomes current", async () => {
+  it("[A,B] -> [C,B] with A approved, waiting at B: C takes A's place in the completed prefix (SKIPPED), B stays current", async () => {
     const policy = POLICIES.pairedOntoApprovedBeforeCurrent;
     const instance = await waitingOnB(policy);
+    const aStepId = (await instanceStepsOf(instance.id))[0].id;
 
     const client = await httpClient(ADMIN_ID);
     const res = await editPolicy(client, policy, [step(1, "USER", C_ID), step(2, "USER", B_ID)]);
     expect(res.status).toBe(200);
 
+    // A level the instance has already passed: C replaces A where A sits, so
+    // it is written SKIPPED and the approval is NOT sent back to level 1.
     const newIds = await policyStepIds(policy.id);
     expect(await shape(instance.id)).toEqual([
-      [1, "APPROVED", null], // A — history
-      [2, "PENDING", newIds[1]], // C — immediately before B, so current
-      [3, "PENDING", newIds[2]], // B — still owed, after C
+      [1, "SKIPPED", newIds[1]], // C — at A's position, inside the completed prefix
+      [2, "APPROVED", null], // A — history
+      [3, "PENDING", newIds[2]], // B — still current
     ]);
-    expect(await instanceRow(instance.id)).toMatchObject({ status: "PENDING", current_step: 2 });
-
-    await approveStep(instance.id, C_ID);
     expect(await instanceRow(instance.id)).toMatchObject({ status: "PENDING", current_step: 3 });
+    expect(await approverStatusAt(instance.id, 1, C_ID)).toBeUndefined();
+    expect(res.body.propagation.instances_auto_completed).toBe(0);
+    expect((await lastChangeSummary(instance.id)).stepsAdded).toEqual([
+      expect.objectContaining({
+        step_order: 1,
+        status: "SKIPPED",
+        placement: "replaced_step",
+        converted_from: "STEP_MODIFIED",
+        replaces_instance_step_id: aStepId,
+      }),
+    ]);
+
     await approveStep(instance.id, B_ID);
     expect((await instanceRow(instance.id)).status).toBe("APPROVED");
   });
