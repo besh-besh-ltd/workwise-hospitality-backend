@@ -3,7 +3,24 @@ import { sendApprovalNotification, sendPONotificationToVendor } from '../control
 import { APPROVAL_DECISIONS, PO_STATUSES } from '../util/constants.js';
 import { sendApprovalStepNotification } from '../helper/sendEmailFunctions/approvalEmails.js';
 import { approvalStepEmailContext } from '../helper/approvalEmailContext.js';
-import { approvalActionUrl, entityLabel, buyerHome } from '../services/notificationLinks.js';
+import { approvalActionUrl, entityLabel, stageLabel, buyerHome } from '../services/notificationLinks.js';
+
+// ── Unit vs Group ARC awareness for notification copy ────────────────────────
+// Instances keep the unit entity types (ARC_TECH, ...); a Group ARC is only
+// visible through its policy (`entity_type LIKE 'ARC\_GROUP%'`).
+const isGroupArcPolicy = (policy) => /^ARC_GROUP(_|$)/.test(String(policy?.entity_type || ''));
+const withGroupFlag = (ctx, isGroup) => (isGroup ? { ...ctx, extraContext: { ...(ctx?.extraContext || {}), is_group: true } } : ctx);
+async function isGroupInstance(instance) {
+  if (!instance) return false;
+  if (typeof instance.is_group === 'boolean') return instance.is_group;
+  if (/^ARC_GROUP(_|$)/.test(String(instance.entity_type || ''))) return true;
+  if (!instance.approval_policy_id) return false;
+  try {
+    const pol = await db.oneOrNone('SELECT entity_type FROM tbl_approval_policies WHERE id = $1', [instance.approval_policy_id]);
+    return isGroupArcPolicy(pol);
+  } catch { return false; }
+}
+
 
 // Maps entity_type to the permission resource used in tbl_permissions
 export const ENTITY_APPROVE_RESOURCE_MAP = {
@@ -129,7 +146,7 @@ export const ENTITY_APPROVE_RESOURCE_MAP = {
   // other's negotiation rounds as in RFQ (20261019100200). See also
   // migrations/20260803110000_arc_stage_approver_permissions.sql.
   //
-  // ── ENTITY TYPES STILL UNMAPPED (e.g. INDENT, ARC_AMENDMENT) ──────────────
+  // ── ENTITY TYPES STILL UNMAPPED (e.g. INDENT) ──────────────
   // They fall back to `entity_type.toLowerCase()`, which yields UNDERSCORES
   // (`arc_amendment`) while the resource_type enum members use HYPHENS. Before
   // the `::text` cast added to roleHasReadAndApprovePermission that comparison
@@ -2491,7 +2508,7 @@ export async function createApprovalInstance({
       policy = await findBestMatchingPolicyTx({ entity_type, hospitality_company_id, hotel_id, department_id, process_id }, t);
       if (!policy) {
         throw new NoApprovalPolicyError(
-          `No approval policy found for ${entity_type} in this scope`,
+          `No approval policy found for ${stageLabel(entity_type)} in this scope`,
           { entity_type, hospitality_company_id, hotel_id, department_id, process_id }
         );
       }
@@ -2786,20 +2803,20 @@ export async function createApprovalInstance({
           );
         } else if (s.reason === 'ENTITY_TYPE_NOT_IN_RESOURCE_MAP' || s.reason === 'RESOURCE_NOT_IN_CATALOGUE') {
           lines.push(
-            `Step ${s.step_order}: ${who} cannot be checked because ${entity_type} has no ` +
+            `Step ${s.step_order}: ${who} cannot be checked because ${stageLabel(entity_type)} has no ` +
             `permission resource configured. This needs a platform fix, not a policy change.`
           );
         } else {
           // ROLE_LACKS_READ_AND_APPROVE / USER_LACKS_READ_AND_APPROVE
           lines.push(
-            `Step ${s.step_order}: ${who} can never approve this ${entity_type} — ` +
+            `Step ${s.step_order}: ${who} can never approve this ${stageLabel(entity_type)} step — ` +
             `missing ${s.resource}.approve and/or ${s.resource}.read.`
           );
         }
       }
 
       const err = new Error(
-        `Nobody can approve this ${entity_type}${whereText}, so it cannot be submitted yet — ` +
+        `Nobody can approve this ${stageLabel(entity_type)} step${whereText}, so it cannot be submitted yet — ` +
         `approval policy ${policy.id} resolved to zero usable approval steps. ` +
         `All ${policySteps.length} step(s) were dropped:\n` +
         lines.map(l => `  • ${l}`).join('\n') +
@@ -2979,7 +2996,10 @@ export async function createApprovalInstance({
         sendApprovalStepNotification({
           entityType: entity_type,
           entityId: entity_id,
-          ...approvalStepEmailContext(entity_type, entity_id, metadata),
+          ...withGroupFlag(
+            approvalStepEmailContext(entity_type, entity_id, metadata),
+            isGroupArcPolicy(policy)
+          ),
           stepOrder: firstPendingStep.step_order,
           totalSteps: instanceSteps.length,
           initiatorName: initiator?.name || 'Unknown',
@@ -3830,7 +3850,11 @@ export async function notifyNextApprovalStep(approval_instance_id, result) {
 
   try {
     const instance = await db.oneOrNone(
-      'SELECT entity_type, entity_id, metadata, initiated_by FROM tbl_approval_instances WHERE id = $1',
+      `SELECT ai.entity_type, ai.entity_id, ai.metadata, ai.initiated_by,
+              COALESCE(pol.entity_type LIKE 'ARC\\_GROUP%', false) AS is_group
+         FROM tbl_approval_instances ai
+         LEFT JOIN tbl_approval_policies pol ON pol.id = ai.approval_policy_id
+        WHERE ai.id = $1`,
       [approval_instance_id]
     );
     if (!instance) return;
@@ -3854,7 +3878,10 @@ export async function notifyNextApprovalStep(approval_instance_id, result) {
     sendApprovalStepNotification({
       entityType: instance.entity_type,
       entityId: instance.entity_id,
-      ...approvalStepEmailContext(instance.entity_type, instance.entity_id, metadata),
+      ...withGroupFlag(
+        approvalStepEmailContext(instance.entity_type, instance.entity_id, metadata),
+        instance.is_group
+      ),
       stepOrder: result.next_step,
       totalSteps: parseInt(totalSteps.count),
       initiatorName: initiator?.name || 'Unknown',
@@ -3948,7 +3975,7 @@ async function notifyApprovalCancelled(outcome, cancelledBy, reason) {
 
     const instance = outcome.__instance || {};
     const metadata = instance.metadata || {};
-    const label = entityLabel(instance.entity_type);
+    const label = entityLabel(instance.entity_type, { isGroup: await isGroupInstance(instance) });
     const identifier =
       metadata.rfq_no || metadata.po_number || metadata.mr_number || instance.entity_id;
 

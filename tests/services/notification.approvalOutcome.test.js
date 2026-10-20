@@ -175,7 +175,7 @@ describe("rejection tells the initiator", () => {
     const rows = await notificationsFor(INITIATOR, "approval_rejected");
     expect(rows).toHaveLength(1);
     expect(rows[0].title).toContain("Rejected");
-    expect(rows[0].title).toContain("Purchase Order");
+    expect(rows[0].title).toContain("Purchase order");
     expect(rows[0].title).toContain("PO-4471");
     // The reason is the single most useful thing to carry.
     expect(rows[0].message).toContain("Rates exceed the sanctioned budget");

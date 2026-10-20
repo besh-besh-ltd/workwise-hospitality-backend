@@ -30,6 +30,7 @@ import generalModel, {
 } from '../../models/generalModel.js';
 import { resolveHospitalityCompanyScope } from '../../helper/arc_v2/resolveHospitalityCompany.js';
 import { executeApprovalAction } from '../../services/approvalActionService.js';
+import { stageLabel } from '../../services/notificationLinks.js';
 import {
   snapshotPolicySteps,
   snapshotPendingInstanceStepLinks,
@@ -768,7 +769,7 @@ function unqualifiableRoleStepsResponse(entityType, offenders) {
     status: 3,
     code: 'APPROVER_ROLE_CANNOT_APPROVE',
     message:
-      `This approval step names a role that cannot approve ${entityType}. ` +
+      `This approval step names a role that cannot approve ${stageLabel(entityType)}. ` +
       `${detail}. Grant the missing permission(s) to the role, or pick a role that already holds them ` +
       `— otherwise the step is dropped when the approval is created and the request auto-approves with nobody having approved it.`,
     data: { entity_type: entityType, steps: offenders }

@@ -333,7 +333,7 @@ describe("ARC lifecycle — stage state machine end-to-end", () => {
     // flow correctness: next_stage, roles
     expect(techFlow.next_stage).toBe("commercial");
     expect(techFlow.action_taker_role).toBe("Technical evaluator");
-    expect(techFlow.approver_role).toBe("Technical approver");
+    expect(techFlow.approver_role).toBe("ARC Technical Approver");
 
     // approver resolved — PENDING instance, people includes TECH_APPROVER
     expect(techActors.approver.status).toBe("PENDING");
@@ -349,7 +349,7 @@ describe("ARC lifecycle — stage state machine end-to-end", () => {
     expect(techActors.contact.mobile).toBe("+919812345678");
     expect(techActors.contact.name).toBeTruthy();
     expect(techActors.contact.email).toBeTruthy();
-    expect(techActors.contact.role).toBe("Technical approver");
+    expect(techActors.contact.role).toBe("ARC Technical Approver");
 
     // action_taker resolved (BUYER has arc-tech.evaluate in this hotel/dept)
     expect(techActors.action_taker.people.length).toBeGreaterThan(0);

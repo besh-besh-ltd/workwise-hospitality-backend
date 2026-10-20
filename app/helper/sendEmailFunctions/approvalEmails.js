@@ -160,7 +160,7 @@ export const sendApprovalStepNotification = async ({
       return false;
     }
 
-    const label = entityLabel(entityType);
+    const label = entityLabel(entityType, { isGroup: Boolean(extraContext?.is_group) });
     // A null from the registry means the right record cannot be named; send the
     // approver to their own home rather than to the wrong one.
     const linkPath = approvalActionUrl(entityType, entityId, extraContext) || buyerHome();
@@ -946,7 +946,7 @@ export const sendApprovalCancelledNotification = async ({
   try {
     if (!approvers || approvers.length === 0) return false;
 
-    const label = entityLabel(entityType);
+    const label = entityLabel(entityType, { isGroup: Boolean(extraContext?.is_group) });
     // The instance is already gone here, so only the RFQ-level link is safe.
     const linkPath = (extraContext?.rfq_id
       ? approvalActionUrl(entityType, extraContext.rfq_id, extraContext, { idIsRfq: true })
@@ -1046,7 +1046,7 @@ export const sendPolicyChangeNotification = async ({
   try {
     if (!approvers || approvers.length === 0) return false;
 
-    const label = entityLabel(entityType);
+    const label = entityLabel(entityType, { isGroup: Boolean(extraContext?.is_group) });
     // A null from the registry means the right record cannot be named; send the
     // approver to their own home rather than to the wrong one.
     const linkPath = approvalActionUrl(entityType, entityId, extraContext) || buyerHome();
@@ -1151,7 +1151,7 @@ export const sendApproverRemovedNotification = async ({
   try {
     if (!approvers || approvers.length === 0) return false;
 
-    const label = entityLabel(entityType);
+    const label = entityLabel(entityType, { isGroup: Boolean(extraContext?.is_group) });
 
     const reasonLabel = changeReason === 'policy_change' ? 'the approval policy was updated'
       : changeReason === 'role_removed' ? 'your role assignment was changed'
@@ -1242,7 +1242,7 @@ export const sendApprovalStandsNotification = async ({
   try {
     if (!approvers || approvers.length === 0) return false;
 
-    const label = entityLabel(entityType);
+    const label = entityLabel(entityType, { isGroup: Boolean(extraContext?.is_group) });
 
     const reasonLabel = changeReason === 'policy_change' ? 'the approval policy was updated'
       : changeReason === 'role_removed' ? 'a role assignment was changed'
@@ -1338,7 +1338,7 @@ export const sendApproverAddedMidFlightNotification = async ({
   try {
     if (!approvers || approvers.length === 0) return false;
 
-    const label = entityLabel(entityType);
+    const label = entityLabel(entityType, { isGroup: Boolean(extraContext?.is_group) });
     // A null from the registry means the right record cannot be named; send the
     // approver to their own home rather than to the wrong one.
     const linkPath = approvalActionUrl(entityType, entityId, extraContext) || buyerHome();

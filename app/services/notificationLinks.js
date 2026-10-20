@@ -235,29 +235,73 @@ export const buyerProfile       = () => '/dashboard/buyer/editprofile';
 // ─── Approval-engine entity routing ──────────────────────────────────────────
 
 /**
- * Human-readable labels for every approval entity type that can reach a user.
- * Without an entry here the raw enum leaks into the notification title, e.g.
- * "Action required: Approve ARC_PUBLISH #ID-12".
+ * One vocabulary for approval stages, shared with the frontend copy table.
+ *
+ *  - ENTITY_LABELS  → NOUN used inside a sentence ("Approve Negotiation round #12").
+ *  - STAGE_LABELS   → STAGE LABEL used where a stage is named on its own
+ *                     (error messages, dashboards): "Final Vendor Approval".
+ *
+ * Approval instances keep the unit ARC types (ARC_PUBLISH, ARC_TECH, ...); a
+ * Group ARC is only visible through its policy (`ARC_GROUP*`), so callers pass
+ * `{ isGroup }` when they know the instance belongs to a group policy.
+ * Without an entry the raw enum would leak, e.g. "Approve ARC_PUBLISH #ID-12".
  */
 export const ENTITY_LABELS = Object.freeze({
   RFQ:               'RFQ',
   TENDER:            'Tender',
-  TECHNICAL:         'Technical Evaluation',
-  NEGOTIATION:       'Negotiation',
-  NEGOTIATION_QUOTE: 'Vendor Finalization',
-  PO:                'Purchase Order',
+  TECHNICAL:         'Technical evaluation',
+  NEGOTIATION:       'Negotiation round',
+  NEGOTIATION_QUOTE: 'Final vendor selection',
+  PO:                'Purchase order',
   MR:                'Material Requisition',
-  ARC:               'Rate Contract',
-  ARC_PUBLISH:       'Rate Contract Publication',
-  ARC_TECH:          'Rate Contract Technical Evaluation',
-  ARC_COMMERCIAL:    'Rate Contract Commercial Evaluation',
-  ARC_COMMITTEE:     'Rate Contract Committee Decision',
-  ARC_NEGOTIATION:   'Rate Contract Negotiation',
-  ARC_AMENDMENT:     'Rate Contract Amendment',
+  ARC:               'ARC',
+  ARC_PUBLISH:       'ARC',
+  ARC_TECH:          'ARC technical evaluation',
+  ARC_COMMERCIAL:    'ARC commercial evaluation',
+  ARC_COMMITTEE:     'ARC committee decision',
+  ARC_NEGOTIATION:   'ARC negotiation round',
+  ARC_AMENDMENT:     'ARC amendment',
 });
 
-export const entityLabel = (entityType) =>
-  ENTITY_LABELS[entityType] || 'Approval';
+export const STAGE_LABELS = Object.freeze({
+  RFQ:               'RFQ Approval',
+  TENDER:            'Tender Approval',
+  TECHNICAL:         'Technical Approval',
+  NEGOTIATION:       'Negotiation Round Approval',
+  NEGOTIATION_QUOTE: 'Final Vendor Approval',
+  PO:                'PO Approval',
+  MR:                'Material Requisition Approval',
+  ARC:               'ARC · Publish Approval',
+  ARC_PUBLISH:       'ARC · Publish Approval',
+  ARC_TECH:          'ARC · Technical Approval',
+  ARC_COMMERCIAL:    'ARC · Commercial Approval',
+  ARC_COMMITTEE:     'ARC · Committee Approval',
+  ARC_NEGOTIATION:   'ARC · Negotiation Round Approval',
+  ARC_AMENDMENT:     'ARC · Amendment Approval',
+});
+
+/** 'ARC_GROUP_TECH' → 'ARC_TECH'; 'ARC_GROUP' → 'ARC'; others unchanged. */
+const toUnitType = (t) => String(t || '').replace(/^ARC_GROUP(?=_|$)/, 'ARC');
+const isGroupType = (t) => /^ARC_GROUP(_|$)/.test(String(t || ''));
+
+const qualify = (label, type, isGroup) => {
+  if (!String(type).startsWith('ARC')) return label;
+  const kind = isGroup ? 'Group' : 'Unit';
+  return label.replace(/^ARC/, `${kind} ARC`);
+};
+
+const resolveVocab = (table, fallback, entityType, isGroup) => {
+  const group = Boolean(isGroup) || isGroupType(entityType);
+  const unit = toUnitType(entityType);
+  const base = table[unit];
+  return base ? qualify(base, unit, group) : fallback;
+};
+
+export const entityLabel = (entityType, { isGroup = false } = {}) =>
+  resolveVocab(ENTITY_LABELS, 'Approval', entityType, isGroup);
+
+export const stageLabel = (entityType, { isGroup = false } = {}) =>
+  resolveVocab(STAGE_LABELS, 'Approval', entityType, isGroup);
 
 /**
  * Where an approver goes to action a pending approval step.
@@ -392,6 +436,8 @@ export default {
   buyerProfile,
   ENTITY_LABELS,
   entityLabel,
+  stageLabel,
+  STAGE_LABELS,
   approvalActionUrl,
   toAbsoluteUrl,
 };

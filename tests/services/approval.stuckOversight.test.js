@@ -135,6 +135,13 @@ describe("classifying what is stuck", () => {
     expect(row.entity_ref).not.toBe(String(rfqId));
   });
 
+  it("tells the screen whether the item belongs to a Group ARC (an RFQ never does)", async () => {
+    const { instanceId } = await seedRfqApproval({ bidOffsetMs: 7 * 86400_000 });
+    const client = await httpClient(ADMIN);
+    const row = rowFor((await client.get(STUCK_URL)).body, instanceId);
+    expect(row.is_group).toBe(false);
+  });
+
   it("calls it waiting when a live person could act right now", async () => {
     const { instanceId } = await seedRfqApproval({ bidOffsetMs: 7 * 86400_000 });
     const client = await httpClient(ADMIN);
