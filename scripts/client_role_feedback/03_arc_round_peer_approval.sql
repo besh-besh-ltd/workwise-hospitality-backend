@@ -53,7 +53,7 @@ BEGIN
   PERFORM 1 FROM tbl_approval_policies p
     JOIN tbl_hospitality_companies hc ON hc.id = p.hospitality_company_id
    WHERE hc.buyer_company_id = prm.buyer_company_id AND p.entity_type = ANY (prm.arc_round_entity_types)
-   FOR UPDATE OF p;
+   FOR NO KEY UPDATE OF p;   -- only version/updated_at change
 
   CREATE TEMP TABLE _t03 AS
   SELECT p.id AS policy_id, p.entity_type, p.is_active, p.hospitality_company_id, p.hotel_id,
@@ -66,7 +66,8 @@ BEGIN
      AND p.entity_type = ANY (prm.arc_round_entity_types)
      AND s.approver_source_type = 'ROLE' AND s.approver_source_id = v_from
      AND (SELECT count(*) FROM tbl_approval_policy_steps x WHERE x.approval_policy_id = p.id) = 1;
-  PERFORM 1 FROM tbl_approval_policy_steps WHERE id IN (SELECT step_id FROM _t03) FOR UPDATE;
+  -- only approver_source_id / decision_rule change (non-key columns)
+  PERFORM 1 FROM tbl_approval_policy_steps WHERE id IN (SELECT step_id FROM _t03) FOR NO KEY UPDATE;
 
   SELECT COALESCE(array_agg(policy_id ORDER BY policy_id), '{}') INTO v_ids FROM _t03;
   IF cardinality(v_ids) <> prm.expected_arc_round_policies
@@ -182,6 +183,13 @@ BEGIN
                         AND pm.resource::text = (SELECT m.resource FROM _resource_map m WHERE m.entity_type = t.entity_type)
                         AND pm.action IN ('read', 'approve')) <> 2) THEN
     RAISE EXCEPTION 'a converted step would not pass the read+approve gate for its entity type';
+  END IF;
+
+  SELECT count(*) INTO n FROM tbl_approval_policy_change_log
+   WHERE change_type = 'SCRIPT_ARC_ROUND_PEER_APPROVAL' AND change_summary->>'request_id' = prm.request_id::text
+     AND changed_by = prm.actor_id AND approval_policy_id IN (SELECT policy_id FROM _t03);
+  IF n <> (SELECT count(*) FROM _t03) THEN
+    RAISE EXCEPTION 'expected % change-log row(s), found %', (SELECT count(*) FROM _t03), n;
   END IF;
 
   PERFORM pg_temp.bak_put('03', 'tbl_approval_policies',     'after', (SELECT array_agg(policy_id) FROM _t03));

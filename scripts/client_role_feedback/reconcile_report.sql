@@ -2,10 +2,12 @@
 -- RECONCILE REPORT · policies vs in-flight approvals, for one buyer
 --
 -- READ-ONLY (SELECTs only; no temp objects, so it also runs inside a
--- default_transaction_read_only session). run.sh runs it, together with
--- scripts/audit_approval_rbac_coherence.sql, before and after every step —
--- inside the step's own transaction, so the after-report of a DRY run shows
--- exactly what the step would change — and prints the diff.
+-- default_transaction_read_only session). Buyer-scoped and quick, so run.sh
+-- runs it before and after every step INSIDE the step's own transaction (the
+-- after-report of a DRY run shows exactly what the step would change) and
+-- prints the diff. The platform-wide scripts/audit_approval_rbac_coherence.sql
+-- is heavy and runs only in separate read-only sessions (never while the
+-- step holds row locks).
 --
 --   ./run.sh reconcile                                  # whole buyer
 --   ./run.sh reconcile -v target_policies='{1001,1003}' # only these policies
@@ -249,8 +251,6 @@ SELECT metric, value FROM (
                        WHERE x.approval_policy_id = ps.inst_policy AND x.step_order <> ps.step_order
 ) t ORDER BY o;
 
--- Output stays unaligned on purpose: run.sh appends the RBAC coherence audit
--- next, and aligned columns would re-flow whole tables in the diff whenever
--- one value's width changes.
+-- Output stays unaligned on purpose: aligned columns would re-flow whole
+-- tables in a diff whenever one value's width changes.
 \qecho ''
-\qecho '════ RBAC COHERENCE AUDIT (scripts/audit_approval_rbac_coherence.sql, sections A-F)'

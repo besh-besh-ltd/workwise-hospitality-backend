@@ -29,9 +29,9 @@ BEGIN
   SELECT * INTO STRICT prm FROM _params;
 
   PERFORM 1 FROM tbl_approval_policies
-   WHERE id IN (SELECT row_id FROM _bak WHERE src_table = 'tbl_approval_policies') FOR UPDATE;
+   WHERE id IN (SELECT row_id FROM _bak WHERE src_table = 'tbl_approval_policies') FOR NO KEY UPDATE;
   PERFORM 1 FROM tbl_approval_policy_steps
-   WHERE id IN (SELECT row_id FROM _bak WHERE src_table = 'tbl_approval_policy_steps') FOR UPDATE;
+   WHERE id IN (SELECT row_id FROM _bak WHERE src_table = 'tbl_approval_policy_steps') FOR NO KEY UPDATE;
 
   FOR r IN
     -- policies: updated_at is trigger-stamped on every write, so it is not drift

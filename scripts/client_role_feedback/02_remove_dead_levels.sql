@@ -21,14 +21,16 @@
 -- dead level, so instance step 1 already IS the surviving level 1.
 --
 -- Historical (non-PENDING) instance steps that still link the deleted step
--- (from before the role lost authority) lose that link through
--- fk_instance_step_policy_step ON DELETE SET NULL; they are backed up and
--- 99_rollback_02 restores them.
+-- would lose that link through fk_instance_step_policy_step ON DELETE SET
+-- NULL. Their number is pinned (data.sql expected_dead_level_history_links,
+-- prod 0); if an override allows some, they are backed up and 99_rollback_02
+-- restores them.
 --
 -- Refuses unless: count and per-type breakdown equal data.sql; each target
 -- role title names exactly one system role; one dead level per policy; every
 -- policy keeps at least one level; NO step of a PENDING instance (any step
--- status) links a dead level; in-flight approvals identical afterwards.
+-- status) links a dead level; the historical-link count equals data.sql;
+-- in-flight approvals identical afterwards.
 -- ═══════════════════════════════════════════════════════════════════════════
 \ir lib/backup.sql
 \set pending_snapshot _pending_before
@@ -56,7 +58,10 @@ BEGIN
     END IF;
   END LOOP;
 
-  -- lock every policy of the buyer that names one of the roles, then its steps
+  -- Lock every policy of the buyer that names one of the roles. FOR NO KEY
+  -- UPDATE: only version/updated_at change, so new approval instances (their
+  -- FK check takes KEY SHARE on the policy row) are not blocked, while an
+  -- admin policy edit (which locks the policy row) waits for us.
   PERFORM 1
      FROM tbl_approval_policies p
      JOIN tbl_hospitality_companies hc ON hc.id = p.hospitality_company_id
@@ -65,7 +70,7 @@ BEGIN
                     JOIN tbl_roles x ON x.id = s.approver_source_id AND x.created_by IS NULL
                    WHERE s.approval_policy_id = p.id AND s.approver_source_type = 'ROLE'
                      AND x.title = ANY (prm.dead_level_role_titles))
-    FOR UPDATE OF p;
+    FOR NO KEY UPDATE OF p;
 
   CREATE TEMP TABLE _t02_dead AS
   SELECT p.id AS policy_id, p.entity_type, p.is_active, p.hospitality_company_id, p.hotel_id, p.process_id,
@@ -84,8 +89,13 @@ BEGIN
            WHERE rp.role_id = r.id AND pm.resource::text = m.resource
              AND pm.action IN ('read', 'approve')) < 2;
 
-  PERFORM 1 FROM tbl_approval_policy_steps
-   WHERE approval_policy_id IN (SELECT policy_id FROM _t02_dead) FOR UPDATE;
+  -- FOR UPDATE only on the steps that change: the dead one (deleted) and the
+  -- ones after it (renumbered — step_order is a KEY column, it sits in the
+  -- unique idx_unique_step_order, so the UPDATE takes FOR UPDATE anyway;
+  -- taking it now avoids a lock upgrade). Earlier steps are not touched.
+  PERFORM 1 FROM tbl_approval_policy_steps s
+    JOIN _t02_dead d ON d.policy_id = s.approval_policy_id AND s.step_order >= d.step_order
+     FOR UPDATE OF s;
 
   SELECT string_agg(DISTINCT entity_type, ', ') INTO v_list FROM _t02_dead WHERE resource IS NULL;
   IF v_list IS NOT NULL THEN
@@ -136,14 +146,25 @@ BEGIN
     RAISE EXCEPTION E'PENDING instance step(s) link a level being removed — refusing:\n  - %', v_list;
   END IF;
 
-  -- history that does: backed up, NULLed by the FK, restored by the rollback
+  -- History that does (non-PENDING instances): deleting the level NULLs the
+  -- link (fk_instance_step_policy_step ON DELETE SET NULL). Pinned by data.sql
+  -- (prod: 0); when an override allows some, they are backed up, NULLed by the
+  -- FK, and restored by 99_rollback_02.
   CREATE TEMP TABLE _t02_history AS
   SELECT s.id, s.approval_instance_id, s.policy_step_id
     FROM tbl_approval_instance_steps s
    WHERE s.policy_step_id IN (SELECT step_id FROM _t02_dead);
-  PERFORM 1 FROM tbl_approval_instance_steps WHERE id IN (SELECT id FROM _t02_history) FOR UPDATE;
-  RAISE NOTICE '% historical (non-PENDING) instance step(s) link a removed level; the FK will NULL them (backed up)',
-    (SELECT count(*) FROM _t02_history);
+  PERFORM 1 FROM tbl_approval_instance_steps WHERE id IN (SELECT id FROM _t02_history) FOR NO KEY UPDATE;
+  SELECT count(*) INTO n FROM _t02_history;
+  IF n <> prm.expected_dead_level_history_links THEN
+    SELECT string_agg(format('instance %s step %s → policy step %s', approval_instance_id, id, policy_step_id),
+                      E'\n  - ' ORDER BY approval_instance_id, id)
+      INTO v_list FROM _t02_history;
+    RAISE EXCEPTION E'found % historical instance step link(s) to the levels being removed, expected % — refusing:\n  - %',
+      n, prm.expected_dead_level_history_links, COALESCE(v_list, '(none)');
+  END IF;
+  RAISE NOTICE '% historical (non-PENDING) instance step link(s) to a removed level (expected %); the FK NULLs them, backed up',
+    n, prm.expected_dead_level_history_links;
 
   FOR rec IN
     SELECT d.*, (SELECT count(*) FROM tbl_approval_instances i

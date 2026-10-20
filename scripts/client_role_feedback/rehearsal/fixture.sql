@@ -11,6 +11,9 @@
 -- 27 TECHNICAL + 1 TENDER, 1 ARC round policy), so the rehearsal runs the
 -- exact command lines the production run will use, with no overrides.
 --
+-- Like prod, no instance step links a dead level. rehearse_local.sh adds such
+-- a history row for one scenario (instance 7004) and removes it again.
+--
 -- Shape (buyer tbl_company 13 = the client):
 --   hosp co 3  hotels 4 (Orchid Pune), 11      core scenarios
 --   hosp co 5  hotel 6 (Orchid Mumbai)          ARC policy 221 + a tenant role
@@ -191,7 +194,6 @@ INSERT INTO tbl_approval_instances (id, entity_type, entity_id, approval_policy_
   (7001, 'RFQ',             5001, 1001, 'PENDING',  1, 3, 4,    1,    9101, 2,    '2026-10-01 09:00', NULL),
   (7002, 'RFQ',             5002, 1001, 'PENDING',  1, 3, 4,    1,    9101, 2,    '2026-10-01 09:01', NULL),
   (7003, 'RFQ',             5003, 1001, 'APPROVED', 1, 3, 4,    1,    9101, 2,    '2026-09-01 09:00', '2026-09-02 09:00'),
-  (7004, 'RFQ',             5004, 1002, 'APPROVED', 2, 3, 4,    NULL, 9101, 2,    '2026-02-02 09:00', '2026-02-03 09:00'),
   (7005, 'RFQ',             5005, 1003, 'PENDING',  2, 3, 11,   2,    9101, 2,    '2026-10-02 09:00', NULL),
   (7006, 'TECHNICAL',       6001, 1101, 'PENDING',  1, 3, 4,    1,    9104, 2,    '2026-10-03 09:00', NULL),
   (7007, 'TECHNICAL',       6002, 1102, 'PENDING',  1, 3, 11,   1,    9104, 2,    '2026-10-03 09:01', NULL),
@@ -203,11 +205,6 @@ INSERT INTO tbl_approval_instance_steps (id, approval_instance_id, policy_step_i
   (7101, 7001, 10012, 1, 'ANY', 'PENDING',  NULL),
   (7102, 7002, NULL,  1, 'ANY', 'PENDING',  NULL),
   (7103, 7003, 10012, 1, 'ANY', 'APPROVED', '2026-09-02 09:00'),
-  -- history from before the Creator lost authority: links the dead step itself.
-  -- Deleting that step NULLs this link (FK ON DELETE SET NULL); 02 backs it up
-  -- and 99_rollback_02 restores it.
-  (7104, 7004, 10021, 1, 'ANY', 'APPROVED', '2026-02-02 12:00'),
-  (7105, 7004, 10022, 2, 'ANY', 'APPROVED', '2026-02-03 09:00'),
   (7106, 7005, 10032, 1, 'ALL', 'APPROVED', '2026-10-02 12:00'),
   (7107, 7005, 10033, 2, 'ANY', 'PENDING',  NULL),
   (7108, 7006, 11012, 1, 'ANY', 'PENDING',  NULL),
@@ -221,8 +218,6 @@ INSERT INTO tbl_approval_step_approvers (id, approval_instance_step_id, approver
   (7202, 7101, 9103, 'PENDING',  NULL, NULL, NULL),
   (7203, 7102, 9102, 'PENDING',  NULL, NULL, NULL),
   (7204, 7103, 9102, 'APPROVED', '2026-09-02 09:00', NULL, NULL),
-  (7205, 7104, 9101, 'APPROVED', '2026-02-02 12:00', NULL, NULL),
-  (7206, 7105, 9102, 'APPROVED', '2026-02-03 09:00', NULL, NULL),
   (7207, 7106, 9102, 'APPROVED', '2026-10-02 12:00', NULL, NULL),
   (7208, 7106, 9103, 'APPROVED', '2026-10-02 12:30', NULL, NULL),
   (7209, 7107, 9106, 'PENDING',  NULL, NULL, NULL),

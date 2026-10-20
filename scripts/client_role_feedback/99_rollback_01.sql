@@ -27,8 +27,9 @@ DECLARE
   n        int;
 BEGIN
   -- lock what we are about to touch
-  PERFORM 1 FROM tbl_approval_processes WHERE id IN (SELECT row_id FROM _bak WHERE src_table = 'tbl_approval_processes') FOR UPDATE;
-  PERFORM 1 FROM tbl_approval_policies  WHERE id IN (SELECT row_id FROM _bak WHERE src_table = 'tbl_approval_policies')  FOR UPDATE;
+  -- only is_active / updated_at change: non-key, FOR NO KEY UPDATE
+  PERFORM 1 FROM tbl_approval_processes WHERE id IN (SELECT row_id FROM _bak WHERE src_table = 'tbl_approval_processes') FOR NO KEY UPDATE;
+  PERFORM 1 FROM tbl_approval_policies  WHERE id IN (SELECT row_id FROM _bak WHERE src_table = 'tbl_approval_policies')  FOR NO KEY UPDATE;
 
   -- drift: every live row must still equal what 01 left behind (roll later
   -- steps back first: 02 touches policies 01 deactivated)

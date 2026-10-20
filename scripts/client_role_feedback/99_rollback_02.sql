@@ -33,10 +33,12 @@ BEGIN
   CREATE TEMP TABLE _rb02_policies AS
   SELECT DISTINCT row_id AS id FROM _bak WHERE src_table = 'tbl_approval_policies';
 
-  PERFORM 1 FROM tbl_approval_policies WHERE id IN (SELECT id FROM _rb02_policies) FOR UPDATE;
+  -- policies: only version changes (non-key). Steps: step_order is a key
+  -- column (idx_unique_step_order), so the renumbering takes FOR UPDATE anyway.
+  PERFORM 1 FROM tbl_approval_policies WHERE id IN (SELECT id FROM _rb02_policies) FOR NO KEY UPDATE;
   PERFORM 1 FROM tbl_approval_policy_steps WHERE approval_policy_id IN (SELECT id FROM _rb02_policies) FOR UPDATE;
   PERFORM 1 FROM tbl_approval_instance_steps
-   WHERE id IN (SELECT row_id FROM _bak WHERE src_table = 'tbl_approval_instance_steps') FOR UPDATE;
+   WHERE id IN (SELECT row_id FROM _bak WHERE src_table = 'tbl_approval_instance_steps') FOR NO KEY UPDATE;
 
   -- ── drift: the live rows must be exactly what step 02 left ────────────────
   FOR r IN

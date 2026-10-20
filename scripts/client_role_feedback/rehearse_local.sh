@@ -70,7 +70,14 @@ refused() {
     tail -40 "$out/$run_label.out"; fail "$run_label: refused, but not with: $pattern"
   fi
 }
-report() { ls "$out/$1"/*-"$2"-*.txt; }   # report <label> before|after|committed
+# report <label> before|after|committed|audit-before|audit-after → that run's file
+report() {
+  local f
+  for f in "$out/$1"/*.txt; do
+    if [[ "${f##*/}" =~ ^(0[0-9]|rollback0[0-9])-$2-[0-9]{8}T[0-9]{6}-[0-9a-f]{8}[.]txt$ ]]; then echo "$f"; return 0; fi
+  done
+  fail "no $2 report in $1"
+}
 # one reconcile section (R0..R8) of a report file
 sect() { awk -v s="── $2 " 'index($0, s) == 1 {p = 1; print; next} /^── R[0-9] / {p = 0} /^$/ {next} p' "$1"; }
 same_sections() { # same_sections <label> R2 R3 …
@@ -151,8 +158,13 @@ if ( ENV_FILE="$envf" "$here/run.sh" 01 ) > "$out/gate-nodb.out" 2>&1; then fail
 grep -q "TARGET_DB is required" "$out/gate-nodb.out" && pass "refused without TARGET_DB"
 refused gate-commit-noconfirm "requires CONFIRM_DB" 01 --commit
 CONFIRM_DB=hospitality_main refused gate-commit-wrongdb "but the connection resolved to $REH_DB" 01 --commit
-refused gate-locked-var "cannot be overridden" 01 -v buyer_company_id=90
+refused gate-locked-var "cannot be set" 01 -v buyer_company_id=90
 refused gate-bad-arg "unknown argument" 01 --force
+CONFIRM_DB="$REH_DB" refused gate-dry-commit "--dry and --commit together" 01 --dry --commit
+refused gate-bad-count "does not match" 02 -v "expected_dead_level_policies=53; DROP TABLE tbl_roles"
+refused gate-bad-ids "does not match" 01 -v "expected_unused_policy_ids={8,190}) OR (1=1"
+refused gate-bad-breakdown "does not match" 02 -v "expected_dead_level_breakdown=RFQ=25'--"
+refused gate-bad-uuid "does not match" 99_rollback_01 -v rollback_request_id=not-a-uuid
 same_state "$S0" "database unchanged by the refused runs"
 
 section "reconcile (read-only)"
@@ -172,6 +184,10 @@ section "step 01 · deactivate unused processes + policies"
 ok 01-dry 01
 grep -q "matcher snapshot unchanged" "$out/01-dry.out" && pass "matcher snapshot equal (dry)"
 grep -q "ROLLED BACK (dry run)" "$out/01-dry.out" && pass "dry run ended in ROLLBACK"
+pass "$(grep -m1 -o 'transaction open [0-9.]* s' "$out/01-dry.out") (01 DRY, row locks held from the preflight to the end)"
+if grep -q "RBAC COHERENCE AUDIT" "$(report 01-dry before)" "$(report 01-dry after)"; then fail "the audit ran inside the write transaction"; fi
+grep -q "RBAC COHERENCE AUDIT" "$(report 01-dry audit-before)" && pass "coherence audit ran in its own read-only session, not in the write transaction"
+grep -q "a DRY run changes nothing, so there is no after" "$out/01-dry.out" && pass "DRY: no post-run audit (nothing committed)"
 same_state "$S0" "01 DRY left the database unchanged"
 no_backup_tables 0
 
@@ -191,6 +207,8 @@ check "$(q "SELECT count(*) FROM tbl_audit_row_changes WHERE request_id = '$RID0
       "8 row updates audited with actor 150 + request id"
 check "$(q "SELECT count(*) || ' ' || string_agg(DISTINCT phase, '/') FROM ops_backup._bak_01_${RID01A:0:8}")" "16 after/before" "backup holds 8 before + 8 after images"
 grep -q "post-commit report (fresh read-only session) equals" "$out/01-commit.out" && pass "post-commit report = in-transaction after-report"
+grep -q "^-F. NOBODY CAN APPROVE IN THIS DEPARTMENT | 192 | NEGOTIATION" "$out/01-commit.out" \
+  && pass "audit diff (read-only before → after commit) drops the section-F rows of deactivated policy 192"
 same_sections 01-commit R2 R3 R4 R5 R6 R7
 S01A="$(snap s01a)"
 REQUEST_ID="$(rid)" CONFIRM_DB="$REH_DB" refused 01-rerun "(already applied?)" 01 --commit
@@ -222,6 +240,34 @@ q "INSERT INTO tbl_approval_policies (id, entity_type, hospitality_company_id, h
    INSERT INTO tbl_approval_policy_steps (id, approval_policy_id, step_order, approver_source_type, approver_source_id) VALUES (19991, 1999, 1, 'ROLE', 2)" > /dev/null
 refused 02-empty-policy "no level left" 02 -v expected_dead_level_policies=54 -v expected_dead_level_breakdown=RFQ=26,TECHNICAL=27,TENDER=1
 q "DELETE FROM tbl_approval_policy_steps WHERE id = 19991; DELETE FROM tbl_approval_policies WHERE id = 1999" > /dev/null
+q "INSERT INTO tbl_approval_policies (id, entity_type, hospitality_company_id, hotel_id, process_id, is_active, created_by) VALUES (1998, 'RFQ', 3, 4, 2, false, 150);
+   INSERT INTO tbl_approval_policy_steps (id, approval_policy_id, step_order, approver_source_type, approver_source_id) VALUES
+     (19981, 1998, 1, 'ROLE', 2), (19982, 1998, 2, 'ROLE', 6), (19983, 1998, 3, 'ROLE', 4)" > /dev/null
+refused 02-two-dead-levels "policies 1998 carry more than one dead level" 02 -v expected_dead_level_policies=54 -v expected_dead_level_breakdown=RFQ=26,TECHNICAL=27,TENDER=1
+q "DELETE FROM tbl_approval_policy_steps WHERE approval_policy_id = 1998; DELETE FROM tbl_approval_policies WHERE id = 1998" > /dev/null
+same_state "$S1" "database unchanged by the refusals"
+
+# History linking a dead level (prod: 0, pinned in data.sql). Refused by
+# default; allowed by an explicit override, NULLed by the FK, backed up, and
+# restored by the rollback. Then the history row is removed again.
+q "INSERT INTO tbl_approval_instances (id, entity_type, entity_id, approval_policy_id, status, current_step, hospitality_company_id, hotel_id, initiated_by, process_id, created_at, completed_at)
+     VALUES (7004, 'RFQ', 5004, 1002, 'APPROVED', 2, 3, 4, 9101, 2, '2026-02-02 09:00', '2026-02-03 09:00');
+   INSERT INTO tbl_approval_instance_steps (id, approval_instance_id, policy_step_id, step_order, decision_rule, status, completed_at) VALUES
+     (7104, 7004, 10021, 1, 'ANY', 'APPROVED', '2026-02-02 12:00'), (7105, 7004, 10022, 2, 'ANY', 'APPROVED', '2026-02-03 09:00');
+   INSERT INTO tbl_approval_step_approvers (id, approval_instance_step_id, approver_user_id, status, acted_at) VALUES
+     (7205, 7104, 9101, 'APPROVED', '2026-02-02 12:00'), (7206, 7105, 9102, 'APPROVED', '2026-02-03 09:00')" > /dev/null
+SH="$(snap s1-with-history)"
+refused 02-history-unexpected "found 1 historical instance step link(s) to the levels being removed, expected 0" 02
+RID02H="$(rid)"
+REQUEST_ID="$RID02H" CONFIRM_DB="$REH_DB" ok 02-history-commit 02 --commit -v expected_dead_level_history_links=1
+check "$(q "SELECT COALESCE(policy_step_id::text, 'NULL') FROM tbl_approval_instance_steps WHERE id = 7104")" "NULL" \
+      "with the override: historical step 7104's link to the deleted level NULLed by the FK"
+check "$(q "SELECT string_agg(phase || ':' || COALESCE(row_data->>'policy_step_id', 'NULL'), ' ' ORDER BY phase DESC) FROM ops_backup._bak_02_${RID02H:0:8} WHERE src_table = 'tbl_approval_instance_steps'")" \
+      "before:10021 after:NULL" "…and backed up (before-image keeps the link)"
+CONFIRM_DB="$REH_DB" ok rb02-history 99_rollback_02 --commit -v rollback_request_id="$RID02H"
+same_state "$SH" "rollback 02 restored 7104's link along with the levels"
+q "DELETE FROM tbl_approval_instances WHERE id = 7004" > /dev/null
+same_state "$S1" "history row removed again: back to the post-01 state"
 
 RID02A="$(rid)"
 REQUEST_ID="$RID02A" CONFIRM_DB="$REH_DB" ok 02-commit 02 --commit
@@ -242,8 +288,6 @@ check "$(q "SELECT count(*) || '/' || count(*) FILTER (WHERE changed_by = 150 AN
 check "$(q "SELECT change_summary->'removed_step'->>'id' || ' ' || (change_summary->'renumbered')::text FROM tbl_approval_policy_change_log
              WHERE approval_policy_id = 1003 AND change_summary->>'request_id' = '$RID02A'")" \
       '10031 [{"id": 10032, "to": 1, "from": 2}, {"id": 10033, "to": 2, "from": 3}]' "change log of 1003 names the removed step and the renumbering"
-check "$(q "SELECT COALESCE(policy_step_id::text, 'NULL') FROM tbl_approval_instance_steps WHERE id = 7104")" "NULL" \
-      "historical step 7104's link to the deleted level was NULLed by the FK (and backed up)"
 if diff -u "$out/pending-before-02.txt" <(pending_state); then
   pass "PENDING instances byte-identical: steps, approvers, statuses, current_step, links ($(wc -l < "$out/pending-before-02.txt" | tr -d ' ') rows)"
 else fail "PENDING instances changed"; fi
@@ -255,6 +299,7 @@ same_sections 02-commit R2 R3 R5 R6 R7
 check "$(sect "$(report 02-commit before)" R4 | tail -1) → $(sect "$(report 02-commit after)" R4 | tail -1)" "(51 rows) → (0 rows)" \
       "R4 order offsets (instance step_order vs linked policy step) all resolved"
 grep -q "post-commit report (fresh read-only session) equals" "$out/02-commit.out" && pass "post-commit report = in-transaction after-report"
+pass "$(grep -m1 -o 'transaction open [0-9.]* s' "$out/02-commit.out") (02 COMMIT, 53 policies)"
 S2A="$(snap s02a)"
 q "UPDATE tbl_approval_policy_steps SET decision_rule = 'ALL' WHERE id = 10042" > /dev/null
 refused rb02-drift "rows changed since step 02 ran" 99_rollback_02 -v rollback_request_id="$RID02A"
@@ -263,7 +308,7 @@ q "UPDATE tbl_approval_policy_steps SET decision_rule = 'ANY' WHERE id = 10042" 
 ok rb02-dry 99_rollback_02 -v rollback_request_id="$RID02A"
 same_state "$S2A" "rollback 02 DRY left the database unchanged"
 CONFIRM_DB="$REH_DB" ok rb02-commit 99_rollback_02 --commit -v rollback_request_id="$RID02A"
-same_state "$S1" "rollback 02 restored the post-01 state exactly (steps, ids, orders, versions, 7104's link)"
+same_state "$S1" "rollback 02 restored the post-01 state exactly (steps, ids, orders, versions)"
 check "$(q "SELECT count(*) FROM tbl_approval_policy_change_log WHERE change_type = 'SCRIPT_ROLLBACK_REMOVE_DEAD_LEVEL' AND change_summary->>'rolled_back_request_id' = '$RID02A'")" "53" \
       "rollback logged one change-log row per policy"
 

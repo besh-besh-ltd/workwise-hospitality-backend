@@ -8,7 +8,7 @@ approval. Plan: `docs/superpowers/plans/2026-10-19-client-role-feedback-plan.md`
 | Step | Changes | Expected (prod, verified 2026-10-19) |
 |---|---|---|
 | `01_deactivate_unused.sql` | `is_active = false` on the buyer's processes 'RFQ Approval', 'RFQ Approval Matrix', 'Unit ARC', and on every active buyer policy on them or of type TENDER with no instance ever | processes **8, 9, 11**; policies **8, 190, 191, 192, 193**; process 2 'Day to Day Procurement' kept |
-| `02_remove_dead_levels.sql` | DELETE the dead 'RFQ Creator' / 'Technical Evaluator' level of each buyer policy (active or not), renumber the later levels **in place** (ids kept), change-log row `SCRIPT_REMOVE_DEAD_LEVEL`, version + 1 | **53** policies = RFQ 25 + TECHNICAL 27 + TENDER 1 (≈; re-counted, must match) |
+| `02_remove_dead_levels.sql` | DELETE the dead 'RFQ Creator' / 'Technical Evaluator' level of each buyer policy (active or not), renumber the later levels **in place** (ids kept), change-log row `SCRIPT_REMOVE_DEAD_LEVEL`, version + 1 | **53** policies = RFQ 25 + TECHNICAL 27 + TENDER 1 (≈; re-counted, must match); **0** instance steps (any status) linking a dead level |
 | `03_arc_round_peer_approval.sql` | the single ROLE step 'ARC Commercial Approver' of the buyer's ARC_NEGOTIATION / ARC_GROUP_NEGOTIATION policies → 'ARC Commercial Evaluator', rule ALL, **same row**; change-log row `SCRIPT_ARC_ROUND_PEER_APPROVAL`, version + 1 | policy **221** (Orchid Mumbai, step role 32 → 29) |
 
 All expectations live in `data.sql`. A preflight that finds anything else refuses.
@@ -28,27 +28,53 @@ All expectations live in `data.sql`. A preflight that finds anything else refuse
 - **DRY is the default.** Each step runs in one `REPEATABLE READ` transaction that ends in
   `ROLLBACK` unless BOTH `--commit` is passed AND `CONFIRM_DB` equals the database the
   connection resolved to (`SELECT current_database()`). Otherwise nothing runs.
+  `--dry --commit` together is refused.
 - `run.sh reconcile` is always read-only (`default_transaction_read_only=on`).
 - Every run prints host, database, step, mode and request id first.
 - Writes are attributed in `tbl_audit_row_changes` (`app.actor_id` = 150, `app.request_id`
   = the run's request id): `SELECT * FROM tbl_audit_row_changes WHERE request_id = '<id>'`.
 - `-v name=value` may only replace the `expected_*` values of `data.sql` (printed as
-  `OVERRIDE`), `target_policies` (report filter) or `rollback_request_id`. Override an
-  expectation only after a DRY run has shown the real number and a human agreed.
+  `OVERRIDE`), `target_policies` (report filter) or `rollback_request_id`, and each value
+  must match its shape exactly (integer, `{1,2,3}`, `RFQ=25,TECHNICAL=27,…`, lowercase
+  uuid). Override an expectation only after a DRY run has shown the real number and a
+  human agreed.
+
+## Locks, timing, when to run
+
+- The step's transaction takes **row locks**, in DRY exactly as in a real run:
+  `FOR NO KEY UPDATE` on the policy / process rows whose non-key columns change
+  (`is_active`, `version`, `updated_at`, a step's role and rule) — that does **not** block
+  new approval instances, whose FK checks take `KEY SHARE` — and `FOR UPDATE` only on the
+  policy steps 02 deletes or renumbers (`step_order` is a key column: it is in the unique
+  `idx_unique_step_order`). Admin policy edits on those policies, and new instance steps
+  linking a renumbered step, wait until the transaction ends.
+- `lock_timeout = 5s`, `statement_timeout = 30s`: the step fails fast (and writes nothing)
+  rather than queueing behind the app. The heavy platform-wide coherence audit runs only
+  in separate read-only sessions, never while the locks are held.
+- Duration: each run prints `transaction open N s`. The rehearsal (≈ 60 policies, 63
+  pending instances, local) holds them 0.05–0.10 s; on prod expect a few seconds, mostly
+  round-trip latency (a few dozen statements per step). Read the number off the DRY run.
+- Run in a quiet window (no one editing approval workflows, low submission traffic).
 
 ## What one run does (inside the single transaction)
 
 ```
-data.sql → reconcile_report.sql + ../audit_approval_rbac_coherence.sql  → out/<step>-before-<ts>-<rid>.txt
-<step>.sql: preflight (refusals) · backup (before-images) · change · postchecks · after-images
-            · in-flight approvals must be identical (lib/assert_pending_unchanged.sql)
-reconcile_report.sql + audit                                            → out/<step>-after-<ts>-<rid>.txt
-ROLLBACK (dry) | COMMIT
+read-only session: ../audit_approval_rbac_coherence.sql                  → out/<tag>-audit-before-<ts>-<rid>.txt
+the transaction:
+  data.sql → reconcile_report.sql (buyer-scoped, quick)                  → out/<tag>-before-<ts>-<rid>.txt
+  <step>.sql: preflight + row locks (refusals) · backup (before-images) · change · postchecks
+              · after-images · in-flight approvals identical (lib/assert_pending_unchanged.sql)
+  reconcile_report.sql                                                   → out/<tag>-after-<ts>-<rid>.txt
+  ROLLBACK (dry) | COMMIT
+after a COMMIT, read-only sessions: reconcile_report.sql                 → out/<tag>-committed-<ts>-<rid>.txt
+                                    audit                                → out/<tag>-audit-after-<ts>-<rid>.txt
 ```
 
-then the before → after diff is printed (it is exactly what the step changed, or would
-change: both reports read the same snapshot plus the step's own writes). After a COMMIT the
-report is re-run in a fresh read-only session and compared with the in-transaction one.
+The in-transaction reconcile diff is exactly what the step changed, or would change (both
+reports read the same snapshot plus the step's own writes). After a COMMIT the reconcile is
+re-run in a fresh read-only session and compared with the in-transaction one, and the audit
+before → after diff is printed (it can also show concurrent activity). A DRY run has no
+audit after: nothing was committed.
 
 Backups: `ops_backup._bak_<step>_<first 8 hex of the request id>` (schema created if
 missing), before- and after-images as `to_jsonb` rows. They are kept; drop them by hand once
@@ -63,8 +89,8 @@ linked step's; the engine renumbers after dropping a dead level, so 02 clears th
 R5 current step without a PENDING approver · R6 PENDING approvers without read+approve at
 their scope · R7 instance steps ≠ effective policy steps · R8 summary · then audit A–F.
 
-Expected diffs: **01** R0 (`active` t→f on 8, 190-193), R8 counts, audit F/C rows of the
-deactivated policies. **02** R0 (dead level gone, later levels renumbered, same `#ids`,
+Expected diffs: **01** R0 (`active` t→f on 8, 190-193), R8 counts; audit (after COMMIT):
+the F/C rows of the deactivated policies disappear. **02** R0 (dead level gone, later levels renumbered, same `#ids`,
 version + 1), R4 rows disappear, R8 step/offset counts. **03** R0 line of policy 221.
 R2, R3, R5, R6, R7 identical in every step.
 
@@ -118,9 +144,11 @@ gate, refusal, DRY, COMMIT, rollback and re-apply with assertions. Transcript:
 
 - Policies' `updated_at` is stamped by their BEFORE UPDATE trigger on every write, rollbacks
   included; it is the one column a rollback cannot restore (processes' is restored).
-- 02: a historical (non-PENDING) instance step linking a removed level loses the link via
-  `fk_instance_step_policy_step ON DELETE SET NULL`; it is backed up and `99_rollback_02`
-  restores it. A PENDING instance linking one makes the preflight refuse.
+- 02: a historical (non-PENDING) instance step linking a removed level would lose the link
+  via `fk_instance_step_policy_step ON DELETE SET NULL`. Prod has 0, pinned by
+  `expected_dead_level_history_links`; any other number refuses. If a human allows some
+  with an override, they are backed up and `99_rollback_02` restores them. A PENDING
+  instance linking one always refuses.
 - 02: instances' `metadata.approval_diagnostics.skipped_steps` keep naming the removed step
   ids (history, JSON, not a foreign key).
 - Change-log rows are append-only: rollbacks add `SCRIPT_ROLLBACK_*` rows and keep the

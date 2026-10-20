@@ -25,7 +25,7 @@
 --   02  ≈ 25 RFQ + 27 TECHNICAL + 1 TENDER (policy 190) = 53 policies,
 --       active and inactive, carrying a dead 'RFQ Creator' / 'Technical
 --       Evaluator' level. "≈": the preflight re-counts and refuses on any
---       difference.
+--       difference. 0 instance steps (any status) link one of those levels.
 --   03  policy 221 (ARC_NEGOTIATION, hotel 6): one ROLE step on
 --       'ARC Commercial Approver', rule ANY.
 -- ═══════════════════════════════════════════════════════════════════════════
@@ -48,6 +48,9 @@
 \if :{?expected_unused_policy_ids}    \else \set expected_unused_policy_ids '{8,190,191,192,193}'       \endif
 \if :{?expected_dead_level_policies}  \else \set expected_dead_level_policies 53                        \endif
 \if :{?expected_dead_level_breakdown} \else \set expected_dead_level_breakdown 'RFQ=25,TECHNICAL=27,TENDER=1' \endif
+-- instance steps (any status) linking a dead level; deleting the level would
+-- NULL them (FK ON DELETE SET NULL). Verified 0 on prod, read-only, 2026-10-20.
+\if :{?expected_dead_level_history_links} \else \set expected_dead_level_history_links 0              \endif
 \if :{?expected_arc_round_policies}   \else \set expected_arc_round_policies 1                          \endif
 \if :{?expected_arc_round_policy_ids} \else \set expected_arc_round_policy_ids '{221}'                  \endif
 -- report filter (reconcile_report.sql): '' = every policy of the buyer
@@ -83,6 +86,7 @@ SELECT :buyer_company_id::int                          AS buyer_company_id,
        :'expected_unused_policy_ids'::int[]            AS expected_unused_policy_ids,
        :expected_dead_level_policies::int              AS expected_dead_level_policies,
        :'expected_dead_level_breakdown'::text          AS expected_dead_level_breakdown,
+       :expected_dead_level_history_links::int         AS expected_dead_level_history_links,
        :expected_arc_round_policies::int               AS expected_arc_round_policies,
        :'expected_arc_round_policy_ids'::int[]         AS expected_arc_round_policy_ids,
        -- 01: the processes to retire (matched by buyer + name; names are

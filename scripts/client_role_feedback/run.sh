@@ -10,18 +10,23 @@
 #   <step>  01 | 02 | 03 | 99_rollback_01 | 99_rollback_02 | 99_rollback_03
 #           (a rollback needs -v rollback_request_id=<request id of the run to undo>)
 #
-# DRY IS THE DEFAULT. A step runs in ONE transaction (REPEATABLE READ) that
-# ends in ROLLBACK unless BOTH --commit is given AND CONFIRM_DB names the
-# database the connection actually resolved to (SELECT current_database()).
-# Inside that transaction, in this order:
-#     data.sql → reconcile report + RBAC coherence audit  → out/<step>-before-<ts>.txt
-#     the step (preflight · backup · change · postchecks)
-#     reconcile report + RBAC coherence audit             → out/<step>-after-<ts>.txt
-#     ROLLBACK | COMMIT
-# then the before/after diff is printed. Both reports read the same snapshot
-# plus the step's own writes, so the diff is exactly what the step changed
-# (or, DRY, would change). After a COMMIT the report is re-run in a fresh
-# read-only session and compared with the in-transaction after-report.
+# DRY IS THE DEFAULT. A step runs in ONE transaction (REPEATABLE READ,
+# lock_timeout 5s, statement_timeout 30s) that ends in ROLLBACK unless BOTH
+# --commit is given AND CONFIRM_DB names the database the connection actually
+# resolved to (SELECT current_database()); --dry with --commit is refused.
+#     read-only session: RBAC coherence audit         → out/<tag>-audit-before-<ts>.txt
+#     the transaction:
+#       data.sql → reconcile report (buyer-scoped)    → out/<tag>-before-<ts>.txt
+#       the step (preflight + row locks · backup · change · postchecks)
+#       reconcile report                              → out/<tag>-after-<ts>.txt
+#       ROLLBACK | COMMIT
+#     after a COMMIT, read-only sessions: reconcile   → out/<tag>-committed-<ts>.txt
+#                                         audit       → out/<tag>-audit-after-<ts>.txt
+# The in-transaction reports read the same snapshot plus the step's own writes,
+# so their diff is exactly what the step changed (or, DRY, would change). The
+# heavy platform-wide audit never runs while the step holds row locks; its
+# before/after diff exists only for a COMMIT and also shows concurrent activity.
+# A DRY run takes the same (short) row locks as a real one.
 #
 # `reconcile` is always read-only: default_transaction_read_only=on.
 #
@@ -48,28 +53,42 @@ usage() { sed -n '5,12p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//' >&2; exit 2;
 target="$1"; shift
 
 commit=0
+dry_flag=0
 psql_vars=()
 while (($#)); do
   case "$1" in
     --commit) commit=1 ;;
-    --dry)    ;;                                   # the default; accepted for clarity
+    --dry)    dry_flag=1 ;;                        # the default; accepted for clarity
     -v)       [[ $# -ge 2 ]] || die "-v needs name=value"; psql_vars+=("-v" "$2"); shift ;;
     -v?*)     psql_vars+=("$1") ;;
     *)        die "unknown argument: $1 (only --commit, --dry and -v name=value are accepted)" ;;
   esac
   shift
 done
+if ((commit && dry_flag)); then die "--dry and --commit together: pick one"; fi
+
+# Only these names may be set from the command line, and only to values of
+# their exact shape: whatever is accepted here is interpolated into SQL.
+re_count='^[0-9]{1,6}$'
+re_ids='^\{([0-9]{1,9}(,[0-9]{1,9})*)?\}$'
+re_breakdown='^[A-Z_]{1,40}=[0-9]{1,6}(,[A-Z_]{1,40}=[0-9]{1,6})*$'
+re_uuid='^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
 for v in ${psql_vars[@]+"${psql_vars[@]}"}; do
   [[ "$v" == "-v" ]] && continue
   v="${v#-v}"
-  [[ "$v" =~ ^[a-z_]+=.*$ ]] || die "bad -v value: $v"
-  case "${v%%=*}" in
-    expected_unused_processes|expected_unused_process_ids|expected_kept_process_id|\
-    expected_unused_policies|expected_unused_policy_ids|expected_dead_level_policies|\
-    expected_dead_level_breakdown|expected_arc_round_policies|expected_arc_round_policy_ids|\
-    target_policies|rollback_request_id) ;;
-    *) die "-v ${v%%=*} cannot be overridden (allowed: the expected_* names in data.sql, target_policies, rollback_request_id)" ;;
+  [[ "$v" == *=* ]] || die "bad -v (want name=value): $v"
+  name="${v%%=*}"; value="${v#*=}"
+  case "$name" in
+    expected_unused_processes|expected_kept_process_id|expected_unused_policies|\
+    expected_dead_level_policies|expected_dead_level_history_links|expected_arc_round_policies)
+      re="$re_count" ;;
+    expected_unused_process_ids|expected_unused_policy_ids|expected_arc_round_policy_ids|target_policies)
+      re="$re_ids" ;;
+    expected_dead_level_breakdown) re="$re_breakdown" ;;
+    rollback_request_id)           re="$re_uuid" ;;
+    *) die "-v $name cannot be set (allowed: the expected_* names in data.sql, target_policies, rollback_request_id)" ;;
   esac
+  [[ "$value" =~ $re ]] || die "-v $name=$value does not match $re"
 done
 
 case "$target" in
@@ -114,7 +133,7 @@ read -r resolved_db server_addr < <(
 [[ -n "${resolved_db:-}" ]] || die "could not resolve current_database()"
 
 request_id="${REQUEST_ID:-$( (uuidgen 2> /dev/null || cat /proc/sys/kernel/random/uuid) | tr '[:upper:]' '[:lower:]')}"
-[[ "$request_id" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]] || die "REQUEST_ID is not a lowercase uuid: $request_id"
+[[ "$request_id" =~ $re_uuid ]] || die "REQUEST_ID is not a lowercase uuid: $request_id"
 
 if [[ "$step" == reconcile ]]; then mode="READ-ONLY"
 elif ((commit)); then mode="COMMIT"
@@ -149,12 +168,36 @@ ts="$(date +%Y%m%dT%H%M%S)-${request_id:0:8}"
 tag="${step%%_*}"; [[ "$step" == 99_rollback_* ]] && tag="rollback${step##*_}"
 [[ "$step" == reconcile ]] && tag="reconcile"
 
+# A fresh READ-ONLY session (no row locks) writing to <outfile>:
+#   ro_run <outfile> [header] [reconcile] [audit]
+# The coherence audit is platform-wide and heavy (section F), so it only ever
+# runs here — never inside a step's write transaction.
+audit_title="\\qecho '════ RBAC COHERENCE AUDIT (scripts/audit_approval_rbac_coherence.sql, sections A-F)'"
+ro_run() {
+  local outfile="$1"; shift
+  local parts=() what
+  for what in "$@"; do
+    case "$what" in
+      header)    parts+=(-c "SELECT 'session read-only: ' || current_setting('transaction_read_only') AS mode") ;;
+      reconcile) parts+=(-f "$here/reconcile_report.sql") ;;
+      audit)     parts+=(-c "$audit_title" -f "$audit_sql") ;;
+    esac
+  done
+  PGOPTIONS='-c default_transaction_read_only=on' "${psql_base[@]}" ${psql_vars[@]+"${psql_vars[@]}"} \
+    -A -F ' | ' -P 'null=∅' -v vars_only=1 -f "$here/data.sql" "${parts[@]}" -o "$outfile"
+}
+show_diff() { # show_diff <title> <a> <b>
+  echo
+  echo "── $1: $2 → $3"
+  diff -u "$2" "$3" | sed '1,2d' || true
+  diff -q "$2" "$3" > /dev/null && echo "   (no differences)"
+  return 0
+}
+
 # ── reconcile (read-only) ───────────────────────────────────────────────────
 if [[ "$step" == reconcile ]]; then
   report="$out_dir/reconcile-$ts.txt"
-  PGOPTIONS='-c default_transaction_read_only=on' "${psql_base[@]}" ${psql_vars[@]+"${psql_vars[@]}"} -v vars_only=1 \
-    -c "SELECT 'session read-only: ' || current_setting('transaction_read_only') AS mode" \
-    -f "$here/data.sql" -f "$here/reconcile_report.sql" -f "$audit_sql" -o "$report"
+  ro_run "$report" header reconcile audit
   cat "$report"
   echo "── written to $report"
   exit 0
@@ -164,6 +207,8 @@ fi
 before="$out_dir/$tag-before-$ts.txt"
 after="$out_dir/$tag-after-$ts.txt"
 committed="$out_dir/$tag-committed-$ts.txt"
+audit_before="$out_dir/$tag-audit-before-$ts.txt"
+audit_after="$out_dir/$tag-audit-after-$ts.txt"
 log="$out_dir/$tag-run-$ts.log"
 expected_db="$resolved_db"; ((commit)) && expected_db="$CONFIRM_DB"
 
@@ -178,21 +223,25 @@ printf '%s\n' \
   "\\set expected_db '$expected_db'" \
   'BEGIN ISOLATION LEVEL REPEATABLE READ;' \
   "SET LOCAL lock_timeout = '5s';" \
-  "SET LOCAL statement_timeout = '300s';" \
+  "SET LOCAL statement_timeout = '30s';" \
+  'SELECT clock_timestamp() AS tx_t0 \gset' \
   "\\ir '$here/data.sql'" \
   "\\o '$before'" \
   "\\ir '$here/reconcile_report.sql'" \
-  "\\ir '$audit_sql'" \
   '\o' \
   "\\echo '════ $step'" \
   "\\ir '$here/$step.sql'" \
   "\\o '$after'" \
   "\\ir '$here/reconcile_report.sql'" \
-  "\\ir '$audit_sql'" \
   '\o' \
+  "SELECT round(extract(epoch FROM clock_timestamp() - :'tx_t0'::timestamptz)::numeric, 2) AS tx_secs \\gset" \
+  "\\echo '════ transaction open' :tx_secs 's (row locks held from the preflight to here)'" \
   "$finish" \
   "\\echo '════ $finish_note'" \
   > "$wrapper"
+
+# platform-wide coherence audit BEFORE, in its own read-only session
+ro_run "$audit_before" audit
 
 set +e
 "${psql_base[@]}" ${psql_vars[@]+"${psql_vars[@]}"} -f "$wrapper" 2>&1 | tee "$log"
@@ -207,20 +256,22 @@ if ((rc != 0)); then
   exit "$rc"
 fi
 
-echo
-echo "── reconcile diff (before → after$( ((commit)) || echo ', dry' )): $before → $after"
-diff -u "$before" "$after" | sed '1,2d' || true
-diff -q "$before" "$after" > /dev/null && echo "   (no differences)"
+show_diff "reconcile diff (in-transaction before → after$( ((commit)) || echo ', dry' ))" "$before" "$after"
 
 if ((commit)); then
-  PGOPTIONS='-c default_transaction_read_only=on' "${psql_base[@]}" ${psql_vars[@]+"${psql_vars[@]}"} -v vars_only=1 \
-    -f "$here/data.sql" -f "$here/reconcile_report.sql" -f "$audit_sql" -o "$committed"
+  # the same report from a fresh read-only session
+  ro_run "$committed" reconcile
   if diff -q "$after" "$committed" > /dev/null; then
     echo "── post-commit report (fresh read-only session) equals the in-transaction after-report"
   else
     echo "── post-commit report differs from the in-transaction after-report (concurrent activity?):"
     diff -u "$after" "$committed" | sed '1,2d' || true
   fi
+  ro_run "$audit_after" audit
+  show_diff "RBAC coherence audit (read-only, before the transaction → after the commit; concurrent activity shows too)" \
+    "$audit_before" "$audit_after"
+else
+  echo "── RBAC coherence audit (read-only, before): $audit_before — a DRY run changes nothing, so there is no after"
 fi
 echo "── log $log"
 echo "── request id $request_id"

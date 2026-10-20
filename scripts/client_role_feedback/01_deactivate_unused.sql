@@ -44,10 +44,12 @@ BEGIN
       prm.kept_process_name, prm.buyer_company_id, COALESCE(v_kept::text, 'missing'), prm.expected_kept_process_id;
   END IF;
 
-  -- the processes: lock, then count and compare ids
+  -- the processes: lock, then count and compare ids. FOR NO KEY UPDATE: only
+  -- is_active/updated_at change, so foreign-key checks (KEY SHARE) from rows
+  -- being inserted elsewhere are not blocked.
   PERFORM 1 FROM tbl_approval_processes pr
    WHERE pr.company_id = prm.buyer_company_id AND pr.name = ANY (prm.unused_process_names)
-   FOR UPDATE;
+   FOR NO KEY UPDATE;
   CREATE TEMP TABLE _t01_processes AS
   SELECT pr.id, pr.name
     FROM tbl_approval_processes pr
@@ -81,7 +83,7 @@ BEGIN
    WHERE hc.buyer_company_id = prm.buyer_company_id
      AND p.is_active
      AND (p.process_id IN (SELECT id FROM _t01_processes) OR p.entity_type = 'TENDER')
-   FOR UPDATE OF p;
+   FOR NO KEY UPDATE OF p;
   CREATE TEMP TABLE _t01_policies AS
   SELECT p.id, p.entity_type, p.hospitality_company_id, p.hotel_id, p.process_id
     FROM tbl_approval_policies p
