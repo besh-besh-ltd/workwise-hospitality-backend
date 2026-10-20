@@ -36,6 +36,7 @@ import {
 } from "@jest/globals";
 import { db, closeDb } from "../setup/db.js";
 import { IDS } from "../fixtures/ids.js";
+import { ROLE_IDS } from "../fixtures/users.js";
 import { makeRFQ } from "../factories/rfq.js";
 import { httpClient } from "../helpers/http.js";
 
@@ -326,5 +327,83 @@ describe("GET /rfq/quote-comparison-view/:id — stage_actors", () => {
       IDS.users.a1_proc_commEval,
     ]);
     expect(serialized).not.toContain(evaluator.name);
+  });
+
+  // ---- Approver label = the role of the STEP, not the first role ever granted
+  describe("approver role labels", () => {
+    const restore = [];
+    afterEach(async () => {
+      while (restore.length) await restore.pop()();
+    });
+
+    // Re-point the NEGOTIATION_QUOTE policy's step 1 for the duration of a test.
+    const pointStepAt = async (sourceType, sourceId) => {
+      const prev = await db.one(
+        `SELECT id, approver_source_type, approver_source_id FROM tbl_approval_policy_steps
+          WHERE approval_policy_id = $1 AND step_order = 1`,
+        [IDS.policies.A1_P1_NEGOTIATION_QUOTE]
+      );
+      await db.none(
+        `UPDATE tbl_approval_policy_steps SET approver_source_type = $2, approver_source_id = $3 WHERE id = $1`,
+        [prev.id, sourceType, sourceId]
+      );
+      restore.push(() => db.none(
+        `UPDATE tbl_approval_policy_steps SET approver_source_type = $2, approver_source_id = $3 WHERE id = $1`,
+        [prev.id, prev.approver_source_type, prev.approver_source_id]
+      ));
+    };
+
+    const roleTitle = async (userId, order = "urs.id ASC") =>
+      (await db.one(
+        `SELECT rl.title FROM tbl_user_role_scopes urs JOIN tbl_roles rl ON rl.id = urs.role_id
+          WHERE urs.user_id = $1 ORDER BY ${order} LIMIT 1`, [userId]
+      )).title;
+
+    it("labels an approver by the ROLE the step names, not their first-ever grant", async () => {
+      // techApp's first-ever grant is the RFQ-stage approver role...
+      const firstGrant = await roleTitle(IDS.users.a1_proc_techApp);
+      const commRole = (await db.one(`SELECT title FROM tbl_roles WHERE id = $1`, [ROLE_IDS.COMM_APPROVER])).title;
+      expect(firstGrant).not.toBe(commRole);
+      // ...but this final-vendor step is a ROLE step for the commercial approver role.
+      await pointStepAt("ROLE", ROLE_IDS.COMM_APPROVER);
+
+      const rfq = await seedRfq({ bidEnd: await istOffsetString("-3 hours") });
+      await seedPendingQuoteApproval(rfq, [IDS.users.a1_proc_techApp]);
+
+      const res = await fetchView(IDS.users.a1_proc_buyer, rfq.rfq_id);
+      expect(res.status).toBe(200);
+      expect(res.body.approval_chain[0].role).toBe(commRole);
+      const actor = res.body.stage_actors.actors.find((a) => a.user_id === IDS.users.a1_proc_techApp);
+      expect(actor.role).toBe(commRole);
+      const trail = res.body.products.flatMap((p) => (p.approval ? p.approval.trail : []))
+        .flatMap((n) => n.approvers || []);
+      expect(trail.length).toBeGreaterThan(0);
+      for (const a of trail) expect(a.role).toBe(commRole);
+    });
+
+    it("labels a USER-source step with the user's qualifying role title, never their name", async () => {
+      // Default fixture policy: step 1 is USER commApp.
+      const rfq = await seedRfq({ bidEnd: await istOffsetString("-3 hours") });
+      await seedPendingQuoteApproval(rfq, [IDS.users.a1_proc_commApp]);
+
+      const res = await fetchView(IDS.users.a1_proc_buyer, rfq.rfq_id);
+      const user = await db.one(`SELECT name FROM tbl_users WHERE id = $1`, [IDS.users.a1_proc_commApp]);
+      const commRole = (await db.one(`SELECT title FROM tbl_roles WHERE id = $1`, [ROLE_IDS.COMM_APPROVER])).title;
+      expect(res.body.approval_chain[0].role).toBe(commRole);
+      expect(res.body.approval_chain[0].role).not.toBe(user.name);
+      expect(res.body.stage_actors.actors[0].role).toBe(commRole);
+    });
+
+    it("falls back to 'Approver' for a USER step whose user holds no read+approve role here", async () => {
+      await pointStepAt("USER", IDS.users.a1_proc_buyer);
+      const rfq = await seedRfq({ bidEnd: await istOffsetString("-3 hours") });
+      await seedPendingQuoteApproval(rfq, [IDS.users.a1_proc_buyer]);
+
+      const res = await fetchView(IDS.users.a1_proc_buyer, rfq.rfq_id);
+      expect(res.status).toBe(200);
+      const stepUser = await db.one(`SELECT name FROM tbl_users WHERE id = $1`, [IDS.users.a1_proc_buyer]);
+      expect(res.body.approval_chain[0].role).toBe("Approver");
+      expect(res.body.approval_chain[0].role).not.toBe(stepUser.name);
+    });
   });
 });

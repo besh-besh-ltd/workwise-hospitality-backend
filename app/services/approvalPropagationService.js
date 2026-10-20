@@ -118,7 +118,7 @@ const SKIP_PUBLISHED_RFQ_SQL = `
  *
  * Assumes the calling SQL aliases the instance table `ai` and instance steps `ais`.
  */
-const POLICY_STEP_RESOLUTION_SQL = `
+export const POLICY_STEP_RESOLUTION_SQL = `
   LEFT JOIN LATERAL (
     SELECT
       p.id                AS matched_policy_step_id,
