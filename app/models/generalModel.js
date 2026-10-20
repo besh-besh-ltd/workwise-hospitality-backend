@@ -57,7 +57,11 @@ export const ENTITY_APPROVE_RESOURCE_MAP = {
   // ARC_NEGOTIATION: authorising the LAUNCH of a negotiation round. ROLE-source
   // approver steps resolve against 'arc-comm', which now carries both `read`
   // (20260611100000) and `approve` (20260803110000). The qualifying system role
-  // is 'ARC Negotiation Approver'.
+  // are 'ARC Commercial Approver' and, mirroring RFQ, 'ARC Commercial Evaluator'
+  // (20261019100200): evaluators approve their colleagues' rounds. The round
+  // initiator's own slot is auto-approved by the engine, so an ARC_NEGOTIATION
+  // policy that names 'ARC Commercial Evaluator' must use rule ALL to require
+  // the peers' approval (rule ANY would be satisfied by the initiator alone).
   //
   // History, because the previous comment here was wrong in three ways and the
   // wrongness was load-bearing: it claimed 'arc-comm' already had read+approve
@@ -73,10 +77,10 @@ export const ENTITY_APPROVE_RESOURCE_MAP = {
   // (20260611100000) and `approve` (20260803110000). The qualifying system role
   // is 'ARC Technical Approver'.
   //
-  // DELIBERATELY NOT the evaluator roles: 'ARC Tech Evaluator' holds
-  // arc-tech.evaluate + arc-tech.read and no `approve`, so it cannot pass this
-  // gate — an evaluator must never be able to approve their own evaluation.
-  // Same for 'ARC Commercial Evaluator' against 'arc-comm' above.
+  // DELIBERATELY NOT the technical evaluator role: 'ARC Technical Evaluator'
+  // holds arc-tech.evaluate + arc-tech.read and no `approve`, so it cannot pass
+  // this gate — an evaluator must never be able to approve their own technical
+  // evaluation. (arc-comm is different: ARC mirrors RFQ there, see above.)
   'ARC_TECH': 'arc-tech',
   // ARC_COMMITTEE: the committee/awarding approval gate. 'arc-committee' carries
   // BOTH `read` and `approve` (seeded together in
@@ -118,9 +122,12 @@ export const ENTITY_APPROVE_RESOURCE_MAP = {
   //                                            + approve (20260803110000)
   //   arc-committee  read + approve (20260608100800)
   //
-  // The evaluate/approve split is the point: `evaluate` is doing the scoring,
-  // `approve` is signing it off, and no system role holds both verbs on the same
-  // resource. See migrations/20260803110000_arc_stage_approver_permissions.sql.
+  // The evaluate/approve split is the point for arc-tech and arc-committee:
+  // `evaluate` is doing the scoring, `approve` is signing it off, and no system
+  // role holds both verbs on those resources. The one exception is arc-comm,
+  // where 'ARC Commercial Evaluator' holds both so evaluators can approve each
+  // other's negotiation rounds as in RFQ (20261019100200). See also
+  // migrations/20260803110000_arc_stage_approver_permissions.sql.
   //
   // ── ENTITY TYPES STILL UNMAPPED (e.g. INDENT, ARC_AMENDMENT) ──────────────
   // They fall back to `entity_type.toLowerCase()`, which yields UNDERSCORES

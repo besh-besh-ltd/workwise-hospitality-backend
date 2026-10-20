@@ -127,7 +127,7 @@ const INITIATOR_ROLE = 89101;
 const P_TECH_ROLE  = 69001; // ARC_TECH        / A2 / eng  — ARC Technical Approver
 const P_TECH_EVAL  = 69002; // ARC_TECH        / A3 / eng  — ARC Technical Evaluator (must be dropped)
 const P_NEG_ROLE   = 69003; // ARC_NEGOTIATION / A2 / eng  — ARC Commercial Approver
-const P_NEG_EVAL   = 69004; // ARC_NEGOTIATION / A3 / eng  — ARC Commercial Evaluator (must be dropped)
+const P_NEG_EVAL   = 69004; // ARC_NEGOTIATION / A3 / eng  — ARC Commercial Evaluator (RFQ parity: qualifies)
 const P_TECH_ADMIN = 69005; // ARC_TECH        / A2 / fb   — ARC Admin (must be dropped)
 const P_CASE_A     = 69006; // ARC_TECH        / A3 / fb   — USER step naming the initiator
 const P_CASE_B     = 69007; // ARC_TECH        / A2 / hk   — ROLE step with a permission-less role
@@ -515,18 +515,14 @@ describe("GOVERNING CONSTRAINT (ROLE-source steps): an evaluator cannot approve 
     expect(await instancesForPolicy(P_TECH_EVAL)).toEqual([]);
   });
 
-  it("ARC Commercial Evaluator does not qualify to approve a negotiation round", async () => {
-    expect(await roleHasReadAndApprovePermission(ROLE_COMM_EVALUATOR, "arc-comm")).toBe(false);
+  it("ARC Commercial Evaluator qualifies to approve a negotiation round (RFQ parity)", async () => {
+    // ARC mirrors RFQ: evaluators approve their colleagues' rounds. The
+    // initiator's own slot is auto-approved by the engine.
+    expect(await roleHasReadAndApprovePermission(ROLE_COMM_EVALUATOR, "arc-comm")).toBe(true);
 
-    const err = await expectRefusedCreation(makeInstance(P_NEG_EVAL, "ARC_NEGOTIATION", IDS.hotels.A3));
-    expect(err.diagnostics.skipped_steps[0]).toMatchObject({
-      approver_source_id: ROLE_COMM_EVALUATOR,
-      resource: "arc-comm",
-      reason: "ROLE_LACKS_READ_AND_APPROVE",
-    });
-
-    // No round goes live on an approval nobody granted.
-    expect(await instancesForPolicy(P_NEG_EVAL)).toEqual([]);
+    const result = await makeInstance(P_NEG_EVAL, "ARC_NEGOTIATION", IDS.hotels.A3);
+    expect(result.instance.id).toBeTruthy();
+    expect(await instancesForPolicy(P_NEG_EVAL)).toHaveLength(1);
   });
 
   it("ARC Admin is withheld BOTH new approve keys, so it cannot approve a tech evaluation", async () => {

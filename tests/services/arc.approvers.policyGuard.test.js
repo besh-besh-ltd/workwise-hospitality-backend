@@ -68,7 +68,7 @@ const CREATE_SCOPES = [
 let ROLE_TECH_APPROVER;   // ARC Technical Approver   — arc-tech.read + arc-tech.approve
 let ROLE_TECH_EVALUATOR;  // ARC Technical Evaluator       — arc-tech.evaluate + arc-tech.read, NO approve
 let ROLE_NEG_APPROVER;    // ARC Commercial Approver — arc-comm.read + arc-comm.approve
-let ROLE_COMM_EVALUATOR;  // ARC Commercial Evaluator — arc-comm.evaluate + reads, NO approve
+let ROLE_COMM_EVALUATOR;  // ARC Commercial Evaluator — arc-comm.evaluate + reads + arc-comm.approve (RFQ parity)
 
 async function systemRoleId(title) {
   const row = await db.oneOrNone(
@@ -229,7 +229,7 @@ describe("CREATE — a new policy may not name a role that cannot approve it", (
     expect(created).toHaveLength(0);
   });
 
-  it("rejects an ARC_NEGOTIATION policy whose ROLE step names ARC Commercial Evaluator", async () => {
+  it("accepts an ARC_NEGOTIATION policy whose ROLE step names ARC Commercial Evaluator (RFQ parity)", async () => {
     const client = await httpClient(ADMIN);
     const res = await savePolicy(client, {
       entity_type: "ARC_NEGOTIATION",
@@ -238,13 +238,7 @@ describe("CREATE — a new policy may not name a role that cannot approve it", (
       steps: [roleStep(1, ROLE_COMM_EVALUATOR)],
     });
 
-    expect(res.status).toBe(400);
-    expect(res.body.code).toBe("APPROVER_ROLE_CANNOT_APPROVE");
-    expect(res.body.data.steps[0]).toMatchObject({
-      role_title: "ARC Commercial Evaluator",
-      resource: "arc-comm",
-      missing_permissions: ["arc-comm.approve"],
-    });
+    expect(res.status).toBe(201);
   });
 
   it("accepts the same policies when they name the matching approver role", async () => {
@@ -280,7 +274,7 @@ describe("CREATE — a new policy may not name a role that cannot approve it", (
       steps: [
         roleStep(1, ROLE_TECH_APPROVER), // fine
         roleStep(2, ROLE_TECH_EVALUATOR), // not fine
-        roleStep(3, ROLE_COMM_EVALUATOR), // not fine either — it is a commercial role
+        roleStep(3, ROLE_COMM_EVALUATOR), // not fine either — holds no arc-tech.approve
       ],
     });
 
