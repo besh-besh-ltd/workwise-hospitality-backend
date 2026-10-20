@@ -431,6 +431,30 @@ const rbacModel = {
     `, [user.id, user.company_id ?? null]);
   },
 
+  /**
+   * For each role id, the permission resources on which it holds BOTH `read`
+   * and `approve`. tbl_permissions has duplicate rows, so DISTINCT/HAVING on
+   * action. Returns Map<roleId, string[]>.
+   */
+  getRoleApprovalResources: async (roleIds) => {
+    const out = new Map();
+    if (!roleIds || !roleIds.length) return out;
+    const rows = await db.any(`
+      SELECT rp.role_id, p.resource
+      FROM tbl_role_permissions rp
+      JOIN tbl_permissions p ON p.id = rp.permission_id
+      WHERE rp.role_id = ANY($1::int[]) AND p.action IN ('read', 'approve')
+      GROUP BY rp.role_id, p.resource
+      HAVING COUNT(DISTINCT p.action) = 2
+    `, [roleIds]);
+    for (const r of rows) {
+      const k = Number(r.role_id);
+      if (!out.has(k)) out.set(k, []);
+      out.get(k).push(r.resource);
+    }
+    return out;
+  },
+
   getPermissionsByRoleId: (roleId) => {
     return db.any(`
       SELECT p.id, p.resource, p.action
