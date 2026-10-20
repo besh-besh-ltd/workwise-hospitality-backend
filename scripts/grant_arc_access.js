@@ -31,7 +31,7 @@
 //
 // Grants COMPANY-WIDE scopes (hotel NULL, department NULL) for these roles:
 //   ARC Creator              → arc.read, arc.create, arc-tech.read, arc-comm.read
-//   ARC Tech Evaluator       → arc-tech.read, arc-tech.evaluate
+//   ARC Technical Evaluator  → arc-tech.read, arc-tech.evaluate
 //   ARC Commercial Evaluator → arc-tech.read, arc-comm.read, arc-comm.evaluate
 //   ARC Committee Member     → arc-tech.read, arc-comm.read, arc-committee.read/approve
 // (Deliberately NOT "ARC Admin" — arc.admin overrides every per-tab check,
@@ -39,7 +39,7 @@
 
 import db from '../app/config/dbConn.js';
 
-const ROLE_TITLES = ['ARC Creator', 'ARC Tech Evaluator', 'ARC Commercial Evaluator', 'ARC Committee Member'];
+const ROLE_TITLES = ['ARC Creator', 'ARC Technical Evaluator', 'ARC Commercial Evaluator', 'ARC Committee Member'];
 
 async function main() {
   const email = process.argv[2];

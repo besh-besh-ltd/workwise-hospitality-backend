@@ -18,7 +18,7 @@
  * production, and `tbl_permissions` has no unique constraint on
  * `(resource, action)` so the duplicates were invisible.
  *
- * The practical cost: on that database, the assertion "an ARC Tech Evaluator
+ * The practical cost: on that database, the assertion "an ARC Technical Evaluator
  * cannot approve a technical evaluation" could not be made against the real
  * system role, because the real system role did not exist.
  *
@@ -54,6 +54,9 @@ const RBAC_MIGRATIONS = [
   "20260608100800_permissions_seed.sql",
   "20260611100000_arc_eval_read_permissions.sql",
   "20260803110000_arc_stage_approver_permissions.sql",
+  // Renames ARC Technical Evaluator / ARC Commercial Approver to the client's
+  // vocabulary; the titles asserted below are the post-rename ones.
+  "20261019100000_client_role_terminology.sql",
 ];
 
 // Resource families these migrations own. Anything outside is out of scope.
@@ -163,14 +166,14 @@ describe("seed_reference.sql must contain everything the RBAC migrations create"
     expect(migrationRoleTitles).toEqual(
       expect.arrayContaining([
         "ARC Creator",
-        "ARC Tech Evaluator",
+        "ARC Technical Evaluator",
         "ARC Commercial Evaluator",
         "ARC Committee Member",
         "ARC Admin",
         "MR Raiser",
         "MR Approver",
         "ARC Technical Approver",
-        "ARC Negotiation Approver",
+        "ARC Commercial Approver",
       ])
     );
   });
@@ -219,7 +222,7 @@ describe("seed_reference.sql must contain everything the RBAC migrations create"
       ["migrations", migrationGrants],
       ["seed_reference", groupGrants(await db.any(ROLE_GRANT_SQL, [migrationRoleTitles]))],
     ]) {
-      for (const role of ["ARC Tech Evaluator", "ARC Commercial Evaluator", "ARC Admin"]) {
+      for (const role of ["ARC Technical Evaluator", "ARC Commercial Evaluator", "ARC Admin"]) {
         const keys = grants.get(role) || new Set();
         expect(`${source}: ${role} arc-tech.approve = ${keys.has("arc-tech.approve")}`)
           .toBe(`${source}: ${role} arc-tech.approve = false`);
