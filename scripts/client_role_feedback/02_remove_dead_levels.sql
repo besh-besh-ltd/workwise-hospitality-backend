@@ -29,8 +29,11 @@
 -- Refuses unless: count and per-type breakdown equal data.sql; each target
 -- role title names exactly one system role; one dead level per policy; every
 -- policy keeps at least one level; NO step of a PENDING instance (any step
--- status) links a dead level; the historical-link count equals data.sql;
--- in-flight approvals identical afterwards.
+-- status) links a dead level; NO PENDING instance on a target policy with an
+-- unlinked step has as many built steps as the policy has levels (the dead
+-- level may be built into it, and the ordinal fallback would misattribute
+-- after renumbering); the historical-link count equals data.sql; in-flight
+-- approvals identical afterwards.
 -- ═══════════════════════════════════════════════════════════════════════════
 \ir lib/backup.sql
 \set pending_snapshot _pending_before
@@ -144,6 +147,42 @@ BEGIN
      AND s.policy_step_id IN (SELECT step_id FROM _t02_dead);
   IF v_list IS NOT NULL THEN
     RAISE EXCEPTION E'PENDING instance step(s) link a level being removed — refusing:\n  - %', v_list;
+  END IF;
+
+  -- …nor possibly BUILT from it without saying so. An UNLINKED step
+  -- (policy_step_id NULL) names no level, and the engine's ordinal fallback
+  -- (POLICY_STEP_RESOLUTION_SQL; applyDiffToInstance's exact-ordinal guard)
+  -- maps it by step_order. "Built" = what that guard counts: steps built from
+  -- the policy at creation (added_mid_flight false) that are still live (not
+  -- REMOVED). If a PENDING instance on a target policy has an unlinked built
+  -- step and at least as many built steps as the policy has levels today,
+  -- every level — the dead one included — may have been built into it (the
+  -- role once passed the gate, or the instance predates it). After the dead
+  -- level is removed and the rest renumbered, the ordinal would line its steps
+  -- up with the wrong levels. Fewer built steps than levels means a level was
+  -- dropped at creation, which is what the dead level does. (">=" rather than
+  -- "=": more built steps than levels is a divergent instance, which cannot be
+  -- cleared either.)
+  SELECT string_agg(format('instance %s (%s %s) on policy %s: %s built step(s), %s unlinked; the policy has %s level(s)',
+                           i.id, i.entity_type, i.entity_id, i.approval_policy_id, b.built, b.unlinked, lv.levels),
+                    E'\n  - ' ORDER BY i.id)
+    INTO v_list
+    FROM tbl_approval_instances i
+    JOIN (SELECT DISTINCT policy_id FROM _t02_dead) d ON d.policy_id = i.approval_policy_id
+    JOIN LATERAL (SELECT count(*) AS built,
+                         count(*) FILTER (WHERE s.policy_step_id IS NULL) AS unlinked
+                    FROM tbl_approval_instance_steps s
+                   WHERE s.approval_instance_id = i.id
+                     AND s.status <> 'REMOVED'
+                     AND NOT COALESCE(s.added_mid_flight, false)) b ON true
+    JOIN LATERAL (SELECT count(*) AS levels
+                    FROM tbl_approval_policy_steps ps
+                   WHERE ps.approval_policy_id = i.approval_policy_id) lv ON true
+   WHERE i.status = 'PENDING'
+     AND b.unlinked > 0
+     AND b.built >= lv.levels;
+  IF v_list IS NOT NULL THEN
+    RAISE EXCEPTION E'UNLINKED PENDING instance(s) may have the dead level built in (built steps >= levels) — refusing (link or settle them first):\n  - %', v_list;
   END IF;
 
   -- History that does (non-PENDING instances): deleting the level NULLs the

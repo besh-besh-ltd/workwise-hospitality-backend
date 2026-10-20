@@ -149,6 +149,13 @@ gate, refusal, DRY, COMMIT, rollback and re-apply with assertions. Transcript:
   `expected_dead_level_history_links`; any other number refuses. If a human allows some
   with an override, they are backed up and `99_rollback_02` restores them. A PENDING
   instance linking one always refuses.
+- 02 also refuses on a PENDING instance of a target policy that has an UNLINKED
+  (`policy_step_id` NULL) live built step and at least as many live built steps as the
+  policy has levels: the dead level may have been built into it, and after renumbering
+  the ordinal fallback would pair its steps with the wrong levels. No override.
+- The rehearsal's text checks go through `expect_grep` / `expect_no_grep`, which fail the
+  run on a miss; the lint section fails if any check is written as an AND list ending in
+  `pass` (under `set -e` that form skips a missed expectation silently).
 - 02: instances' `metadata.approval_diagnostics.skipped_steps` keep naming the removed step
   ids (history, JSON, not a foreign key).
 - Change-log rows are append-only: rollbacks add `SCRIPT_ROLLBACK_*` rows and keep the

@@ -44,6 +44,30 @@ section() { printf '\n══════ %s\n' "$*"; }
 pass()    { printf '  ✓ %s\n' "$*"; }
 fail()    { printf '  ✗ %s\n' "$*"; exit 1; }
 check()   { if [[ "$1" == "$2" ]]; then pass "$3"; else fail "$3 — expected [$2], got [$1]"; fi; }
+# Positive / negative text expectations. Every grep-based check goes through
+# these: written as "grep … AND-THEN pass", a missed expectation is a failed
+# command inside an AND list, which `set -e` ignores, so it skipped silently.
+# grep exit 2 (unreadable / missing file, e.g. an empty $(report …)) fails both.
+#   expect_grep    <message> <pattern> <file>…   some file has a matching line
+#   expect_no_grep <message> <pattern> <file>…   no file has a matching line
+expect_grep() {
+  local msg="$1" pattern="$2" rc=0; shift 2
+  grep -q -- "$pattern" "$@" || rc=$?
+  case $rc in
+    0) pass "$msg" ;;
+    1) tail -20 "$1"; fail "$msg — no line matches [$pattern] in: $*" ;;
+    *) fail "$msg — grep could not read: $*" ;;
+  esac
+}
+expect_no_grep() {
+  local msg="$1" pattern="$2" rc=0; shift 2
+  grep -n -m3 -- "$pattern" "$@" || rc=$?
+  case $rc in
+    0) fail "$msg — found [$pattern] (lines above)" ;;
+    1) pass "$msg" ;;
+    *) fail "$msg — grep could not read: $*" ;;
+  esac
+}
 
 rid() { uuidgen | tr '[:upper:]' '[:lower:]'; }
 
@@ -153,9 +177,9 @@ S0="$(snap s0-built)"
 section "gates (nothing may run, nothing may change)"
 run_label="gate-noenv"
 if ( unset ENV_FILE; TARGET_DB="$REH_DB" "$here/run.sh" 01 ) > "$out/gate-noenv.out" 2>&1; then fail "ran without ENV_FILE"; fi
-grep -q "ENV_FILE is required" "$out/gate-noenv.out" && pass "refused without ENV_FILE"
+expect_grep "refused without ENV_FILE" "ENV_FILE is required" "$out/gate-noenv.out"
 if ( ENV_FILE="$envf" "$here/run.sh" 01 ) > "$out/gate-nodb.out" 2>&1; then fail "ran without TARGET_DB"; fi
-grep -q "TARGET_DB is required" "$out/gate-nodb.out" && pass "refused without TARGET_DB"
+expect_grep "refused without TARGET_DB" "TARGET_DB is required" "$out/gate-nodb.out"
 refused gate-commit-noconfirm "requires CONFIRM_DB" 01 --commit
 CONFIRM_DB=hospitality_main refused gate-commit-wrongdb "but the connection resolved to $REH_DB" 01 --commit
 refused gate-locked-var "cannot be set" 01 -v buyer_company_id=90
@@ -169,25 +193,27 @@ same_state "$S0" "database unchanged by the refused runs"
 
 section "reconcile (read-only)"
 ok reconcile-s0 reconcile
-grep -q "session read-only: on" "$out/reconcile-s0.out" && pass "reconcile session ran with transaction_read_only = on"
+expect_grep "reconcile session ran with transaction_read_only = on" "session read-only: on" "$out/reconcile-s0.out"
 if PGOPTIONS='-c default_transaction_read_only=on' lp "$REH_DB" -c "UPDATE tbl_approval_processes SET name = name WHERE id = 2" > "$out/ro.out" 2>&1; then
   fail "a write succeeded under default_transaction_read_only"
 fi
-grep -q "read-only transaction" "$out/ro.out" && pass "default_transaction_read_only rejects writes (the mode reconcile runs in)"
+expect_grep "default_transaction_read_only rejects writes (the mode reconcile runs in)" "read-only transaction" "$out/ro.out"
 for s in R0 R1 R2 R3 R4 R5 R6 R7 R8; do grep -q "^── $s " "$out/reconcile-s0.out" || fail "reconcile lacks $s"; done
 ok reconcile-filtered reconcile -v "target_policies={1001,1003}"
 check "$(sect "$out/reconcile-filtered.out" R0 | tail -1)" "(2 rows)" "reconcile -v target_policies narrows the report to those policies"
-pass "report has sections R0-R8; coherence audit appended ($(grep -c 'BLIND APPROVER\|POLICY RESOLVES TO NOBODY\|NOBODY CAN APPROVE' "$out/reconcile-s0.out") audit row(s))"
+expect_grep "report has sections R0-R8; coherence audit appended ($(grep -c 'BLIND APPROVER\|POLICY RESOLVES TO NOBODY\|NOBODY CAN APPROVE' "$out/reconcile-s0.out" || true) audit row(s))" \
+            "RBAC COHERENCE AUDIT" "$out/reconcile-s0.out"
 
 # ─────────────────────────────────────────────────────────────────────────────
 section "step 01 · deactivate unused processes + policies"
 ok 01-dry 01
-grep -q "matcher snapshot unchanged" "$out/01-dry.out" && pass "matcher snapshot equal (dry)"
-grep -q "ROLLED BACK (dry run)" "$out/01-dry.out" && pass "dry run ended in ROLLBACK"
-pass "$(grep -m1 -o 'transaction open [0-9.]* s' "$out/01-dry.out") (01 DRY, row locks held from the preflight to the end)"
-if grep -q "RBAC COHERENCE AUDIT" "$(report 01-dry before)" "$(report 01-dry after)"; then fail "the audit ran inside the write transaction"; fi
-grep -q "RBAC COHERENCE AUDIT" "$(report 01-dry audit-before)" && pass "coherence audit ran in its own read-only session, not in the write transaction"
-grep -q "a DRY run changes nothing, so there is no after" "$out/01-dry.out" && pass "DRY: no post-run audit (nothing committed)"
+expect_grep "matcher snapshot equal (dry)" "matcher snapshot unchanged" "$out/01-dry.out"
+expect_grep "dry run ended in ROLLBACK" "ROLLED BACK (dry run)" "$out/01-dry.out"
+expect_grep "$(grep -m1 -o 'transaction open [0-9.]* s' "$out/01-dry.out" || true) (01 DRY, row locks held from the preflight to the end)" \
+            "transaction open [0-9.]* s" "$out/01-dry.out"
+expect_no_grep "the audit did not run inside the write transaction" "RBAC COHERENCE AUDIT" "$(report 01-dry before)" "$(report 01-dry after)"
+expect_grep "coherence audit ran in its own read-only session, not in the write transaction" "RBAC COHERENCE AUDIT" "$(report 01-dry audit-before)"
+expect_grep "DRY: no post-run audit (nothing committed)" "a DRY run changes nothing, so there is no after" "$out/01-dry.out"
 same_state "$S0" "01 DRY left the database unchanged"
 no_backup_tables 0
 
@@ -206,9 +232,9 @@ check "$(q "SELECT string_agg(id::text, ',' ORDER BY id) FROM tbl_approval_polic
 check "$(q "SELECT count(*) FROM tbl_audit_row_changes WHERE request_id = '$RID01A' AND actor_user_id = 150 AND operation = 'UPDATE'")" "8" \
       "8 row updates audited with actor 150 + request id"
 check "$(q "SELECT count(*) || ' ' || string_agg(DISTINCT phase, '/') FROM ops_backup._bak_01_${RID01A:0:8}")" "16 after/before" "backup holds 8 before + 8 after images"
-grep -q "post-commit report (fresh read-only session) equals" "$out/01-commit.out" && pass "post-commit report = in-transaction after-report"
-grep -q "^-F. NOBODY CAN APPROVE IN THIS DEPARTMENT | 192 | NEGOTIATION" "$out/01-commit.out" \
-  && pass "audit diff (read-only before → after commit) drops the section-F rows of deactivated policy 192"
+expect_grep "post-commit report = in-transaction after-report" "post-commit report (fresh read-only session) equals" "$out/01-commit.out"
+expect_grep "audit diff (read-only before → after commit) drops the section-F rows of deactivated policy 192" \
+            "^-F. NOBODY CAN APPROVE IN THIS DEPARTMENT | 192 | NEGOTIATION" "$out/01-commit.out"
 same_sections 01-commit R2 R3 R4 R5 R6 R7
 S01A="$(snap s01a)"
 REQUEST_ID="$(rid)" CONFIRM_DB="$REH_DB" refused 01-rerun "(already applied?)" 01 --commit
@@ -227,7 +253,8 @@ S1="$(snap s1-after-01)"
 section "step 02 · remove dead RFQ Creator / Technical Evaluator levels"
 pending_state > "$out/pending-before-02.txt"
 ok 02-dry 02
-grep -q "53 polic" "$out/02-dry.out" && pass "02 found 53 dead-level policies: $(grep -m1 -o 'RFQ=[0-9]*,TECHNICAL=[0-9]*,TENDER=[0-9]*' "$out/02-dry.out")"
+expect_grep "02 found 53 dead-level policies: $(grep -m1 -o 'RFQ=[0-9]*,TECHNICAL=[0-9]*,TENDER=[0-9]*' "$out/02-dry.out" || true)" \
+            "53 policies with a dead level (RFQ=25,TECHNICAL=27,TENDER=1)" "$out/02-dry.out"
 same_state "$S1" "02 DRY left the database unchanged"
 same_sections 02-dry R2 R3 R5 R6 R7
 no_backup_tables 2   # 01 first run (rolled back; backups are kept) + 01 re-apply
@@ -245,6 +272,20 @@ q "INSERT INTO tbl_approval_policies (id, entity_type, hospitality_company_id, h
      (19981, 1998, 1, 'ROLE', 2), (19982, 1998, 2, 'ROLE', 6), (19983, 1998, 3, 'ROLE', 4)" > /dev/null
 refused 02-two-dead-levels "policies 1998 carry more than one dead level" 02 -v expected_dead_level_policies=54 -v expected_dead_level_breakdown=RFQ=26,TECHNICAL=27,TENDER=1
 q "DELETE FROM tbl_approval_policy_steps WHERE approval_policy_id = 1998; DELETE FROM tbl_approval_policies WHERE id = 1998" > /dev/null
+# An UNLINKED pending instance on dead-level policy 1001 (2 levels) with 2
+# built steps: the dead level may be built into it, and after renumbering the
+# ordinal fallback would pair its steps with the wrong levels. (7102 — one
+# unlinked built step on the same policy — and the bulk unlinked instances are
+# the benign shape: fewer built steps than levels. 02-dry passed with them.)
+q "INSERT INTO tbl_approval_instances (id, entity_type, entity_id, approval_policy_id, status, current_step, hospitality_company_id, hotel_id, department_id, initiated_by, process_id, created_at)
+     VALUES (7030, 'RFQ', 5030, 1001, 'PENDING', 1, 3, 4, 1, 9101, 2, '2026-10-05 09:00');
+   INSERT INTO tbl_approval_instance_steps (id, approval_instance_id, policy_step_id, step_order, decision_rule, status) VALUES
+     (7130, 7030, NULL, 1, 'ANY', 'PENDING'), (7131, 7030, NULL, 2, 'ANY', 'PENDING');
+   INSERT INTO tbl_approval_step_approvers (id, approval_instance_step_id, approver_user_id, status) VALUES
+     (7230, 7130, 9102, 'PENDING'), (7231, 7131, 9103, 'PENDING')" > /dev/null
+refused 02-unlinked-built "instance 7030 (RFQ 5030) on policy 1001: 2 built step(s), 2 unlinked; the policy has 2 level(s)" 02
+q "DELETE FROM tbl_approval_step_approvers WHERE id IN (7230, 7231); DELETE FROM tbl_approval_instance_steps WHERE id IN (7130, 7131);
+   DELETE FROM tbl_approval_instances WHERE id = 7030" > /dev/null
 same_state "$S1" "database unchanged by the refusals"
 
 # History linking a dead level (prod: 0, pinned in data.sql). Refused by
@@ -298,8 +339,9 @@ check "$(q "SELECT string_agg(s.id || '->' || s.policy_step_id || '@' || ps.step
 same_sections 02-commit R2 R3 R5 R6 R7
 check "$(sect "$(report 02-commit before)" R4 | tail -1) → $(sect "$(report 02-commit after)" R4 | tail -1)" "(51 rows) → (0 rows)" \
       "R4 order offsets (instance step_order vs linked policy step) all resolved"
-grep -q "post-commit report (fresh read-only session) equals" "$out/02-commit.out" && pass "post-commit report = in-transaction after-report"
-pass "$(grep -m1 -o 'transaction open [0-9.]* s' "$out/02-commit.out") (02 COMMIT, 53 policies)"
+expect_grep "post-commit report = in-transaction after-report" "post-commit report (fresh read-only session) equals" "$out/02-commit.out"
+expect_grep "$(grep -m1 -o 'transaction open [0-9.]* s' "$out/02-commit.out" || true) (02 COMMIT, 53 policies)" \
+            "transaction open [0-9.]* s" "$out/02-commit.out"
 S2A="$(snap s02a)"
 q "UPDATE tbl_approval_policy_steps SET decision_rule = 'ALL' WHERE id = 10042" > /dev/null
 refused rb02-drift "rows changed since step 02 ran" 99_rollback_02 -v rollback_request_id="$RID02A"
@@ -367,7 +409,15 @@ CONFIRM_DB="$REH_DB" ok rb01-final 99_rollback_01 --commit -v rollback_request_i
 same_state "$S0" "after rollback 01 = the freshly built database"
 
 section "lint"
-bash -n "$here/run.sh" "$here/rehearse_local.sh" && pass "bash -n"
-if command -v shellcheck > /dev/null; then shellcheck "$here/run.sh" "$here/rehearse_local.sh" && pass "shellcheck clean"; fi
+if bash -n "$here/run.sh" && bash -n "$here/rehearse_local.sh"; then pass "bash -n"; else fail "bash -n"; fi
+if command -v shellcheck > /dev/null; then
+  if shellcheck "$here/run.sh" "$here/rehearse_local.sh"; then pass "shellcheck clean"; else fail "shellcheck"; fi
+else
+  printf '  - shellcheck not installed: skipped\n'
+fi
+# This harness's own guard: a grep-then-pass check written as an AND list is
+# skipped, not failed, when its grep misses (set -e ignores it).
+expect_no_grep "no check in this harness is an AND list ending in pass (each fails loudly)" \
+               '[&][&][[:space:]]*pass[[:space:]]' "$here/rehearse_local.sh"
 
 section "REHEARSAL PASSED"
