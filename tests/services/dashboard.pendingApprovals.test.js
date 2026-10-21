@@ -199,3 +199,82 @@ describe("GET /dashboard-v2/pending-approvals — Item 3: ARC rows still carry a
     expect(true).toBe(true);
   });
 });
+
+describe("GET /dashboard-v2/pending-approvals — is_group tells Unit ARC from Group ARC", () => {
+  const seedWithPolicyType = async (policyEntityType, instanceEntityType, entityId) => {
+    const policy = await db.one(
+      `INSERT INTO tbl_approval_policies
+         (entity_type, hospitality_company_id, hotel_id, department_id, process_id,
+          is_active, created_by, is_master)
+       VALUES ($1, $2, NULL, NULL, NULL, true, $3, false)
+       RETURNING id`,
+      [policyEntityType, IDS.hospitality.A, IDS.users.companyA_admin]
+    );
+    await makeApprovalInstanceWithApprover(db, {
+      entity_type: instanceEntityType,
+      entity_id: entityId,
+      approver_user_id: IDS.users.a1_proc_techApp,
+      policy_id: policy.id,
+      hospitality: IDS.hospitality.A,
+      hotel: IDS.hotels.A1,
+    });
+    inserted.approvalEntityIds.push(entityId);
+    inserted.approvalEntityTypes.push(instanceEntityType);
+    return policy.id;
+  };
+
+  let policyIds = [];
+  afterEach(async () => {
+    for (const id of policyIds) {
+      await db.none(`DELETE FROM tbl_approval_instances WHERE approval_policy_id = $1`, [id]).catch(() => {});
+      await db.none(`DELETE FROM tbl_approval_policies WHERE id = $1`, [id]).catch(() => {});
+    }
+    policyIds = [];
+  });
+
+  const fetchRow = async (type, entityId) => {
+    const client = await httpClient(IDS.users.a1_proc_techApp);
+    const res = await client.get(ENDPOINT).query({ hotel_ids: String(IDS.hotels.A1), ...WIDE });
+    expect(res.status).toBe(200);
+    return (res.body.data || []).find((r) => r.entity_type === type && Number(r.entity_id) === entityId);
+  };
+
+  it("is true for an ARC instance created under an ARC_GROUP_* policy", async () => {
+    policyIds.push(await seedWithPolicyType("ARC_GROUP_TECH", "ARC_TECH", 9_810_001));
+    const row = await fetchRow("ARC_TECH", 9_810_001);
+    expect(row).toBeDefined();
+    expect(row.is_group).toBe(true);
+  });
+
+  it("is false for a unit ARC instance", async () => {
+    policyIds.push(await seedWithPolicyType("ARC_TECH", "ARC_TECH", 9_810_002));
+    const row = await fetchRow("ARC_TECH", 9_810_002);
+    expect(row).toBeDefined();
+    expect(row.is_group).toBe(false);
+  });
+
+  it("is false for an RFQ-family item (technical approval)", async () => {
+    const { rfq_id } = await makeRfqVisibleToDashboard(db, {
+      createdBy: IDS.users.a1_proc_buyer,
+      hospitality: IDS.hospitality.A,
+      hotel: IDS.hotels.A1,
+      is_published: 1,
+      status: 1,
+      title: "is_group RFQ probe",
+    });
+    inserted.rfqIds.push(rfq_id);
+    await makeApprovalInstanceWithApprover(db, {
+      entity_type: "TECHNICAL",
+      entity_id: rfq_id,
+      approver_user_id: IDS.users.a1_proc_techApp,
+      policy_id: IDS.policies.A1_P1_TECHNICAL,
+      hospitality: IDS.hospitality.A,
+      hotel: IDS.hotels.A1,
+    });
+    inserted.approvalEntityIds.push(rfq_id);
+    inserted.approvalEntityTypes.push("TECHNICAL");
+    const row = await fetchRow("TECHNICAL", rfq_id);
+    expect(row).toBeDefined();
+    expect(row.is_group).toBe(false);
+  });
+});

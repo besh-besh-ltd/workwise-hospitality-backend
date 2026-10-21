@@ -40,6 +40,9 @@
     "migrations/20260929100000_po_line_variant_backfill.sql",
     "migrations/20261006100000_vendor_networks.sql",
     "migrations/20261012100000_activity_company_wide_events.sql",
-    "migrations/20261016100000_unique_employee_code.sql"
+    "migrations/20261016100000_unique_employee_code.sql",
+    "migrations/20261019100000_client_role_terminology.sql",
+    "migrations/20261019100100_retire_proxy_approver.sql",
+    "migrations/20261019100200_arc_commercial_evaluator_round_approval.sql"
   ]
 }

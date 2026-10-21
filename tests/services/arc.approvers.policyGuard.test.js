@@ -16,7 +16,7 @@
  *
  * Nothing warned the admin at save time, and the wizard makes the mistake easy:
  * it lists every role in the tenant unfiltered and defaults each level to
- * `approver_source_type: 'ROLE'`. Picking "ARC Tech Evaluator" to approve a
+ * `approver_source_type: 'ROLE'`. Picking "ARC Technical Evaluator" to approve a
  * technical evaluation is the obvious, wrong, one-click choice.
  *
  * ── THE VALIDATION SCOPE, AND WHY IT IS THE DELTA ─────────────────────────
@@ -66,9 +66,9 @@ const CREATE_SCOPES = [
 ];
 
 let ROLE_TECH_APPROVER;   // ARC Technical Approver   — arc-tech.read + arc-tech.approve
-let ROLE_TECH_EVALUATOR;  // ARC Tech Evaluator       — arc-tech.evaluate + arc-tech.read, NO approve
-let ROLE_NEG_APPROVER;    // ARC Negotiation Approver — arc-comm.read + arc-comm.approve
-let ROLE_COMM_EVALUATOR;  // ARC Commercial Evaluator — arc-comm.evaluate + reads, NO approve
+let ROLE_TECH_EVALUATOR;  // ARC Technical Evaluator       — arc-tech.evaluate + arc-tech.read, NO approve
+let ROLE_NEG_APPROVER;    // ARC Commercial Approver — arc-comm.read + arc-comm.approve
+let ROLE_COMM_EVALUATOR;  // ARC Commercial Evaluator — arc-comm.evaluate + reads + arc-comm.approve (RFQ parity)
 
 async function systemRoleId(title) {
   const row = await db.oneOrNone(
@@ -147,8 +147,8 @@ async function sweepCreatedPolicies() {
 
 beforeAll(async () => {
   ROLE_TECH_APPROVER  = await systemRoleId("ARC Technical Approver");
-  ROLE_TECH_EVALUATOR = await systemRoleId("ARC Tech Evaluator");
-  ROLE_NEG_APPROVER   = await systemRoleId("ARC Negotiation Approver");
+  ROLE_TECH_EVALUATOR = await systemRoleId("ARC Technical Evaluator");
+  ROLE_NEG_APPROVER   = await systemRoleId("ARC Commercial Approver");
   ROLE_COMM_EVALUATOR = await systemRoleId("ARC Commercial Evaluator");
 
   await db.none(
@@ -195,7 +195,7 @@ afterAll(async () => {
 });
 
 describe("CREATE — a new policy may not name a role that cannot approve it", () => {
-  it("rejects an ARC_TECH policy whose ROLE step names ARC Tech Evaluator", async () => {
+  it("rejects an ARC_TECH policy whose ROLE step names ARC Technical Evaluator", async () => {
     const client = await httpClient(ADMIN);
     const res = await savePolicy(client, {
       entity_type: "ARC_TECH",
@@ -207,14 +207,14 @@ describe("CREATE — a new policy may not name a role that cannot approve it", (
     expect(res.status).toBe(400);
     expect(res.body.code).toBe("APPROVER_ROLE_CANNOT_APPROVE");
     // The message has to be actionable: which role, which permission.
-    expect(res.body.message).toContain("ARC Tech Evaluator");
+    expect(res.body.message).toContain("ARC Technical Evaluator");
     expect(res.body.message).toContain("arc-tech.approve");
     expect(res.body.data.entity_type).toBe("ARC_TECH");
     expect(res.body.data.steps).toEqual([
       expect.objectContaining({
         step_order: 1,
         role_id: ROLE_TECH_EVALUATOR,
-        role_title: "ARC Tech Evaluator",
+        role_title: "ARC Technical Evaluator",
         resource: "arc-tech",
         missing_permissions: ["arc-tech.approve"],
       }),
@@ -229,7 +229,7 @@ describe("CREATE — a new policy may not name a role that cannot approve it", (
     expect(created).toHaveLength(0);
   });
 
-  it("rejects an ARC_NEGOTIATION policy whose ROLE step names ARC Commercial Evaluator", async () => {
+  it("accepts an ARC_NEGOTIATION policy whose ROLE step names ARC Commercial Evaluator (RFQ parity)", async () => {
     const client = await httpClient(ADMIN);
     const res = await savePolicy(client, {
       entity_type: "ARC_NEGOTIATION",
@@ -238,13 +238,7 @@ describe("CREATE — a new policy may not name a role that cannot approve it", (
       steps: [roleStep(1, ROLE_COMM_EVALUATOR)],
     });
 
-    expect(res.status).toBe(400);
-    expect(res.body.code).toBe("APPROVER_ROLE_CANNOT_APPROVE");
-    expect(res.body.data.steps[0]).toMatchObject({
-      role_title: "ARC Commercial Evaluator",
-      resource: "arc-comm",
-      missing_permissions: ["arc-comm.approve"],
-    });
+    expect(res.status).toBe(201);
   });
 
   it("accepts the same policies when they name the matching approver role", async () => {
@@ -280,7 +274,7 @@ describe("CREATE — a new policy may not name a role that cannot approve it", (
       steps: [
         roleStep(1, ROLE_TECH_APPROVER), // fine
         roleStep(2, ROLE_TECH_EVALUATOR), // not fine
-        roleStep(3, ROLE_COMM_EVALUATOR), // not fine either — it is a commercial role
+        roleStep(3, ROLE_COMM_EVALUATOR), // not fine either — holds no arc-tech.approve
       ],
     });
 
@@ -341,7 +335,7 @@ describe("CREATE — a new policy may not name a role that cannot approve it", (
     );
     expect(boqCatalogue.map((r) => r.action).sort()).toEqual(["approve", "read"]);
 
-    // 'Tender Approver' holds boq.read + boq.approve, so it is permitted ON ITS
+    // 'RFQ Approver' holds boq.read + boq.approve, so it is permitted ON ITS
     // MERITS — reason OK, not the RESOURCE_CANNOT_SATISFY_GATE pass it used to
     // be waved through with.
     const verdict = await roleStepPermissionVerdict(ROLE_IDS.TENDER_APPROVER, "TENDER", db);
@@ -496,7 +490,7 @@ describe("UPDATE — the guard validates the delta, not the whole policy", () =>
     expect(res.body.code).toBe("APPROVER_ROLE_CANNOT_APPROVE");
     expect(res.body.data.steps[0]).toMatchObject({
       step_order: 1,
-      role_title: "ARC Tech Evaluator",
+      role_title: "ARC Technical Evaluator",
       resource: "arc",
       missing_permissions: ["arc.read", "arc.approve"],
     });

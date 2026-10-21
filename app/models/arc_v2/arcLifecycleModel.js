@@ -40,7 +40,7 @@ const STAGE_FLOW = {
     action_taker_role: 'Buyer (creator)',
     evaluator_perm: null,
     approver_source: 'publishApproval',
-    approver_role: 'Publish approver',
+    approver_role: 'ARC Approver',
     next_stage: 'technical',
     note: 'Floats the ARC; invited vendors then submit sealed bids.',
   },
@@ -48,15 +48,18 @@ const STAGE_FLOW = {
     action_taker_role: 'Technical evaluator',
     evaluator_perm: ['arc-tech', 'evaluate'],
     approver_source: 'techApproval',
-    approver_role: 'Technical approver',
+    approver_role: 'ARC Technical Approver',
     next_stage: 'commercial',
     note: 'Scores each vendor per clause, submits for approval.',
   },
   commercial: {
     action_taker_role: 'Commercial evaluator',
     evaluator_perm: ['arc-comm', 'evaluate'],
-    approver_source: 'committeeApproval',
-    approver_role: 'Award committee',
+    // The approval on THIS stage is a negotiation round's (ARC_NEGOTIATION):
+    // the ARC's latest round instance, so the panel lists who approves the
+    // round. The committee ratifies at Awarding and stays on that stage.
+    approver_source: 'roundApproval',
+    approver_role: 'ARC Commercial Evaluators (round approval)',
     next_stage: 'awarding',
     note: 'Allocates awards and finalizes; committee ratifies at Awarding.',
   },
@@ -64,7 +67,7 @@ const STAGE_FLOW = {
     action_taker_role: 'Commercial evaluator',
     evaluator_perm: ['arc-comm', 'evaluate'],
     approver_source: 'committeeApproval',
-    approver_role: 'Award committee',
+    approver_role: 'ARC Committee',
     next_stage: 'active',
     note: 'Sends award proposals to the committee for approval.',
   },
@@ -104,6 +107,28 @@ async function loadInstance(runner, entityType, arcId, userId) {
       ORDER BY created_at DESC LIMIT 1`,
     [entityType, arcId]
   );
+  return withActability(runner, instance, userId);
+}
+
+/**
+ * Latest negotiation-round approval of an ARC. ARC_NEGOTIATION instances are
+ * keyed by ROUND id (entity_id = tbl_negotiation_rounds.id), so the ARC is
+ * reached through the round. Same shape as loadInstance.
+ */
+async function loadRoundInstance(runner, arcId, userId) {
+  const instance = await runner.oneOrNone(
+    `SELECT ai.id, ai.status, ai.current_step, ai.created_at, ai.completed_at
+       FROM tbl_approval_instances ai
+       JOIN tbl_negotiation_rounds nr ON nr.id = ai.entity_id
+      WHERE ai.entity_type = 'ARC_NEGOTIATION'
+        AND nr.source_type = 'ARC' AND nr.source_id = $1
+      ORDER BY ai.created_at DESC, ai.id DESC LIMIT 1`,
+    [arcId]
+  );
+  return withActability(runner, instance, userId);
+}
+
+async function withActability(runner, instance, userId) {
   if (!instance) return null;
   let canUserApprove = false;
   if (userId && instance.status === 'PENDING') {
@@ -485,10 +510,11 @@ async function gatherFacts(runner, arc, userId) {
     [arcId]
   ).then((r) => (r ? r.c : 0)).catch(() => 0);
 
-  const [techApproval, committeeApproval, publishApproval] = await Promise.all([
+  const [techApproval, committeeApproval, publishApproval, roundApproval] = await Promise.all([
     loadInstance(runner, 'ARC_TECH', arcId, userId),
     loadInstance(runner, 'ARC_COMMITTEE', arcId, userId),
     loadInstance(runner, 'ARC_PUBLISH', arcId, userId),
+    loadRoundInstance(runner, arcId, userId),
   ]);
 
   // DECISION-3: derived boolean — true when a non-terminal ARC round exists
@@ -527,6 +553,7 @@ async function gatherFacts(runner, arc, userId) {
     techApproval,
     committeeApproval,
     publishApproval,
+    roundApproval,
     negotiationInProgress,
     _runner: runner,
   };

@@ -1484,9 +1484,11 @@ async function getPendingApprovalsDetail(buyer_company_id, user_id, hotel_ids = 
        ac.arc_number,
        ac.title AS arc_title,
        hch.name AS hotel_name,
+       COALESCE(pol.entity_type LIKE 'ARC\\_GROUP%', false) AS is_group,
        (SELECT COUNT(*) FROM tbl_approval_policy_steps ps
          WHERE ps.approval_policy_id = it.approval_policy_id)::int AS total_steps
      FROM items it
+     LEFT JOIN tbl_approval_policies pol ON pol.id = it.approval_policy_id
      LEFT JOIN tbl_rfq r ON r.id = it.rfq_id
      LEFT JOIN tbl_arc_amendment amd ON it.entity_type = 'ARC_AMENDMENT' AND amd.id = it.entity_id
      LEFT JOIN tbl_arc_contract amdc ON amdc.id = amd.arc_contract_id
@@ -1642,7 +1644,7 @@ const LIFECYCLE_LABELS = Object.freeze({
   RFQ_STUCK_COMMERCIAL: 'Ended · No Quotes',
   COMMERCIAL_EVALUATION: 'Commercial Evaluation',
   NEGOTIATION_ONGOING: 'Negotiation',
-  QUOTATION_APPROVAL: 'Quote Approval',
+  QUOTATION_APPROVAL: 'Final Vendor Approval',
   AWAITING_PO: 'Awaiting PO',
   PO_APPROVAL: 'PO Approval',
   PO_VENDOR_REJECTED: 'PO Vendor Rejected',

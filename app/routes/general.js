@@ -130,6 +130,12 @@ GeneralRoutes.get(
   hospitalityApprovalController.findMatchingPolicy
 );
 GeneralRoutes.get(
+  '/hospitality/approval/policy-coverage',
+  passportSignIn,
+  acl([7, 2]),
+  hospitalityApprovalController.getPolicyCoverage
+);
+GeneralRoutes.get(
   '/hospitality/approval/policies',
   passportSignIn,
   acl([7, 2]),

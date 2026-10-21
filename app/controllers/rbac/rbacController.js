@@ -7,6 +7,8 @@ import {
   dispatchPropagationEmails,
   handleAutoCompletedInstances
 } from '../../services/approvalPropagationService.js';
+import { ENTITY_APPROVE_RESOURCE_MAP } from '../../models/generalModel.js';
+import { PERFORMER_ROLE_TITLES } from '../../util/roleStageCapabilities.js';
 
 /**
  * Aggregate rows of {resource, action, hotel_id, department_id, process_id}
@@ -92,7 +94,19 @@ const rbacController = {
   getRoles: async (req, res) => {
     try {
       const rows = await rbacModel.getRoles(req.user);
-      return res.json({ status: true, data: rows });
+      const resourcesByRole = await rbacModel.getRoleApprovalResources(rows.map((r) => Number(r.id)));
+      // INDENT has no mapped resource, so it can never appear here.
+      const data = rows.map((r) => {
+        const held = new Set(resourcesByRole.get(Number(r.id)) || []);
+        const approvable = Object.entries(ENTITY_APPROVE_RESOURCE_MAP)
+          .filter(([, resource]) => held.has(resource))
+          .map(([entityType]) => entityType);
+        const performs = r.created_by === null
+          ? [...(PERFORMER_ROLE_TITLES[r.title] || [])]
+          : [];
+        return { ...r, approvable_entity_types: approvable, performs_entity_types: performs };
+      });
+      return res.json({ status: true, data });
     } catch (err) {
       return res.status(500).json({ status: false, message: err.message });
     }

@@ -35,6 +35,8 @@ import rfqModel from "./rfqModel.js";
 import { enrichQuoteCompareData } from "../services/quoteCompareService.js";
 import { buildQuoteVisibilityMeta, getBidEndMomentIst } from "../helper/quoteVisibility.js";
 import { shapeStageActors } from "./rfq/rfqLifecycleShaper.js";
+import { POLICY_STEP_RESOLUTION_SQL } from "../services/approvalPropagationService.js";
+import { ENTITY_APPROVE_RESOURCE_MAP } from "./generalModel.js";
 import {
   getCoveredProductIds,
   getVendorFieldsForProduct,
@@ -1174,6 +1176,104 @@ async function fetchCategories(rfqId, rfqProductIds) {
   return map;
 }
 
+// ---------------------------------------------------------------------------
+// Approver labels = the role of the STEP, not "first role ever granted".
+//
+// The old label was `ORDER BY urs.id ASC LIMIT 1` over every scope row a user
+// has ever held, so anyone whose first grant was "Tender Approver" read as that
+// on technical, negotiation and PO steps alike. The thing a reader wants beside
+// an approver is the capacity they are acting in, i.e. the role the approval
+// step names.
+// ---------------------------------------------------------------------------
+const APPROVER_FALLBACK_LABEL = "Approver";
+
+const resourceForEntity = (entityType) =>
+  ENTITY_APPROVE_RESOURCE_MAP[entityType] || String(entityType || "").toLowerCase();
+
+// SQL scalar subquery: the title of a role the user holds in the instance's
+// company (company-wide, or at the instance's hotel) that carries BOTH read and
+// approve on the entity's resource, ordered by title so the pick is stable.
+// NULL when no role qualifies. Arguments are SQL expressions.
+const qualifyingRoleTitleSql = (userId, companyId, hotelId, resource) => `
+  (SELECT rl.title
+     FROM tbl_user_role_scopes urs
+     JOIN tbl_roles rl ON rl.id = urs.role_id
+    WHERE urs.user_id = ${userId}
+      AND urs.company_id = ${companyId}
+      AND (urs.hotel_id IS NULL OR urs.hotel_id = ${hotelId})
+      AND (SELECT COUNT(DISTINCT p.action)
+             FROM tbl_role_permissions rp
+             JOIN tbl_permissions p ON p.id = rp.permission_id
+            WHERE rp.role_id = rl.id
+              AND p.resource::text = ${resource}
+              AND p.action IN ('read', 'approve')) = 2
+    ORDER BY rl.title ASC
+    LIMIT 1)`;
+
+// Policy-step fallback (no instance yet): userIds -> Map(user_id -> title), one
+// batched query, for the RFQ's company/hotel and the given entity's resource.
+async function fetchQualifyingRoleTitles(userIds, { companyId, hotelId, entityType }, t = db) {
+  const out = new Map();
+  const ids = [...new Set((userIds || []).map(Number))].filter((n) => Number.isInteger(n) && n > 0);
+  if (!ids.length) return out;
+  const rows = await t.any(
+    `SELECT u.id AS user_id,
+            ${qualifyingRoleTitleSql("u.id", "$2::int", "$3::int", "$4::text")} AS title
+       FROM unnest($1::int[]) AS u(id)`,
+    [ids, companyId, hotelId ?? null, resourceForEntity(entityType)]
+  );
+  for (const r of rows) if (r.title) out.set(Number(r.user_id), r.title);
+  return out;
+}
+
+// instance step id -> label, ONE batched statement regardless of how many
+// steps. ROLE source -> that role's title. USER source -> title of the role the
+// named user holds that qualifies them for the step, else "Approver" (never the
+// user's name). DEPARTMENT source, or a step whose policy step can no longer be
+// resolved (policy deleted/shortened) -> "Approver", so the UI never shows a
+// blank line under an approver.
+async function fetchStepRoleLabels(instanceStepIds, t = db) {
+  const out = new Map();
+  const ids = [...new Set((instanceStepIds || []).map(Number))].filter((n) => Number.isInteger(n) && n > 0);
+  if (!ids.length) return out;
+  const resourceMap = JSON.stringify(ENTITY_APPROVE_RESOURCE_MAP);
+  const rows = await t.any(
+    `SELECT ais.id AS step_id, ps.approver_source_type, r.title AS role_title,
+            CASE WHEN ps.approver_source_type = 'USER' THEN
+              ${qualifyingRoleTitleSql(
+                "ps.approver_source_id", "ai.hospitality_company_id", "ai.hotel_id",
+                "COALESCE($2::jsonb ->> ai.entity_type, lower(ai.entity_type))"
+              )}
+            END AS user_role_title
+       FROM tbl_approval_instance_steps ais
+       JOIN tbl_approval_instances ai ON ai.id = ais.approval_instance_id
+       ${POLICY_STEP_RESOLUTION_SQL}
+       LEFT JOIN tbl_roles r ON ps.approver_source_type = 'ROLE' AND r.id = ps.approver_source_id
+      WHERE ais.id = ANY($1::int[])`,
+    [ids, resourceMap]
+  );
+  for (const r of rows) {
+    const type = String(r.approver_source_type || "").toUpperCase();
+    if (type === "ROLE") {
+      out.set(Number(r.step_id), r.role_title || APPROVER_FALLBACK_LABEL);
+    } else if (type === "USER") {
+      out.set(Number(r.step_id), r.user_role_title || APPROVER_FALLBACK_LABEL);
+    } else {
+      out.set(Number(r.step_id), APPROVER_FALLBACK_LABEL);
+    }
+  }
+  return out;
+}
+
+async function safeStepRoleLabels(stepIds) {
+  try {
+    return await fetchStepRoleLabels(stepIds);
+  } catch (e) {
+    logError("quoteCompareView fetchStepRoleLabels failed", e);
+    return new Map();
+  }
+}
+
 // rfq_product_id -> { status, reject:{by,role,reason,date} | null } for the
 // latest NEGOTIATION_QUOTE approval instance on that product.
 async function fetchQuoteApprovals(rfqProductIds) {
@@ -1198,12 +1298,12 @@ async function fetchQuoteApprovals(rfqProductIds) {
       const actions = await db.any(
         `SELECT DISTINCT ON (a.approval_instance_id)
                 a.approval_instance_id, a.comment, a.created_at,
-                u.name AS actor_name,
-                (SELECT rl.title
-                   FROM tbl_user_role_scopes urs
-                   JOIN tbl_roles rl ON rl.id = urs.role_id
-                  WHERE urs.user_id = a.approver_user_id
-                  ORDER BY urs.id ASC LIMIT 1) AS actor_role
+                COALESCE(a.approval_instance_step_id,
+                         (SELECT st.id FROM tbl_approval_instance_steps st
+                           WHERE st.approval_instance_id = a.approval_instance_id
+                             AND st.status = 'REJECTED'
+                           ORDER BY st.step_order ASC LIMIT 1)) AS approval_instance_step_id,
+                u.name AS actor_name
            FROM tbl_approval_actions a
            JOIN tbl_users u ON u.id = a.approver_user_id
           WHERE a.approval_instance_id = ANY($1::int[])
@@ -1211,10 +1311,11 @@ async function fetchQuoteApprovals(rfqProductIds) {
           ORDER BY a.approval_instance_id, a.created_at DESC`,
         [rejectedIds]
       );
+      const stepLabels = await safeStepRoleLabels(actions.map((a) => a.approval_instance_step_id));
       for (const a of actions) {
         rejectByInstance.set(a.approval_instance_id, {
           by: a.actor_name,
-          role: a.actor_role || null,
+          role: stepLabels.get(Number(a.approval_instance_step_id)) || null,
           reason: a.comment || null,
           date: a.created_at,
         });
@@ -1278,11 +1379,7 @@ async function buildQuoteApprovalData(instanceIds) {
                   JSON_BUILD_OBJECT(
                     'user_id', sa.approver_user_id, 'name', u.name,
                     'status', sa.status, 'acted_at', sa.acted_at,
-                    'removal_reason', sa.removal_reason, 'removed_at', sa.removed_at,
-                    'role', (SELECT rl.title FROM tbl_user_role_scopes urs
-                               JOIN tbl_roles rl ON rl.id = urs.role_id
-                              WHERE urs.user_id = sa.approver_user_id
-                              ORDER BY urs.id ASC LIMIT 1)
+                    'removal_reason', sa.removal_reason, 'removed_at', sa.removed_at
                   ) ORDER BY sa.id
                 ) FILTER (WHERE sa.id IS NOT NULL),
                 '[]'
@@ -1295,6 +1392,13 @@ async function buildQuoteApprovalData(instanceIds) {
         ORDER BY st.approval_instance_id, st.step_order ASC`,
       [ids]
     );
+    // Every approver on a step is labelled with that STEP's role (see
+    // fetchStepRoleLabels), one batched lookup for the whole page.
+    const stepLabels = await safeStepRoleLabels(steps.map((st) => st.id));
+    for (const st of steps) {
+      const label = stepLabels.get(Number(st.id)) || null;
+      for (const a of Array.isArray(st.approvers) ? st.approvers : []) a.role = label;
+    }
     const actions = await db.any(
       `SELECT a.approval_instance_id, a.action, a.comment, a.created_at, a.approver_user_id
          FROM tbl_approval_actions a
@@ -1974,12 +2078,8 @@ async function fetchApprovalChain(rfq, approvalByRfqProduct, scope) {
       // the named approver (steps with zero remaining approvers still come
       // through, via the sa.status IS NULL branch for the LEFT JOIN miss).
       const rows = await db.any(
-        `SELECT st.step_order,
-                sa.approver_user_id, u.name AS approver_name,
-                (SELECT rl.title FROM tbl_user_role_scopes urs
-                   JOIN tbl_roles rl ON rl.id = urs.role_id
-                  WHERE urs.user_id = sa.approver_user_id
-                  ORDER BY urs.id ASC LIMIT 1) AS approver_role
+        `SELECT st.id AS step_id, st.step_order,
+                sa.approver_user_id, u.name AS approver_name
            FROM tbl_approval_instance_steps st
            LEFT JOIN tbl_approval_step_approvers sa ON sa.approval_instance_step_id = st.id
            LEFT JOIN tbl_users u ON u.id = sa.approver_user_id
@@ -1988,8 +2088,10 @@ async function fetchApprovalChain(rfq, approvalByRfqProduct, scope) {
           ORDER BY st.step_order ASC, sa.id ASC`,
         [instanceId]
       );
+      const stepLabels = await safeStepRoleLabels(rows.map((r) => r.step_id));
       const byStep = new Map();
       for (const r of rows) {
+        r.approver_role = stepLabels.get(Number(r.step_id)) || null;
         if (!byStep.has(r.step_order)) byStep.set(r.step_order, []);
         if (r.approver_user_id != null) byStep.get(r.step_order).push(r);
       }
@@ -2016,11 +2118,13 @@ async function fetchApprovalChain(rfq, approvalByRfqProduct, scope) {
           AND hospitality_company_id = $1
           AND (hotel_id IS NULL OR hotel_id = $2)
           AND (department_id IS NULL OR department_id = $3)
+          AND (process_id IS NULL OR $4::int IS NULL OR process_id = $4)
           AND COALESCE(is_active, true) = true
-        ORDER BY (hotel_id IS NOT NULL)::int + (department_id IS NOT NULL)::int DESC,
+        ORDER BY (hotel_id IS NOT NULL)::int + (department_id IS NOT NULL)::int
+                 + (process_id IS NOT NULL)::int DESC,
                  created_at DESC
         LIMIT 1`,
-      [rfq.hospitality_company_id, rfq.hotel_id, rfq.department_id]
+      [rfq.hospitality_company_id, rfq.hotel_id, rfq.department_id, rfq.process_id ?? null]
     );
     if (!policy) return [];
     const steps = await db.any(
@@ -2036,24 +2140,33 @@ async function fetchApprovalChain(rfq, approvalByRfqProduct, scope) {
         ORDER BY s.step_order ASC`,
       [policy.id]
     );
-    return steps.map((s) => ({
-      num: Number(s.step_order),
-      name: s.approver_source_type === "USER" ? s.source_name : null,
-      role: s.approver_source_type === "ROLE" ? s.source_name : s.source_name || null,
-      you:
-        s.approver_source_type === "USER" &&
-        scope &&
-        Number(s.approver_source_id) === Number(scope.userId),
-    }));
+    // A USER step names a person; the role shown beside them is the one that
+    // qualifies them for this approval (one batched lookup), never their name.
+    const userTitles = await fetchQualifyingRoleTitles(
+      steps.filter((s) => s.approver_source_type === "USER").map((s) => s.approver_source_id),
+      { companyId: rfq.hospitality_company_id, hotelId: rfq.hotel_id, entityType: "NEGOTIATION_QUOTE" }
+    );
+    return steps.map((s) => {
+      const isUser = s.approver_source_type === "USER";
+      return {
+        num: Number(s.step_order),
+        name: isUser ? s.source_name : null,
+        role: isUser
+          ? userTitles.get(Number(s.approver_source_id)) || APPROVER_FALLBACK_LABEL
+          : s.source_name || null,
+        you: isUser && scope && Number(s.approver_source_id) === Number(scope.userId),
+      };
+    });
   } catch (e) {
     logError("quoteCompareView fetchApprovalChain failed", e);
     return [];
   }
 }
 
-// One role title per user — the same "first scope row wins" convention already
-// used for the approval trail and the approval chain above, so the role beside a
-// name is consistent wherever this RFQ shows that person. Map(user_id -> title).
+// One role title per user ("first scope row wins"). Only the fallback for stage
+// actors that have no approval step to take a role from (evaluators, and the
+// "up next" stage before its instance exists); approvers on a live step are
+// labelled by fetchStepRoleLabels. Map(user_id -> title).
 async function fetchPrimaryRoles(userIds) {
   const map = new Map();
   const ids = [...new Set((userIds || []).map(Number))].filter((n) => Number.isInteger(n) && n > 0);
@@ -2100,8 +2213,18 @@ async function fetchStageActors(rfqId, scope, rfqRow = null) {
     // Role titles are not part of the lifecycle summary, so they are layered on
     // afterwards in one query over exactly the people the banner will name.
     const everyone = [...shaped.actors, ...(shaped.next ? shaped.next.actors : [])];
+    // The live approvers are labelled by the role of the step they are pending
+    // on (the lifecycle summary names that step). Actors with no step to point
+    // at - evaluators, and the "up next" stage, which has no instance yet - keep
+    // the user's primary role.
+    const current = Array.isArray(summary?.phases) ? summary.phases.find((p) => p && p.status === "current") : null;
+    const holderStepId = Number(current?.action_holders?.step_id);
+    const stepLabel = Number.isInteger(holderStepId) && holderStepId > 0
+      ? (await safeStepRoleLabels([holderStepId])).get(holderStepId) || null
+      : null;
     const roles = await fetchPrimaryRoles(everyone.map((a) => a.user_id));
     for (const a of everyone) a.role = roles.get(a.user_id) || null;
+    if (stepLabel) for (const a of shaped.actors) a.role = stepLabel;
     return shaped;
   } catch (e) {
     logError("quoteCompareView fetchStageActors failed", e);

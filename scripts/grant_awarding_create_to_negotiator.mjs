@@ -1,18 +1,18 @@
 #!/usr/bin/env node
 /**
- * Grant `awarding.create` to the "Commercial Negotiator N1" role.
+ * Grant `awarding.create` to the "Commercial Evaluator" role.
  *
  * WHY
  * ---
  * Finalising a vendor (`quote-compare.create`) is what CREATES a PO draft, but
  * initiating that draft requires `awarding.create`. Only three roles grant
- * `quote-compare.create` — CEO, Company CEO and Commercial Negotiator N1 — and
- * the first two already carry `awarding.create`. Commercial Negotiator N1 does
+ * `quote-compare.create` — CEO, Company CEO and Commercial Evaluator — and
+ * the first two already carry `awarding.create`. Commercial Evaluator does
  * not, so the people who actually award POs cannot move them forward.
  *
  * Measured on production before writing this:
  *   53 users can finalise · 32 can initiate · 49 can finalise but NOT initiate
- *   all 49 of those hold Commercial Negotiator N1  -> this grant fixes 100%
+ *   all 49 of those hold Commercial Evaluator  -> this grant fixes 100%
  *   all 51 CN1 users already hold awarding.read / rfq.read / boq.read, so the
  *   server's PO scope guard (PO_SCOPE_PERMISSIONS) is already satisfied and the
  *   grant cannot produce a button that 403s.
@@ -43,14 +43,14 @@
  * TO REVERSE
  * ----------
  *   DELETE FROM tbl_role_permissions
- *    WHERE role_id = (SELECT id FROM tbl_roles WHERE title = 'Commercial Negotiator N1')
+ *    WHERE role_id = (SELECT id FROM tbl_roles WHERE title = 'Commercial Evaluator')
  *      AND permission_id = (SELECT id FROM tbl_permissions WHERE resource='awarding' AND action='create');
  */
 
 import 'dotenv/config';
 import pgPromise from 'pg-promise';
 
-const ROLE_TITLE = 'Commercial Negotiator N1';
+const ROLE_TITLE = 'Commercial Evaluator';
 const RESOURCE = 'awarding';
 const ACTION = 'create';
 

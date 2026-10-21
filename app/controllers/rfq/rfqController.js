@@ -11004,7 +11004,10 @@ const rfqController = {
         //   • Catch-all:         metadata->>'rfq_id' = rfq_id (covers any new entity_type that
         //                        consistently sets this field)
         const pendingInstances = await t.any(
-          `SELECT id, entity_type, entity_id, metadata
+          `SELECT id, entity_type, entity_id, metadata,
+                  COALESCE((SELECT p.entity_type LIKE 'ARC\\_GROUP%'
+                              FROM tbl_approval_policies p
+                             WHERE p.id = tbl_approval_instances.approval_policy_id), false) AS is_group
              FROM tbl_approval_instances
             WHERE status = 'PENDING'
               AND (
@@ -11090,6 +11093,7 @@ const rfqController = {
             entity_type: instance.entity_type,
             entity_id: instance.entity_id,
             metadata: instance.metadata,
+            is_group: instance.is_group,
             approvers
           });
         }
@@ -11146,7 +11150,7 @@ const rfqController = {
           entityIdentifier: rfQItem.rfq_no,
           reason: cancelReason,
           approvers: inst.approvers,
-          extraContext: { rfq_id: parseInt(rfq_id) },
+          extraContext: { rfq_id: parseInt(rfq_id), is_group: Boolean(inst.is_group) },
         });
       }
 
