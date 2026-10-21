@@ -50,9 +50,14 @@ function ident(name, what) {
  * Accepts every shape production holds — 'YYYY-MM-DD HH24:MI[:SS]' and the ISO
  * 'YYYY-MM-DDTHH24:MI[:SS[.mmm]][Z]' form (a timestamp WITHOUT time zone
  * ignores a trailing zone, which is the wall-clock reading the rest of the
- * codebase applies). Empty, blank, NULL or non-date text is CLOSED, never an
- * error: 31 production rows hold '' and a bare cast would abort the whole
- * listing query for every user on the platform.
+ * codebase applies). Empty, blank, NULL, or text that does not start with a
+ * date reads as CLOSED rather than raising: 31 production rows hold '' and a
+ * bare cast would abort the whole listing query for every user.
+ *
+ * NOT fully cast-proof: a value that starts like a date but is not one
+ * ('2026-10-25 25:00', '2026-02-30') still raises on the CAST, exactly as every
+ * other bid_end_date cast in this codebase does. Production values are
+ * well-formed; making this total would need a plpgsql helper (a migration).
  *
  * @param {{ rfq: string }} aliases  alias of a tbl_rfq row
  * @returns {string} SQL boolean expression, never NULL
@@ -116,6 +121,18 @@ export function eligibleUnscoredResponderSql({ te, vendor = null }) {
 }
 
 /**
+ * Evaluation `te` is blocked for want of vendors and nobody has passed it.
+ * The raw "blocked with zero passed" fact, NULL-safe (always TRUE/FALSE). On its
+ * own it does NOT mean stuck — see techStuckSql — but it is what
+ * products_with_cleared must exclude (a line nobody passed has cleared nobody,
+ * stuck or reopened) and what a deadline extension may reopen.
+ */
+export function techBlockedNoPassSql({ te }) {
+  const t = ident(te, 'te');
+  return `(${t}.blocked_insufficient_vendors IS TRUE AND COALESCE(${t}.total_passed_verified, 0) = 0)`;
+}
+
+/**
  * The line behind evaluation `te` is technically stuck right now: blocked for
  * want of vendors, nobody passed, bidding closed, and nobody left to evaluate.
  * The only way forward is to extend the bid deadline (which reopens it — see
@@ -129,10 +146,44 @@ export function eligibleUnscoredResponderSql({ te, vendor = null }) {
 export function techStuckSql({ te, rfq }) {
   const t = ident(te, 'te');
   return `(
-    ${t}.blocked_insufficient_vendors = TRUE
-    AND COALESCE(${t}.total_passed_verified, 0) = 0
+    ${techBlockedNoPassSql({ te: t })}
     AND NOT ${bidWindowOpenSql({ rfq })}
     AND NOT ${eligibleUnscoredResponderSql({ te: t })}
+  )`;
+}
+
+/**
+ * Evaluation `te` may be reopened by a bid-deadline extension: it is stuck now,
+ * OR it is blocked with nobody passed and still locked as complete. The second
+ * arm covers an evaluation locked while bidding was still open (before the
+ * keep-open rule in handleTechnicalPostApproval existed): it is not stuck —
+ * bidding is open — yet without this an extension would leave it locked, and a
+ * vendor quoting in the new window could never be evaluated.
+ *
+ * The caller must still check, on the row as written, that the window is open.
+ */
+export function techReopenCandidateSql({ te, rfq }) {
+  const t = ident(te, 'te');
+  return `(
+    ${techStuckSql({ te: t, rfq })}
+    OR (${techBlockedNoPassSql({ te: t })} AND ${t}.is_complete IS TRUE)
+  )`;
+}
+
+/**
+ * Evaluation `te` is locked as complete, blocked with nobody passed, yet a
+ * vendor is waiting to be evaluated (an eligible unscored responder). Nothing
+ * can be edited (it is not stuck) and every submit would be refused as already
+ * complete — so the submit path treats it as open: it lifts the lock in its own
+ * transaction and carries the new vendor into the next round. Any other gate
+ * that refuses work on a complete evaluation must make the same exception.
+ */
+export function techRecoverableSql({ te }) {
+  const t = ident(te, 'te');
+  return `(
+    ${techBlockedNoPassSql({ te: t })}
+    AND ${t}.is_complete IS TRUE
+    AND ${eligibleUnscoredResponderSql({ te: t })}
   )`;
 }
 
@@ -142,7 +193,15 @@ export function techStuckSql({ te, rfq }) {
  */
 export function techReopenedSql({ te }) {
   const t = ident(te, 'te');
-  return `(${t}.blocked_insufficient_vendors = TRUE AND ${t}.is_complete IS NOT TRUE)`;
+  return `(${t}.blocked_insufficient_vendors IS TRUE AND ${t}.is_complete IS NOT TRUE)`;
 }
 
-export default { bidWindowOpenSql, eligibleUnscoredResponderSql, techStuckSql, techReopenedSql };
+export default {
+  bidWindowOpenSql,
+  eligibleUnscoredResponderSql,
+  techBlockedNoPassSql,
+  techStuckSql,
+  techReopenCandidateSql,
+  techRecoverableSql,
+  techReopenedSql,
+};

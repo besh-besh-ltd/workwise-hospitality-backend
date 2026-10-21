@@ -30,6 +30,9 @@
 //      editable again, so the buyer can extend once more.
 //   5. A line that is not stuck is never reopened.
 //   6. An empty or ISO-form bid_end_date never breaks the predicate.
+//   7. An evaluation locked before this fix (blocked, nobody passed,
+//      is_complete still TRUE) is recoverable: an extension reopens it, and a
+//      vendor waiting to be evaluated can be submitted without one.
 //
 // Vendors quote through SQL here: createQuote gates on user_type (3, 4) and the
 // shared fixture vendors deliberately carry user_type NULL (see the note in
@@ -56,9 +59,10 @@ const TAG = "TE-STUCK-REOPEN";
 const stamped = {};
 
 beforeAll(async () => {
-  // acl([2, 8]) guards submit, status and edit. Fixture users carry user_type
-  // NULL, so stamp the two buyer-side actors as Buyers for this file only.
-  for (const id of [BUYER, APPROVER]) {
+  // acl([2, 8]) guards submit, status and edit (and acl([2, 3, 8, 9, 10]) the
+  // sidebar). Fixture users carry user_type NULL, so stamp the buyer-side
+  // actors as Buyers for this file only.
+  for (const id of [BUYER, APPROVER, EVALUATOR]) {
     stamped[id] = (await db.one(`SELECT user_type FROM tbl_users WHERE id = $1`, [id])).user_type;
     await db.none(`UPDATE tbl_users SET user_type = 2 WHERE id = $1`, [id]);
   }
@@ -157,7 +161,7 @@ function istIsoLocal(offsetMs) {
  * (125 marks), minimum passing score 100%. Vendors A and B quoted and answered;
  * vendor C answered every clause and did not quote.
  */
-async function seedIncidentRfq({ bidEnd = ist(-DAY), quoted = [A, B], answeredOnly = [C] } = {}) {
+async function seedIncidentRfq({ bidEnd = ist(-DAY), quoted = [A, B], answeredOnly = [C], disagree = [] } = {}) {
   const { rfq_id, rfq_no } = await makeRFQ(db, {
     createdBy: BUYER,
     status: 1,
@@ -211,7 +215,7 @@ async function seedIncidentRfq({ bidEnd = ist(-DAY), quoted = [A, B], answeredOn
   const shape = { rfq_id, rfq_no, rfq_product_id, eval_id, clause_ids, sampling_id: clause_ids[4] };
   for (const v of [...quoted, ...answeredOnly]) {
     await invite(shape, v);
-    await answerClauses(shape, v);
+    await answerClauses(shape, v, { disagreeFirst: disagree.includes(v) });
   }
   for (const v of quoted) await quote(shape, v);
   return shape;
@@ -225,14 +229,17 @@ async function invite({ rfq_id }, vendor_id) {
   );
 }
 
-/** The vendor answers every clause they are asked — the sampling clause is never put to them. */
-async function answerClauses({ clause_ids }, vendor_id) {
-  for (const clause_id of clause_ids.slice(0, 4)) {
+/**
+ * The vendor answers every clause they are asked — the sampling clause is never
+ * put to them. `disagreeFirst` stores prod's negative ('I Dont Agree') on clause 1.
+ */
+async function answerClauses({ clause_ids }, vendor_id, { disagreeFirst = false } = {}) {
+  for (const [i, clause_id] of clause_ids.slice(0, 4).entries()) {
     await db.none(
       `INSERT INTO tbl_rfq_product_tech_evaluation_vendors_response
          (tbl_rfq_product_tech_evaluation_clauses_id, vendor_id, vendor_response, "timestamp")
-       VALUES ($1, $2, 'I Agree', NOW())`,
-      [clause_id, vendor_id]
+       VALUES ($1, $2, $3, NOW())`,
+      [clause_id, vendor_id, disagreeFirst && i === 0 ? "I Dont Agree" : "I Agree"]
     );
   }
 }
@@ -346,6 +353,33 @@ async function evaluatorQueue() {
   return res.body.data.items.map((i) => i.id);
 }
 
+async function disagreementQueue() {
+  const client = await httpClient(EVALUATOR);
+  const res = await client.get("/api/v1/dashboard-v2/tech-evals-with-disagreements").query({ hotel_ids: String(IDS.hotels.A1) });
+  expect(res.status).toBe(200);
+  return res.body.data.items.map((i) => i.id);
+}
+
+async function disagreementListIds() {
+  const client = await httpClient(BUYER);
+  const res = await client.post("/api/v1/rfq/list-view")
+    .send({ tab: "all", search: TAG, limit: 100, filters: { vendor_disagreement: true } });
+  expect(res.status).toBe(200);
+  return res.body.data.rows.map((r) => Number(r.id));
+}
+
+/** The technical-evaluation sidebar list (GET /rfq/get-rfqs?tech_eval=true) — te.read holders only. */
+async function techEvalSidebarRow({ rfq_id }) {
+  const client = await httpClient(EVALUATOR);
+  const res = await client.get("/api/v1/rfq/get-rfqs").query({ page: 1, limit: 100, tech_eval: true, search: TAG });
+  expect(res.status).toBe(200);
+  return res.body.data.find((r) => Number(r.id) === rfq_id);
+}
+
+/** An evaluation locked as complete before the keep-open rule existed. */
+const lockAsComplete = ({ eval_id }) =>
+  db.none(`UPDATE tbl_rfq_product_tech_evaluation SET is_complete = TRUE WHERE id = $1`, [eval_id]);
+
 async function commercialVendors({ rfq_id }) {
   const client = await httpClient(BUYER);
   const res = await client.get(`/api/v1/rfq/quote-compare/${rfq_id}`);
@@ -436,6 +470,11 @@ describe("RFQ 536894 — a line where nobody passed", () => {
     // Nothing for an evaluator to do.
     expect(await evaluatorQueue()).not.toContain(shape.eval_id);
 
+    // Nothing to submit: the lock stays.
+    const resubmit = await submit(shape);
+    expect(resubmit.status).toBe(400);
+    expect(resubmit.body.code).toBe("TECH_EVAL_ALREADY_COMPLETE");
+
     // Restricted edit: alongside a valid new deadline, any other field is
     // refused — and the refused edit reopens nothing (one transaction).
     const res = await edit(shape, { comment: "anything else", bid_end_date: istIsoLocal(3 * DAY) });
@@ -489,7 +528,9 @@ describe("RFQ 536894 — a line where nobody passed", () => {
     await closeBidding(shape);
 
     let s = await status(shape);
-    expect(s.eligible_unscored_vendors).toEqual([{ vendor_id: C, vendor_name: expect.any(String) }]);
+    expect(s.eligible_unscored_vendors).toEqual([
+      { vendor_id: C, vendor_name: expect.any(String), company_name: expect.anything() },
+    ]);
     expect(s.is_stuck).toBe(false);
     expect(s.bid_window_open).toBe(false);
     expect(s.reopened).toBe(true);
@@ -531,10 +572,18 @@ describe("RFQ 536894 — a line where nobody passed", () => {
 
 describe("a reopened line nobody quotes on", () => {
   it("is stuck again once bidding closes, and the buyer can extend once more", async () => {
-    const shape = await reachIncidentState();
+    // A disagreed with a clause in round 1, as vendors on prod do.
+    const shape = await reachIncidentState({ disagree: [A] });
     expect((await edit(shape, { bid_end_date: istIsoLocal(3 * DAY) })).status).toBe(200);
 
-    // Nobody new quotes. C still has not. Bidding closes.
+    // While reopened and open, the evaluation is open work again.
+    expect(await disagreementQueue()).toContain(shape.eval_id);
+    expect(await disagreementListIds()).toContain(shape.rfq_id);
+
+    // Nobody new quotes against the clauses. C still has not quoted; D quotes
+    // without answering a single clause, so D cannot be evaluated either.
+    await invite(shape, D);
+    await quote(shape, D);
     await closeBidding(shape);
 
     const s = await status(shape);
@@ -545,8 +594,14 @@ describe("a reopened line nobody quotes on", () => {
     const view = await rfqView(shape);
     expect(view.lifecycle_stage).toBe("RFQ_STUCK_TECHNICAL");
     expect(view.has_tech_stuck_product).toBe(true);
-    // A reopened evaluation is still not work anybody can do.
+    // A reopened evaluation that is stuck again is not work anybody can do —
+    // on any surface that reads is_complete = false as "open".
     expect(await evaluatorQueue()).not.toContain(shape.eval_id);
+    expect(await disagreementQueue()).not.toContain(shape.eval_id);
+    expect(await disagreementListIds()).not.toContain(shape.rfq_id);
+    const sidebar = await techEvalSidebarRow(shape);
+    expect(sidebar.has_tech_stuck_product).toBe(true);
+    expect(sidebar.has_pending_evaluation).toBe(false);
 
     // Still restricted …
     const refused = await edit(shape, { comment: "anything else", bid_end_date: istIsoLocal(5 * DAY) });
@@ -604,6 +659,87 @@ describe("a round approved before bidding closes, in which nobody passed", () =>
 });
 
 // ===========================================================================
+//  Evaluations locked before this fix
+// ===========================================================================
+
+describe("an evaluation locked as complete while bidding was still open (pre-fix shape)", () => {
+  /**
+   * Round 1 approved during the bid window with nobody passing; before the
+   * keep-open rule the evaluation was then locked (is_complete TRUE). 536894
+   * reaches this shape if the client extends again before this deploys.
+   */
+  async function lockedWhileOpen() {
+    const shape = await seedIncidentRfq({ bidEnd: ist(3 * DAY) });
+    await score(shape, A, MARKS_80);
+    await score(shape, B, MARKS_72);
+    expect(await runRound(shape)).toBe(1);
+    await lockAsComplete(shape);
+    expect(await evalRow(shape)).toMatchObject({
+      is_complete: true, blocked_insufficient_vendors: true, total_passed_verified: 0,
+    });
+    return shape;
+  }
+
+  it("L1 — is not stuck (bidding is open), and the next extension reopens it", async () => {
+    const shape = await lockedWhileOpen();
+    let s = await status(shape);
+    expect(s).toMatchObject({ is_stuck: false, bid_window_open: true, reopened: false });
+    const verdictsBefore = await verdicts(shape);
+
+    const res = await edit(shape, { bid_end_date: istIsoLocal(5 * DAY) });
+    expect(res.status).toBe(200);
+
+    expect((await evalRow(shape)).is_complete).toBe(false);
+    s = await status(shape);
+    expect(s).toMatchObject({ is_stuck: false, bid_window_open: true, reopened: true });
+    expect(await verdicts(shape)).toEqual(verdictsBefore);
+    expect(await reopenEvents(shape)).toHaveLength(1);
+
+    // And the reopened evaluation does its job: C quotes, bidding closes, C is
+    // evaluated in round 2.
+    await quote(shape, C);
+    await closeBidding(shape);
+    await score(shape, C, MARKS_100);
+    expect(await runRound(shape)).toBe(2);
+    expect((await evalRow(shape)).total_passed_verified).toBe(1);
+  });
+
+  it("L2 — a vendor then quotes and bidding closes: the buyer can still evaluate and submit them", async () => {
+    const shape = await lockedWhileOpen();
+    await quote(shape, C);
+    await closeBidding(shape);
+
+    // Not stuck — C is waiting to be evaluated — so the edit stays shut …
+    const s = await status(shape);
+    expect(s).toMatchObject({ is_stuck: false, bid_window_open: false, reopened: false });
+    expect(s.eligible_unscored_vendors.map((v) => v.vendor_id)).toEqual([C]);
+    const refusedEdit = await edit(shape, { bid_end_date: istIsoLocal(3 * DAY) });
+    expect(refusedEdit.status).toBe(400);
+    expect(refusedEdit.body.message).toMatch(/bid window has closed/i);
+
+    // … and submitting before C is scored is refused for THAT reason, with the
+    // lock left exactly as it was (the lift is rolled back with the refusal).
+    const early = await submit(shape);
+    expect(early.status).toBe(400);
+    expect(early.body.code).toBe("TECH_EVAL_NO_NEW_VENDORS_SCORED");
+    expect((await evalRow(shape)).is_complete).toBe(true);
+
+    // The buyer scores C and submits: round 2, carrying only C.
+    await score(shape, C, MARKS_100);
+    const sub = await submit(shape);
+    expect(sub.status).toBe(200);
+    expect(sub.body.data.round_number).toBe(2);
+    const r2 = (await rounds(shape)).find((r) => r.round_number === 2);
+    expect(r2.vendors_evaluated.map((v) => v.vendor_id)).toEqual([C]);
+    expect((await evalRow(shape)).is_complete).toBe(false);
+
+    await approve(sub.body.data.approval_instance_id);
+    expect(await evalRow(shape)).toMatchObject({ is_complete: true, total_passed_verified: 1 });
+    expect(await commercialVendors(shape)).toEqual([C]);
+  });
+});
+
+// ===========================================================================
 //  Review Focus 3 — a line that is not stuck is never reopened
 // ===========================================================================
 
@@ -640,6 +776,33 @@ describe("extending the deadline on a line that is not stuck", () => {
     expect(await evalRow(shape)).toEqual(before);
     expect((await status(shape)).reopened).toBe(false);
     expect(await reopenEvents(shape)).toEqual([]);
+
+    // A genuinely complete evaluation still refuses another round.
+    const again = await submit(shape);
+    expect(again.status).toBe(400);
+    expect(again.body.code).toBe("TECH_EVAL_ALREADY_COMPLETE");
+  });
+});
+
+// ===========================================================================
+//  NULL safety — the predicate is always TRUE or FALSE
+// ===========================================================================
+
+describe("blocked_insufficient_vendors stored NULL", () => {
+  it("reads as not blocked: the evaluation stays in the evaluator's queue", async () => {
+    // Bidding closed, nobody scored, one real quote from a vendor who answered
+    // nothing — so nobody is an eligible unscored responder either. Under a
+    // `= TRUE` predicate a NULL here made `NOT stuck` NULL and dropped the row.
+    const shape = await seedIncidentRfq({ quoted: [], answeredOnly: [C] });
+    await invite(shape, D);
+    await quote(shape, D);
+    await db.none(
+      `UPDATE tbl_rfq_product_tech_evaluation SET blocked_insufficient_vendors = NULL WHERE id = $1`,
+      [shape.eval_id]
+    );
+
+    expect(await evaluatorQueue()).toContain(shape.eval_id);
+    expect((await status(shape)).is_stuck).toBe(false);
   });
 });
 

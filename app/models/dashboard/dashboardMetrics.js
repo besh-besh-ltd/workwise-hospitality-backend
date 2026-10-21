@@ -16,6 +16,7 @@
 // ============================================================================
 
 import { SPEND_STATUSES, LEAF_CATEGORY_JOIN, lineVariant as reportsLineVariant } from '../reportsModel.js';
+import { techStuckSql } from '../techEvalStuck.js';
 
 export { SPEND_STATUSES, LEAF_CATEGORY_JOIN };
 
@@ -283,7 +284,9 @@ export const DISAGREE_SQL = (col) =>
 
 /**
  * The RFQ (alias) has an incomplete technical evaluation with at least one
- * disagreeing vendor response — the card's population, per RFQ.
+ * disagreeing vendor response — the card's population, per RFQ. A stuck
+ * evaluation (techEvalStuck.js) is not open work, even when a deadline
+ * extension has reset its is_complete flag.
  */
 export const hasOpenVendorDisagreement = (alias = 'r') => `EXISTS (
   SELECT 1
@@ -293,4 +296,5 @@ export const hasOpenVendorDisagreement = (alias = 'r') => `EXISTS (
       ON vr_d.tbl_rfq_product_tech_evaluation_clauses_id = c_d.id
    WHERE te_d.rfq_id = ${alias}.id
      AND te_d.is_complete = false
+     AND NOT ${techStuckSql({ te: 'te_d', rfq: alias })}
      AND ${DISAGREE_SQL('vr_d.vendor_response')})`;

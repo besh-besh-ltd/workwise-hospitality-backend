@@ -8,7 +8,7 @@ import { notifyBuyerOnPersistenceViaEmail } from '../controllers/rfq/rfqControll
 import { PO_STATUSES } from '../util/constants.js';
 import rbacModel from './rbacModel.js';
 import { hasOpenVendorDisagreement } from './dashboard/dashboardMetrics.js';
-import { techStuckSql, bidWindowOpenSql, eligibleUnscoredResponderSql, techReopenedSql } from './techEvalStuck.js';
+import { techStuckSql, bidWindowOpenSql, eligibleUnscoredResponderSql, techReopenedSql, techBlockedNoPassSql } from './techEvalStuck.js';
 import { buildApproverReadExemption } from '../services/authorizationService.js';
 import { collapsePickerRowsToPrincipals } from '../services/vendorNetwork/directInvites.js';
 import { lockLiveRfqAssignments, propagateRoutedCopies } from '../services/vendorNetwork/subjects/rfqRoutedCopies.js';
@@ -5101,8 +5101,8 @@ LIMIT 2;
         SELECT rfq_id, status FROM tech_approval WHERE rn = 1
       ),
       -- Products where tech eval is done AND at least one vendor passed.
-      -- Excludes every blocked product with nobody passed — deliberately NOT the
-      -- techStuckSql predicate. A REOPENED evaluation (blocked, is_complete reset
+      -- Excludes every blocked product with nobody passed (techBlockedNoPassSql)
+      -- — deliberately NOT the techStuckSql predicate. A REOPENED evaluation (blocked, is_complete reset
       -- by a deadline extension) is not stuck while bidding is open or a new
       -- vendor waits to be scored, but it has still cleared nobody: counting it
       -- here would send a line with zero passed vendors to commercial evaluation.
@@ -5110,7 +5110,7 @@ LIMIT 2;
         SELECT te.rfq_id, COUNT(DISTINCT te.tbl_rfq_product_id)::int AS products_cleared
         FROM tbl_rfq_product_tech_evaluation te
         WHERE te.rfq_id = ANY($1::int[])
-          AND NOT (te.blocked_insufficient_vendors = true AND COALESCE(te.total_passed_verified, 0) = 0)
+          AND NOT ${techBlockedNoPassSql({ te: 'te' })}
           AND (
             te.is_complete = true
             OR (
@@ -14918,6 +14918,9 @@ ORDER BY tq.timestamp DESC;
             AND EXISTS (
               SELECT 1 FROM tbl_rfq_product_tech_evaluation rpe
               WHERE rpe.rfq_id = RFQ.id AND NOT rpe.is_complete
+                -- A stuck evaluation (techEvalStuck.js) has nothing to evaluate,
+                -- even when a deadline extension has reset is_complete.
+                AND NOT ${techStuckSql({ te: 'rpe', rfq: 'RFQ' })}
                 AND NOT EXISTS (
                   -- Exclude products currently waiting on a technical approver
                   SELECT 1 FROM tbl_approval_instances ai_pte
@@ -17616,10 +17619,12 @@ ORDER BY tq.timestamp DESC;
 
     // Vendors the buyer can evaluate in the next round: answered, quoted the
     // line, no verdict yet. Unlike pending_evaluation above this leaves out
-    // vendors who answered but never quoted — they cannot be scored.
+    // vendors who answered but never quoted — they cannot be scored. Names
+    // come from the same columns as the sibling vendor lists in this payload.
     const eligibleUnscored = await dbContext.any(
       `SELECT DISTINCT vr.vendor_id,
-              COALESCE(tc.company_name, tu.organization_name, tu.name) AS vendor_name
+              tu.name AS vendor_name,
+              COALESCE(tc.company_name, tu.organization_name) AS company_name
          FROM tbl_rfq_product_tech_evaluation te
          JOIN tbl_rfq_product_tech_evaluation_clauses c ON c.tbl_rfq_product_tech_evaluation_id = te.id
          JOIN tbl_rfq_product_tech_evaluation_vendors_response vr
@@ -17659,6 +17664,7 @@ ORDER BY tq.timestamp DESC;
 
     // Use actual passed verified count as source of truth (more reliable than stored field)
     const actualPassedVerifiedCount = passedVerified.length;
+    const totalPassedVerified = Math.max(actualPassedVerifiedCount, techEval.total_passed_verified || 0);
 
     return {
       tech_evaluation_id: techEval.id,
@@ -17668,19 +17674,22 @@ ORDER BY tq.timestamp DESC;
       product_name: techEval.product_name,
       is_complete: techEval.is_complete || false,
       current_round: techEval.current_round || 1,
-      total_passed_verified: Math.max(actualPassedVerifiedCount, techEval.total_passed_verified || 0),
+      total_passed_verified: totalPassedVerified,
       required_passed_vendors: techEval.required_passed_vendors || 5,
       blocked_insufficient_vendors: techEval.blocked_insufficient_vendors || false,
       // Additive (plan 2026-10-21). is_stuck: blocked, nobody passed, bidding
       // closed, nobody left to evaluate — only a deadline extension (which
       // reopens it) or closing the RFQ moves it. reopened: blocked but unlocked
       // for another round. eligible_unscored_vendors: who that round can carry.
-      is_stuck: techEval.is_stuck === true,
+      // is_stuck is read against the passed count this payload reports, so it
+      // can never say "stuck" beside a non-zero total_passed_verified.
+      is_stuck: techEval.is_stuck === true && totalPassedVerified === 0,
       bid_window_open: techEval.bid_window_open === true,
       reopened: techEval.reopened === true,
       eligible_unscored_vendors: eligibleUnscored.map((v) => ({
         vendor_id: v.vendor_id,
         vendor_name: v.vendor_name,
+        company_name: v.company_name,
       })),
       minimum_passing_score: techEval.minimum_passing_score,
       rounds: rounds.map(r => ({

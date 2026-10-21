@@ -11,7 +11,13 @@ import {
   normalizeErrors
 } from '../../helper/common.js';
 import rfqModel from '../../models/rfqModel.js';
-import { techStuckSql, bidWindowOpenSql } from '../../models/techEvalStuck.js';
+import {
+  techStuckSql,
+  bidWindowOpenSql,
+  techBlockedNoPassSql,
+  techReopenCandidateSql,
+  techRecoverableSql,
+} from '../../models/techEvalStuck.js';
 import { shapeRfqLifecycle } from '../../models/rfq/rfqLifecycleShaper.js';
 import userModel from '../../models/userModel.js';
 import { sendNotification, dispatch as dispatchNotification } from '../../services/notificationService.js';
@@ -4359,9 +4365,11 @@ const startApprovalForTechEval = async (rfqProductId, rfqId, userId, txContext =
 
   // Get tech evaluation record
   const techEval = await dbContext.oneOrNone(
-    `SELECT id, minimum_passing_score, is_complete, current_round, total_passed_verified, required_passed_vendors
-     FROM tbl_rfq_product_tech_evaluation
-     WHERE tbl_rfq_product_id = $1`,
+    `SELECT te.id, te.minimum_passing_score, te.is_complete, te.current_round,
+            te.total_passed_verified, te.required_passed_vendors,
+            ${techRecoverableSql({ te: 'te' })} AS recoverable
+     FROM tbl_rfq_product_tech_evaluation te
+     WHERE te.tbl_rfq_product_id = $1`,
     [rfqProductId]
   );
 
@@ -4369,9 +4377,25 @@ const startApprovalForTechEval = async (rfqProductId, rfqId, userId, txContext =
     throw techEvalRefusal('TECH_EVAL_NOT_FOUND', 'Technical evaluation not found for this product');
   }
 
-  // Check if already complete
+  // Check if already complete — unless it is locked with nobody passed while a
+  // vendor waits to be evaluated (techRecoverableSql). That shape cannot be
+  // edited (it is not stuck) and would otherwise refuse every submit: an
+  // evaluation locked before the keep-open rule in handleTechnicalPostApproval,
+  // after which a vendor quoted and bidding closed. Lift the lock here, inside
+  // the submit transaction, so a refusal further down rolls it back.
   if (techEval.is_complete) {
-    throw techEvalRefusal('TECH_EVAL_ALREADY_COMPLETE', 'Technical evaluation is already complete with required number of passed vendors');
+    if (techEval.recoverable !== true) {
+      throw techEvalRefusal('TECH_EVAL_ALREADY_COMPLETE', 'Technical evaluation is already complete with required number of passed vendors');
+    }
+    await dbContext.none(
+      `UPDATE tbl_rfq_product_tech_evaluation SET is_complete = FALSE WHERE id = $1`,
+      [techEval.id]
+    );
+    techEval.is_complete = false;
+    logger.info(
+      { techEvalId: techEval.id, rfqId, rfqProductId, userId },
+      'Tech evaluation was locked with 0 passed but a vendor is waiting to be evaluated; reopened by submit'
+    );
   }
 
   // Check if there's already a pending/submitted round for this evaluation
@@ -4858,9 +4882,10 @@ const TECH_EVAL_REOPENED_REMARK = 'Technical evaluation reopened — bid deadlin
  * Reopen tech-stuck evaluations after the RFQ's bid deadline was extended.
  *
  * Called by `update` inside its transaction, AFTER the new bid_end_date has
- * been written, with the evaluations that were tech-stuck BEFORE the edit (the
- * predicate cannot be re-read afterwards: an open window is, by definition,
- * not stuck).
+ * been written, with the reopen candidates read BEFORE the edit
+ * (techReopenCandidateSql: stuck, or blocked with nobody passed and still
+ * locked as complete). The stuck predicate cannot be re-read afterwards: an
+ * open window is, by definition, not stuck.
  *
  * Only the lock lifts. blocked_insufficient_vendors, current_round,
  * total_passed_verified and every approved verdict (cleared_vendors rows,
@@ -4885,8 +4910,7 @@ const reopenStuckTechEvals = async (t, { rfqId, techEvalIds, userId, editSession
       WHERE te.id = ANY($1::int[])
         AND te.rfq_id = $2
         AND r.id = te.rfq_id
-        AND te.blocked_insufficient_vendors = TRUE
-        AND COALESCE(te.total_passed_verified, 0) = 0
+        AND ${techBlockedNoPassSql({ te: 'te' })}
         AND ${bidWindowOpenSql({ rfq: 'r' })}
       RETURNING te.id, te.tbl_rfq_product_id, r.bid_end_date`,
     [techEvalIds, rfqId]
@@ -6658,17 +6682,21 @@ const rfqController = {
         // 1d. Tech-eval-stuck products — allows restricted editing (only
         //     bid_end_date + vendor refresh). Stuck is the shared predicate
         //     (techEvalStuck.js): blocked, nobody passed, bidding closed, nobody
-        //     left to evaluate. Read BEFORE the edit is applied: these are the
-        //     evaluations a deadline extension reopens in step 6b.
-        const techStuckEvals = await t.any(`
-          SELECT te_stuck.id, te_stuck.tbl_rfq_product_id
+        //     left to evaluate. Read BEFORE the edit is applied, together with
+        //     the evaluations a deadline extension reopens in step 6b — the
+        //     stuck ones plus any blocked-with-nobody-passed evaluation still
+        //     locked as complete (techReopenCandidateSql). Only the stuck ones
+        //     unlock the edit.
+        const reopenCandidates = await t.any(`
+          SELECT te_stuck.id, te_stuck.tbl_rfq_product_id,
+                 ${techStuckSql({ te: 'te_stuck', rfq: 'r_stuck' })} AS is_stuck
             FROM tbl_rfq_product_tech_evaluation te_stuck
             JOIN tbl_rfq r_stuck ON r_stuck.id = te_stuck.rfq_id
            WHERE te_stuck.rfq_id = $1
-             AND ${techStuckSql({ te: 'te_stuck', rfq: 'r_stuck' })}
+             AND ${techReopenCandidateSql({ te: 'te_stuck', rfq: 'r_stuck' })}
            ORDER BY te_stuck.id
         `, [rfq_id]);
-        const hasTechStuckProduct = techStuckEvals.length > 0;
+        const hasTechStuckProduct = reopenCandidates.some((te) => te.is_stuck === true);
 
         // 1e. Check for tech-eval-UNSTARTABLE products — the bid window has closed
         //     and a product carrying technical clauses has a real (non-regret) quote
@@ -6857,15 +6885,15 @@ const rfqController = {
 
         const allHistory = [...rfqHistory, ...productHistory, ...termsHistory, ...termFilesHistory];
 
-        // 6b. A deadline extension reopens every tech-stuck evaluation on the RFQ
+        // 6b. A deadline extension reopens every reopen candidate on the RFQ
         //     (RFQ #536894: the client extended, and nothing reopened, because
         //     nothing anywhere ever reset is_complete). Same transaction as the
         //     edit, so the deadline and the reopen land together or not at all.
         const bidEndChange = diff.rfqFields.find((f) => f.field_name === 'bid_end_date');
-        const reopenedTechEvals = bidEndChange && techStuckEvals.length > 0
+        const reopenedTechEvals = bidEndChange && reopenCandidates.length > 0
           ? await reopenStuckTechEvals(t, {
             rfqId: rfq_id,
-            techEvalIds: techStuckEvals.map((te) => te.id),
+            techEvalIds: reopenCandidates.map((te) => te.id),
             userId,
             editSessionId,
             previousBidEndDate: bidEndChange.old_value,

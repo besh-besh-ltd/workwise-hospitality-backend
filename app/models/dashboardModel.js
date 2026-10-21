@@ -1933,6 +1933,8 @@ async function getTechEvalsWithDisagreementsData(buyer_company_id, user_id, hote
          JOIN tbl_rfq r ON r.id = te.rfq_id AND ${companyScope()}
         WHERE te.is_complete = false
           AND r.status = 1
+          -- not stuck (techEvalStuck.js): nothing to review on a line nobody can move
+          AND NOT ${techStuckSql({ te: 'te', rfq: 'r' })}
           AND ${DISAGREE_SQL('vr.vendor_response')}
           AND ${rfqMapped('r', 2)}
           ${sc}
