@@ -21,6 +21,8 @@ import generalModel, {
   createApprovalProcess,
   getApprovalProcesses,
   updateApprovalProcess,
+  deactivateApprovalProcessIfUnused,
+  getPolicyCoverage,
   deleteApprovalProcess,
   getDepartmentSubGraphPreview,
   checkIfUserIsFinalApprover,
@@ -30,9 +32,13 @@ import generalModel, {
 } from '../../models/generalModel.js';
 import { resolveHospitalityCompanyScope } from '../../helper/arc_v2/resolveHospitalityCompany.js';
 import { executeApprovalAction } from '../../services/approvalActionService.js';
+import { stageLabel } from '../../services/notificationLinks.js';
 import {
   snapshotPolicySteps,
+  snapshotPendingInstanceStepLinks,
+  pairPolicySteps,
   computePolicyStepDiff,
+  summarizeDiffEntry,
   propagatePolicyChangeToInstances,
   handleAutoCompletedInstances,
   getPendingInstancesForPolicy,
@@ -517,6 +523,15 @@ async function guardInstanceTenant(req, res, instanceId) {
  * tenant could rename or deactivate another tenant's procurement process and
  * silently break every policy routed through it.
  */
+function respondProcessInUse(res, blockers) {
+  return res.status(409).json({
+    status: 0,
+    code: 'PROCESS_IN_USE',
+    message: 'This process is still in use',
+    data: { blockers },
+  });
+}
+
 async function guardProcessTenant(req, res, processId) {
   const proc = await getApprovalProcessTenant(processId);
   const notFound = () => {
@@ -581,10 +596,11 @@ async function resolveMutationCompany(req, res, requestedRaw, notFoundMessage) {
  * Pick the ROLE steps a policy save must be validated against.
  *
  * ── WHY THIS DOES NOT USE computePolicyStepDiff ───────────────────────────
- * That diff keys purely on `step_order`, and `step_order` is CLIENT-SUPPLIED,
- * OPTIONAL (`insertPolicySteps` falls back to the array index) and NOT unique in
- * the database. Both holes are exploitable, and both restore exactly the state
- * the guard exists to prevent:
+ * When this guard was written that diff keyed purely on `step_order` (it now
+ * pairs by approver identity first, and only falls back to `step_order`), and
+ * `step_order` is CLIENT-SUPPLIED and OPTIONAL (`insertPolicySteps` falls back
+ * to the array index). An order-keyed delta had two exploitable holes, both
+ * restoring exactly the state the guard exists to prevent:
  *
  *   1. OMIT `step_order` entirely → every proposed step collapses onto the single
  *      `undefined` key, so the map holds only the LAST element. Every stored step
@@ -764,7 +780,7 @@ function unqualifiableRoleStepsResponse(entityType, offenders) {
     status: 3,
     code: 'APPROVER_ROLE_CANNOT_APPROVE',
     message:
-      `This approval step names a role that cannot approve ${entityType}. ` +
+      `This approval step names a role that cannot approve ${stageLabel(entityType)}. ` +
       `${detail}. Grant the missing permission(s) to the role, or pick a role that already holds them ` +
       `— otherwise the step is dropped when the approval is created and the request auto-approves with nobody having approved it.`,
     data: { entity_type: entityType, steps: offenders }
@@ -877,10 +893,16 @@ const hospitalityApprovalController = {
         // Compute diff against the proposed steps BEFORE applying any DB changes,
         // so we can warn the admin if PENDING instances would be affected.
         if (oldSteps.length > 0 && steps && steps.length > 0) {
-          const previewDiff = computePolicyStepDiff(oldSteps, steps);
-          logger.info(`[PolicyUpdate] Pre-flight diff: ${previewDiff.length} changes — ${JSON.stringify(previewDiff.map(d => ({ type: d.type, step_order: d.step_order, sourceChanged: d.sourceChanged, ruleChanged: d.ruleChanged })))}`);
+          // Number the proposed steps exactly as insertPolicySteps will, so the
+          // preview pairs the same levels the save will.
+          const proposedSteps = steps.map((s, i) => ({ ...s, step_order: (s && s.step_order) || (i + 1) }));
+          const previewDiff = computePolicyStepDiff(oldSteps, proposedSteps);
+          logger.info(`[PolicyUpdate] Pre-flight diff: ${previewDiff.length} changes — ${JSON.stringify(previewDiff.map(summarizeDiffEntry))}`);
 
-          if (previewDiff.length > 0 && !confirmed_approval_impact) {
+          // A diff of only STEP_MOVED changes nothing on any pending instance —
+          // propagation just re-points links — so it is not an impact to warn about.
+          const changesPendingApprovals = previewDiff.some(d => d.type !== 'STEP_MOVED');
+          if (changesPendingApprovals && !confirmed_approval_impact) {
             const pendingInstances = await getPendingInstancesForPolicy(id);
             logger.info(`[PolicyUpdate] Pre-flight pending instances for policy ${id}: ${pendingInstances.length}`);
 
@@ -903,7 +925,10 @@ const hospitalityApprovalController = {
                 steps_removed: previewDiff.filter(d => d.type === 'STEP_REMOVED').map(d => d.step_order),
                 steps_modified: previewDiff
                   .filter(d => d.type === 'STEP_MODIFIED')
-                  .map(d => ({ step_order: d.step_order, sourceChanged: d.sourceChanged, ruleChanged: d.ruleChanged }))
+                  .map(d => ({ step_order: d.step_order, sourceChanged: d.sourceChanged, ruleChanged: d.ruleChanged })),
+                steps_moved: previewDiff
+                  .filter(d => d.type === 'STEP_MOVED')
+                  .map(d => ({ from: d.from, to: d.to }))
               };
 
               logger.info(`[PolicyUpdate] Returning APPROVAL_IMPACT_WARNING for policy ${id} (${pendingInstances.length} pending) — save aborted`);
@@ -957,29 +982,44 @@ const hospitalityApprovalController = {
           const updatedPolicy = await updateApprovalPolicy(id, patch, t);
 
           let newSteps = [];
+          let lockedOldSteps = [];
+          let instanceLinks = null;
           if (steps && steps.length > 0) {
+            // Read the steps being replaced and capture every pending instance's
+            // link to them UNDER THE POLICY LOCK, before deletePolicySteps —
+            // the FK is ON DELETE SET NULL, so afterwards no row says which
+            // level any instance step came from. Read here rather than reusing
+            // the Phase 1 snapshot so a save that committed in between (a
+            // double-click) cannot leave the diff and the links describing
+            // different rows.
+            lockedOldSteps = await snapshotPolicySteps(id, t);
+            instanceLinks = await snapshotPendingInstanceStepLinks(id, t);
             await deletePolicySteps(id, t);
             newSteps = await insertPolicySteps(steps, id, t);
           }
 
           // PHASE 4: Compute diff against the steps we just wrote, propagate.
-          logger.info(`[PolicyUpdate] Checking diff: oldSteps=${oldSteps.length}, newSteps=${newSteps.length}`);
+          logger.info(`[PolicyUpdate] Checking diff: oldSteps=${lockedOldSteps.length}, newSteps=${newSteps.length}, capturedLinks=${instanceLinks?.size ?? 0}`);
           let propResult = null;
-          if (oldSteps.length > 0 && newSteps.length > 0) {
-            const diff = computePolicyStepDiff(oldSteps, newSteps);
-            logger.info(`[PolicyUpdate] Diff result: ${diff.length} changes — ${JSON.stringify(diff.map(d => ({ type: d.type, step_order: d.step_order, sourceChanged: d.sourceChanged, ruleChanged: d.ruleChanged })))}`);
+          if (lockedOldSteps.length > 0 && newSteps.length > 0) {
+            const diff = computePolicyStepDiff(lockedOldSteps, newSteps);
+            const stepIdMap = new Map(
+              pairPolicySteps(lockedOldSteps, newSteps).pairs.map(p => [Number(p.oldStep.id), Number(p.newStep.id)])
+            );
+            logger.info(`[PolicyUpdate] Diff result: ${diff.length} changes — ${JSON.stringify(diff.map(summarizeDiffEntry))}`);
 
-            if (diff.length > 0) {
-              // Re-read the policy inside the tx to get the up-to-date row.
-              const fullPolicy = await t.oneOrNone('SELECT * FROM tbl_approval_policies WHERE id = $1', [id]);
+            // Re-read the policy inside the tx to get the up-to-date row.
+            const fullPolicy = await t.oneOrNone('SELECT * FROM tbl_approval_policies WHERE id = $1', [id]);
 
-              propResult = await propagatePolicyChangeToInstances({
-                policyId: id, diff, changedBy: created_by, policy: fullPolicy, t
-              });
-              logger.info(`[PolicyUpdate] Propagation result: ${JSON.stringify({ affected: propResult?.instancesAffected, added: propResult?.totalApproversAdded, removed: propResult?.totalApproversRemoved, autoCompleted: propResult?.instancesAutoCompleted })}`);
-            }
+            // Called even for an empty diff: re-saving unchanged levels still
+            // replaced every policy step row, and propagation restores the
+            // instance links it captured above.
+            propResult = await propagatePolicyChangeToInstances({
+              policyId: id, diff, changedBy: created_by, policy: fullPolicy, t, instanceLinks, stepIdMap
+            });
+            logger.info(`[PolicyUpdate] Propagation result: ${JSON.stringify({ affected: propResult?.instancesAffected, added: propResult?.totalApproversAdded, removed: propResult?.totalApproversRemoved, autoCompleted: propResult?.instancesAutoCompleted, linksRestored: propResult?.linksRestored })}`);
           } else {
-            logger.info(`[PolicyUpdate] Skipped diff — oldSteps.length=${oldSteps.length}, newSteps.length=${newSteps.length}`);
+            logger.info(`[PolicyUpdate] Skipped diff — oldSteps.length=${lockedOldSteps.length}, newSteps.length=${newSteps.length}`);
           }
 
           return { policy: updatedPolicy, propagationResult: propResult };
@@ -1080,6 +1120,41 @@ const hospitalityApprovalController = {
     } catch (e) {
       logError(e);
       res.status(400).json({ status: 3, message: e.message || e?.detail || 'Failed to save approval policy' });
+    }
+  },
+
+  /**
+   * Entity types that have an active matching policy, per process.
+   * GET /hospitality/approval/policy-coverage?hotel_id=
+   * Company is derived server-side from the hotel (or the caller's whole scope).
+   */
+  async getPolicyCoverage(req, res) {
+    try {
+      const scopeIds = await resolveApprovalCompanyScope(req);
+      const raw = req.query.hotel_id;
+      let hotelId = null;
+      let companyArg;
+      if (raw !== undefined && raw !== null && raw !== '') {
+        hotelId = parseInt(raw, 10);
+        const hotel = Number.isFinite(hotelId)
+          ? await db.oneOrNone(
+              `SELECT hospitality_company_id FROM tbl_hospitality_company_hotels
+                WHERE id = $1 AND COALESCE(is_deleted, 0) = 0`,
+              [hotelId]
+            )
+          : null;
+        if (!hotel || !inCompanyScope(scopeIds, hotel.hospitality_company_id)) {
+          return res.status(404).json({ status: 2, message: 'Business unit not found' });
+        }
+        companyArg = Number(hotel.hospitality_company_id);
+      } else {
+        companyArg = scopeIds; // null = super admin, [] = nothing
+      }
+      const data = await getPolicyCoverage({ hospitalityCompanyId: companyArg, hotelId });
+      res.json({ status: 1, data });
+    } catch (e) {
+      logError(e);
+      res.status(400).json({ status: 3, message: e.message });
     }
   },
 
@@ -2055,7 +2130,7 @@ const processController = {
   async updateProcess(req, res) {
     try {
       const { id } = req.params;
-      const { name, description, is_active, process_type } = req.body;
+      const { name, description, is_active } = req.body;
 
       // SECURITY: tbl_approval_processes was mutable by id across tenants.
       if (!(await guardProcessTenant(req, res, parseInt(id)))) return;
@@ -2064,7 +2139,20 @@ const processController = {
       if (name !== undefined) patch.name = name;
       if (description !== undefined) patch.description = description;
       if (is_active !== undefined) patch.is_active = is_active;
-      if (process_type !== undefined) patch.process_type = process_type;
+      // process_type is fixed at creation: a PUT carrying it is ignored.
+
+      // Deactivating via PUT must obey the same in-use guard as DELETE.
+      // Check + deactivate happen atomically in the model; remaining fields
+      // (name/description) are applied by the update below.
+      if (is_active === false || is_active === 'false' || is_active === 0) {
+        const r = await deactivateApprovalProcessIfUnused(parseInt(id));
+        if (!r.deactivated) return respondProcessInUse(res, r.blockers);
+        delete patch.is_active;
+        if (Object.keys(patch).length === 0) {
+          const row = await db.oneOrNone('SELECT * FROM tbl_approval_processes WHERE id = $1', [parseInt(id)]);
+          return res.json({ status: 1, data: row });
+        }
+      }
 
       const data = await updateApprovalProcess(parseInt(id), patch);
 
@@ -2092,6 +2180,7 @@ const processController = {
       await deleteApprovalProcess(parseInt(id));
       res.json({ status: 1, message: 'Process deactivated successfully' });
     } catch (e) {
+      if (e.code === 'PROCESS_IN_USE') return respondProcessInUse(res, e.blockers);
       logError(e);
       res.status(400).json({ status: 3, message: e.message });
     }

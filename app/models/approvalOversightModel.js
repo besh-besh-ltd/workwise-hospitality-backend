@@ -163,8 +163,10 @@ export async function listStuckApprovals(
              WHEN 'PO'     THEN (SELECT po.po_number::text FROM tbl_rfq_purchase_order po WHERE po.id = ai.entity_id)
              WHEN 'ARC'    THEN (SELECT COALESCE(a.arc_number::text, a.title) FROM tbl_arc a WHERE a.id = ai.entity_id)
            END AS entity_ref,
-           (now()::date - ai.created_at::date)::int AS age_days
+           (now()::date - ai.created_at::date)::int AS age_days,
+           COALESCE(pol.entity_type LIKE 'ARC\\_GROUP%', false) AS is_group
       FROM tbl_approval_instances ai
+      LEFT JOIN tbl_approval_policies pol ON pol.id = ai.approval_policy_id
       ${CURRENT_STEP_JOIN}
      WHERE ${where.join(' AND ')}`;
 

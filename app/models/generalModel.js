@@ -1,9 +1,29 @@
 import db from '../config/dbConn.js';
 import { sendApprovalNotification, sendPONotificationToVendor } from '../controllers/po/purchaseOrderEmails.js';
-import { APPROVAL_DECISIONS, PO_STATUSES } from '../util/constants.js';
+import { APPROVAL_DECISIONS, PO_STATUSES, RFQ_STATUSES } from '../util/constants.js';
 import { sendApprovalStepNotification } from '../helper/sendEmailFunctions/approvalEmails.js';
 import { approvalStepEmailContext } from '../helper/approvalEmailContext.js';
-import { approvalActionUrl, entityLabel, buyerHome } from '../services/notificationLinks.js';
+import { approvalActionUrl, entityLabel, stageLabel, buyerHome } from '../services/notificationLinks.js';
+
+// ── Unit vs Group ARC awareness for notification copy ────────────────────────
+// Instances keep the unit entity types (ARC_TECH, ...); a Group ARC is only
+// visible through its policy (`entity_type LIKE 'ARC\_GROUP%'`).
+const isGroupArcPolicy = (policy) => /^ARC_GROUP(_|$)/.test(String(policy?.entity_type || ''));
+const withGroupFlag = (ctx, isGroup) => (isGroup ? { ...ctx, extraContext: { ...(ctx?.extraContext || {}), is_group: true } } : ctx);
+async function isGroupInstance(instance) {
+  if (!instance) return false;
+  if (typeof instance.is_group === 'boolean') return instance.is_group;
+  if (/^ARC_GROUP(_|$)/.test(String(instance.entity_type || ''))) return true;
+  if (!instance.approval_policy_id) return false;
+  try {
+    const pol = await db.oneOrNone('SELECT entity_type FROM tbl_approval_policies WHERE id = $1', [instance.approval_policy_id]);
+    return isGroupArcPolicy(pol);
+  } catch (err) {
+    logger.error({ err }, 'isGroupInstance lookup failed; defaulting to Unit ARC wording');
+    return false;
+  }
+}
+
 
 // Maps entity_type to the permission resource used in tbl_permissions
 export const ENTITY_APPROVE_RESOURCE_MAP = {
@@ -57,7 +77,11 @@ export const ENTITY_APPROVE_RESOURCE_MAP = {
   // ARC_NEGOTIATION: authorising the LAUNCH of a negotiation round. ROLE-source
   // approver steps resolve against 'arc-comm', which now carries both `read`
   // (20260611100000) and `approve` (20260803110000). The qualifying system role
-  // is 'ARC Negotiation Approver'.
+  // are 'ARC Commercial Approver' and, mirroring RFQ, 'ARC Commercial Evaluator'
+  // (20261019100200): evaluators approve their colleagues' rounds. The round
+  // initiator's own slot is auto-approved by the engine, so an ARC_NEGOTIATION
+  // policy that names 'ARC Commercial Evaluator' must use rule ALL to require
+  // the peers' approval (rule ANY would be satisfied by the initiator alone).
   //
   // History, because the previous comment here was wrong in three ways and the
   // wrongness was load-bearing: it claimed 'arc-comm' already had read+approve
@@ -73,10 +97,10 @@ export const ENTITY_APPROVE_RESOURCE_MAP = {
   // (20260611100000) and `approve` (20260803110000). The qualifying system role
   // is 'ARC Technical Approver'.
   //
-  // DELIBERATELY NOT the evaluator roles: 'ARC Tech Evaluator' holds
-  // arc-tech.evaluate + arc-tech.read and no `approve`, so it cannot pass this
-  // gate — an evaluator must never be able to approve their own evaluation.
-  // Same for 'ARC Commercial Evaluator' against 'arc-comm' above.
+  // DELIBERATELY NOT the technical evaluator role: 'ARC Technical Evaluator'
+  // holds arc-tech.evaluate + arc-tech.read and no `approve`, so it cannot pass
+  // this gate — an evaluator must never be able to approve their own technical
+  // evaluation. (arc-comm is different: ARC mirrors RFQ there, see above.)
   'ARC_TECH': 'arc-tech',
   // ARC_COMMITTEE: the committee/awarding approval gate. 'arc-committee' carries
   // BOTH `read` and `approve` (seeded together in
@@ -118,11 +142,14 @@ export const ENTITY_APPROVE_RESOURCE_MAP = {
   //                                            + approve (20260803110000)
   //   arc-committee  read + approve (20260608100800)
   //
-  // The evaluate/approve split is the point: `evaluate` is doing the scoring,
-  // `approve` is signing it off, and no system role holds both verbs on the same
-  // resource. See migrations/20260803110000_arc_stage_approver_permissions.sql.
+  // The evaluate/approve split is the point for arc-tech and arc-committee:
+  // `evaluate` is doing the scoring, `approve` is signing it off, and no system
+  // role holds both verbs on those resources. The one exception is arc-comm,
+  // where 'ARC Commercial Evaluator' holds both so evaluators can approve each
+  // other's negotiation rounds as in RFQ (20261019100200). See also
+  // migrations/20260803110000_arc_stage_approver_permissions.sql.
   //
-  // ── ENTITY TYPES STILL UNMAPPED (e.g. INDENT, ARC_AMENDMENT) ──────────────
+  // ── ENTITY TYPES STILL UNMAPPED (e.g. INDENT) ──────────────
   // They fall back to `entity_type.toLowerCase()`, which yields UNDERSCORES
   // (`arc_amendment`) while the resource_type enum members use HYPHENS. Before
   // the `::text` cast added to roleHasReadAndApprovePermission that comparison
@@ -1492,7 +1519,8 @@ export async function getApprovalProcesses({
 export async function updateApprovalProcess(id, patch) {
   if (!id) throw new Error('Process ID is required');
 
-  const allowedFields = ['name', 'description', 'is_active', 'process_type'];
+  // process_type is fixed at creation; a PUT carrying it is ignored.
+  const allowedFields = ['name', 'description', 'is_active'];
   const sets = [];
   const vals = [];
   let idx = 1;
@@ -1535,40 +1563,100 @@ export async function updateApprovalProcess(id, patch) {
   );
 }
 
+const OPEN_RFQ_LIST_LIMIT = 20;
+
 /**
- * Soft delete a process (mark as inactive)
- * Validates that no active policies or pending approvals reference it
- * @param {number} id - Process ID
+ * Everything that still depends on a process. A process may be deactivated
+ * only when every field is empty/zero.
+ *
+ * Open RFQ = anything not CLOSED (2) or WITHDRAWN (5), drafts and NULL status
+ * included. Open ARC = anything not expired / terminated / closed_no_award.
+ *
+ * @returns {Promise<{policies: {id:number, entity_type:string, hotel_name:string|null}[],
+ *   pending_instances:number, open_rfqs:{id:number, rfq_no:number}[], open_rfq_count:number,
+ *   open_arcs:number, role_grants:number}>}
  */
-export async function deleteApprovalProcess(id) {
+export async function getProcessBlockers(processId, t = db) {
+  const closedRfq = [RFQ_STATUSES.CLOSED, RFQ_STATUSES.WITHDRAWN];
+  const [policies, pending, rfqCount, rfqs, arcs, grants] = await Promise.all([
+    t.any(
+      `SELECT p.id, p.entity_type, h.name AS hotel_name
+         FROM tbl_approval_policies p
+         LEFT JOIN tbl_hospitality_company_hotels h ON h.id = p.hotel_id
+        WHERE p.process_id = $1 AND p.is_active = true
+        ORDER BY p.id`,
+      [processId]
+    ),
+    t.one(
+      `SELECT COUNT(*)::int AS n FROM tbl_approval_instances
+        WHERE process_id = $1 AND status = 'PENDING'`,
+      [processId]
+    ),
+    t.one(
+      `SELECT COUNT(*)::int AS n FROM tbl_rfq
+        WHERE process_id = $1 AND (status IS NULL OR status NOT IN ($2, $3))`,
+      [processId, ...closedRfq]
+    ),
+    t.any(
+      `SELECT id, rfq_no FROM tbl_rfq
+        WHERE process_id = $1 AND (status IS NULL OR status NOT IN ($2, $3))
+        ORDER BY id DESC LIMIT ${OPEN_RFQ_LIST_LIMIT}`,
+      [processId, ...closedRfq]
+    ),
+    t.one(
+      `SELECT COUNT(*)::int AS n FROM tbl_arc
+        WHERE process_id = $1 AND status NOT IN ('expired', 'terminated', 'closed_no_award', 'committee_rejected')`,
+      [processId]
+    ),
+    t.one(`SELECT COUNT(*)::int AS n FROM tbl_user_role_scopes WHERE process_id = $1`, [processId]),
+  ]);
+  return {
+    policies: policies.map((r) => ({ id: Number(r.id), entity_type: r.entity_type, hotel_name: r.hotel_name })),
+    pending_instances: pending.n,
+    open_rfqs: rfqs.map((r) => ({ id: Number(r.id), rfq_no: Number(r.rfq_no) })),
+    open_rfq_count: rfqCount.n,
+    open_arcs: arcs.n,
+    role_grants: grants.n,
+  };
+}
+
+/** True when any blocker from getProcessBlockers is present. */
+export function hasProcessBlockers(b) {
+  return b.policies.length > 0 || b.pending_instances > 0 || b.open_rfq_count > 0
+    || b.open_arcs > 0 || b.role_grants > 0;
+}
+
+/**
+ * Check-and-deactivate in ONE transaction, holding a row lock on the process,
+ * so a concurrent deactivation cannot race the blockers read.
+ *
+ * Known limit: creators of dependents (policies, RFQs, ARCs, role grants) do
+ * not lock the process row, so a dependent inserted between the check and the
+ * commit can still slip through. Closing that fully needs those writers to
+ * take FOR SHARE on the process row; out of scope here.
+ *
+ * @returns {Promise<{deactivated: true} | {deactivated: false, blockers: object}>}
+ */
+export async function deactivateApprovalProcessIfUnused(id) {
   if (!id) throw new Error('Process ID is required');
+  return db.tx(async (t) => {
+    await t.oneOrNone('SELECT id FROM tbl_approval_processes WHERE id = $1 FOR UPDATE', [id]);
+    const blockers = await getProcessBlockers(id, t);
+    if (hasProcessBlockers(blockers)) return { deactivated: false, blockers };
+    await t.none('UPDATE tbl_approval_processes SET is_active = false, updated_at = NOW() WHERE id = $1', [id]);
+    return { deactivated: true };
+  });
+}
 
-  // Check if there are active policies using this process
-  const activePolicies = await db.oneOrNone(`
-    SELECT COUNT(*) as count
-    FROM tbl_approval_policies
-    WHERE process_id = $1 AND is_active = true
-  `, [id]);
-
-  if (activePolicies && parseInt(activePolicies.count) > 0) {
-    throw new Error(`Cannot delete process: ${activePolicies.count} active policies are using it`);
+/** Soft delete a process; throws PROCESS_IN_USE (with .blockers) when it is still in use. */
+export async function deleteApprovalProcess(id) {
+  const r = await deactivateApprovalProcessIfUnused(id);
+  if (!r.deactivated) {
+    const err = new Error('This process is still in use');
+    err.code = 'PROCESS_IN_USE';
+    err.blockers = r.blockers;
+    throw err;
   }
-
-  // Check if there are pending instances using this process
-  const pendingInstances = await db.oneOrNone(`
-    SELECT COUNT(*) as count
-    FROM tbl_approval_instances
-    WHERE process_id = $1 AND status = 'PENDING'
-  `, [id]);
-
-  if (pendingInstances && parseInt(pendingInstances.count) > 0) {
-    throw new Error(`Cannot delete process: ${pendingInstances.count} pending approvals exist`);
-  }
-
-  return db.none(
-    'UPDATE tbl_approval_processes SET is_active = false, updated_at = NOW() WHERE id = $1',
-    [id]
-  );
 }
 
 // ============= APPROVAL POLICIES =============
@@ -1888,6 +1976,58 @@ export async function findBestMatchingPoliciesWithSteps(entityTypes, { hospitali
     if (r.step) out.get(type).steps.push(r.step);
   }
   return out;
+}
+
+/**
+ * Which entity types have an ACTIVE policy that would actually match, per
+ * process, at a hotel (or anywhere in scope when hotelId is null). Uses the
+ * same predicate as findBestMatchingPolicy: master policies only
+ * (department_id IS NULL), hotel-specific or hotel-wide, process-specific or
+ * process-free. A process-free policy matches every process, so its types
+ * appear under `process_free` and are also folded into every `by_process`.
+ * `by_process` is keyed by the ACTIVE processes in scope only: a policy that
+ * still sits on an inactive (or out-of-scope) process covers nothing anyone
+ * can pick, so it is not reported.
+ *
+ * @param {object} p
+ * @param {number|number[]|null} p.hospitalityCompanyId company, companies, or null = all
+ * @param {number|null} [p.hotelId]
+ */
+export async function getPolicyCoverage({ hospitalityCompanyId, hotelId = null }, t = db) {
+  const companyIds = hospitalityCompanyId === null || hospitalityCompanyId === undefined
+    ? null
+    : [].concat(hospitalityCompanyId).map(Number);
+
+  const policies = await t.any(
+    `SELECT DISTINCT p.entity_type, p.process_id
+       FROM tbl_approval_policies p
+      WHERE p.is_active = true
+        AND p.department_id IS NULL
+        AND ($1::int[] IS NULL OR p.hospitality_company_id = ANY($1::int[]))
+        AND ($2::int IS NULL OR p.hotel_id = $2 OR p.hotel_id IS NULL)`,
+    [companyIds, hotelId]
+  );
+  const processes = await t.any(
+    `SELECT pr.id
+       FROM tbl_approval_processes pr
+      WHERE pr.is_active = true
+        AND pr.company_id IN (
+          SELECT hc.buyer_company_id FROM tbl_hospitality_companies hc
+           WHERE $1::int[] IS NULL OR hc.id = ANY($1::int[]))`,
+    [companyIds]
+  );
+
+  const free = new Set(policies.filter((r) => r.process_id === null).map((r) => r.entity_type));
+  const byProcess = {};
+  for (const pr of processes) byProcess[String(pr.id)] = new Set(free);
+  for (const r of policies) {
+    if (r.process_id === null) continue;
+    const types = byProcess[String(r.process_id)];
+    if (types) types.add(r.entity_type); // absent = inactive / out-of-scope process
+  }
+  const out = {};
+  for (const [k, v] of Object.entries(byProcess)) out[k] = [...v].sort();
+  return { hotel_id: hotelId, process_free: [...free].sort(), by_process: out };
 }
 
 /**
@@ -2484,7 +2624,7 @@ export async function createApprovalInstance({
       policy = await findBestMatchingPolicyTx({ entity_type, hospitality_company_id, hotel_id, department_id, process_id }, t);
       if (!policy) {
         throw new NoApprovalPolicyError(
-          `No approval policy found for ${entity_type} in this scope`,
+          `No approval policy found for ${stageLabel(entity_type)} in this scope`,
           { entity_type, hospitality_company_id, hotel_id, department_id, process_id }
         );
       }
@@ -2779,20 +2919,20 @@ export async function createApprovalInstance({
           );
         } else if (s.reason === 'ENTITY_TYPE_NOT_IN_RESOURCE_MAP' || s.reason === 'RESOURCE_NOT_IN_CATALOGUE') {
           lines.push(
-            `Step ${s.step_order}: ${who} cannot be checked because ${entity_type} has no ` +
+            `Step ${s.step_order}: ${who} cannot be checked because ${stageLabel(entity_type, { isGroup: isGroupArcPolicy(policy) })} has no ` +
             `permission resource configured. This needs a platform fix, not a policy change.`
           );
         } else {
           // ROLE_LACKS_READ_AND_APPROVE / USER_LACKS_READ_AND_APPROVE
           lines.push(
-            `Step ${s.step_order}: ${who} can never approve this ${entity_type} — ` +
+            `Step ${s.step_order}: ${who} can never approve this ${stageLabel(entity_type, { isGroup: isGroupArcPolicy(policy) })} step — ` +
             `missing ${s.resource}.approve and/or ${s.resource}.read.`
           );
         }
       }
 
       const err = new Error(
-        `Nobody can approve this ${entity_type}${whereText}, so it cannot be submitted yet — ` +
+        `Nobody can approve this ${stageLabel(entity_type, { isGroup: isGroupArcPolicy(policy) })} step${whereText}, so it cannot be submitted yet — ` +
         `approval policy ${policy.id} resolved to zero usable approval steps. ` +
         `All ${policySteps.length} step(s) were dropped:\n` +
         lines.map(l => `  • ${l}`).join('\n') +
@@ -2972,7 +3112,10 @@ export async function createApprovalInstance({
         sendApprovalStepNotification({
           entityType: entity_type,
           entityId: entity_id,
-          ...approvalStepEmailContext(entity_type, entity_id, metadata),
+          ...withGroupFlag(
+            approvalStepEmailContext(entity_type, entity_id, metadata),
+            isGroupArcPolicy(policy)
+          ),
           stepOrder: firstPendingStep.step_order,
           totalSteps: instanceSteps.length,
           initiatorName: initiator?.name || 'Unknown',
@@ -3823,7 +3966,11 @@ export async function notifyNextApprovalStep(approval_instance_id, result) {
 
   try {
     const instance = await db.oneOrNone(
-      'SELECT entity_type, entity_id, metadata, initiated_by FROM tbl_approval_instances WHERE id = $1',
+      `SELECT ai.entity_type, ai.entity_id, ai.metadata, ai.initiated_by,
+              COALESCE(pol.entity_type LIKE 'ARC\\_GROUP%', false) AS is_group
+         FROM tbl_approval_instances ai
+         LEFT JOIN tbl_approval_policies pol ON pol.id = ai.approval_policy_id
+        WHERE ai.id = $1`,
       [approval_instance_id]
     );
     if (!instance) return;
@@ -3847,7 +3994,10 @@ export async function notifyNextApprovalStep(approval_instance_id, result) {
     sendApprovalStepNotification({
       entityType: instance.entity_type,
       entityId: instance.entity_id,
-      ...approvalStepEmailContext(instance.entity_type, instance.entity_id, metadata),
+      ...withGroupFlag(
+        approvalStepEmailContext(instance.entity_type, instance.entity_id, metadata),
+        instance.is_group
+      ),
       stepOrder: result.next_step,
       totalSteps: parseInt(totalSteps.count),
       initiatorName: initiator?.name || 'Unknown',
@@ -3941,7 +4091,7 @@ async function notifyApprovalCancelled(outcome, cancelledBy, reason) {
 
     const instance = outcome.__instance || {};
     const metadata = instance.metadata || {};
-    const label = entityLabel(instance.entity_type);
+    const label = entityLabel(instance.entity_type, { isGroup: await isGroupInstance(instance) });
     const identifier =
       metadata.rfq_no || metadata.po_number || metadata.mr_number || instance.entity_id;
 

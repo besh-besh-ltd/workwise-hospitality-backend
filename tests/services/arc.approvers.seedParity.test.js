@@ -18,7 +18,7 @@
  * production, and `tbl_permissions` has no unique constraint on
  * `(resource, action)` so the duplicates were invisible.
  *
- * The practical cost: on that database, the assertion "an ARC Tech Evaluator
+ * The practical cost: on that database, the assertion "an ARC Technical Evaluator
  * cannot approve a technical evaluation" could not be made against the real
  * system role, because the real system role did not exist.
  *
@@ -54,6 +54,11 @@ const RBAC_MIGRATIONS = [
   "20260608100800_permissions_seed.sql",
   "20260611100000_arc_eval_read_permissions.sql",
   "20260803110000_arc_stage_approver_permissions.sql",
+  // Renames ARC Technical Evaluator / ARC Commercial Approver to the client's
+  // vocabulary; the titles asserted below are the post-rename ones.
+  "20261019100000_client_role_terminology.sql",
+  // ARC Commercial Evaluator gains arc-comm.approve (RFQ parity).
+  "20261019100200_arc_commercial_evaluator_round_approval.sql",
 ];
 
 // Resource families these migrations own. Anything outside is out of scope.
@@ -163,14 +168,14 @@ describe("seed_reference.sql must contain everything the RBAC migrations create"
     expect(migrationRoleTitles).toEqual(
       expect.arrayContaining([
         "ARC Creator",
-        "ARC Tech Evaluator",
+        "ARC Technical Evaluator",
         "ARC Commercial Evaluator",
         "ARC Committee Member",
         "ARC Admin",
         "MR Raiser",
         "MR Approver",
         "ARC Technical Approver",
-        "ARC Negotiation Approver",
+        "ARC Commercial Approver",
       ])
     );
   });
@@ -212,19 +217,28 @@ describe("seed_reference.sql must contain everything the RBAC migrations create"
     expect(missing.sort()).toEqual([]);
   });
 
-  it("the separation-of-duties omissions hold in BOTH sources", async () => {
+  it("the remaining separation-of-duties omissions hold in BOTH sources", async () => {
     // The one place where the absence of a grant is load-bearing, so it is
     // asserted rather than left to the subset check (which cannot see absences).
     for (const [source, grants] of [
       ["migrations", migrationGrants],
       ["seed_reference", groupGrants(await db.any(ROLE_GRANT_SQL, [migrationRoleTitles]))],
     ]) {
-      for (const role of ["ARC Tech Evaluator", "ARC Commercial Evaluator", "ARC Admin"]) {
+      for (const role of ["ARC Technical Evaluator", "ARC Commercial Evaluator", "ARC Admin"]) {
         const keys = grants.get(role) || new Set();
         expect(`${source}: ${role} arc-tech.approve = ${keys.has("arc-tech.approve")}`)
           .toBe(`${source}: ${role} arc-tech.approve = false`);
+      }
+      // arc-comm.approve: ARC mirrors RFQ, so Commercial Evaluators approve
+      // colleagues' rounds. ARC Admin and the technical evaluator still do not.
+      for (const [role, expected] of [
+        ["ARC Technical Evaluator", false],
+        ["ARC Commercial Evaluator", true],
+        ["ARC Admin", false],
+      ]) {
+        const keys = grants.get(role) || new Set();
         expect(`${source}: ${role} arc-comm.approve = ${keys.has("arc-comm.approve")}`)
-          .toBe(`${source}: ${role} arc-comm.approve = false`);
+          .toBe(`${source}: ${role} arc-comm.approve = ${expected}`);
       }
 
       // And the KNOWN GAP, pinned in both sources so neither can quietly change:
@@ -237,5 +251,74 @@ describe("seed_reference.sql must contain everything the RBAC migrations create"
       expect(`${source}: ARC Admin arc-comm.evaluate = ${admin.has("arc-comm.evaluate")}`)
         .toBe(`${source}: ARC Admin arc-comm.evaluate = true`);
     }
+  });
+});
+
+describe("20261019100200_arc_commercial_evaluator_round_approval", () => {
+  const MIG = fs.readFileSync(
+    path.join(cfg.backendDir, "migrations", "20261019100200_arc_commercial_evaluator_round_approval.sql"),
+    "utf8"
+  );
+  const COUNTS_SQL = `
+    SELECT
+      (SELECT count(*)::int FROM tbl_permissions
+        WHERE resource::text='arc-comm' AND action::text='approve') AS perms,
+      (SELECT count(*)::int FROM tbl_role_permissions rp
+         JOIN tbl_roles r ON r.id = rp.role_id
+         JOIN tbl_permissions p ON p.id = rp.permission_id
+        WHERE r.created_by IS NULL AND r.title='ARC Commercial Evaluator'
+          AND p.resource::text='arc-comm' AND p.action::text='approve') AS grants`;
+
+  it("a second application is a no-op", async () => {
+    await withClient(SCRATCH_DB, async (client) => {
+      await client.query("SET search_path = public, pg_catalog");
+      const before = (await client.query(COUNTS_SQL)).rows[0];
+      await client.query(MIG);
+      const after = (await client.query(COUNTS_SQL)).rows[0];
+      expect(before).toEqual({ perms: 1, grants: 1 });
+      expect(after).toEqual(before);
+    });
+  });
+
+  it("creates the permission when absent (stage) and grants by title, whatever the role id", async () => {
+    await withClient(SCRATCH_DB, async (client) => {
+      await client.query("SET search_path = public, pg_catalog");
+      await client.query("BEGIN");
+      try {
+        // Stage shape: no arc-comm.approve row, so no grants either; and a role id
+        // that differs from every other environment.
+        await client.query(
+          `DELETE FROM tbl_role_permissions WHERE permission_id IN
+             (SELECT id FROM tbl_permissions WHERE resource::text='arc-comm' AND action::text='approve')`
+        );
+        await client.query(`DELETE FROM tbl_permissions WHERE resource::text='arc-comm' AND action::text='approve'`);
+        // No FK on role_id, so move the role AND its remaining grants together.
+        const oldId = (await client.query(
+          `SELECT id FROM tbl_roles WHERE created_by IS NULL AND title='ARC Commercial Evaluator'`
+        )).rows[0].id;
+        await client.query(`UPDATE tbl_role_permissions SET role_id = 99025 WHERE role_id = $1`, [oldId]);
+        await client.query(`UPDATE tbl_roles SET id = 99025 WHERE id = $1`, [oldId]);
+        const moved = (await client.query(
+          `SELECT id FROM tbl_roles WHERE created_by IS NULL AND title='ARC Commercial Evaluator'`
+        )).rows;
+        expect(moved).toEqual([{ id: 99025 }]);
+        expect((await client.query(COUNTS_SQL)).rows[0]).toEqual({ perms: 0, grants: 0 });
+
+        await client.query(MIG);
+        expect((await client.query(COUNTS_SQL)).rows[0]).toEqual({ perms: 1, grants: 1 });
+        await client.query(MIG);
+        expect((await client.query(COUNTS_SQL)).rows[0]).toEqual({ perms: 1, grants: 1 });
+
+        // Down revokes the grant only; the permission row survives.
+        const down = fs.readFileSync(
+          path.join(cfg.backendDir, "migrations", "20261019100200_arc_commercial_evaluator_round_approval.down.sql"),
+          "utf8"
+        );
+        await client.query(down);
+        expect((await client.query(COUNTS_SQL)).rows[0]).toEqual({ perms: 1, grants: 0 });
+      } finally {
+        await client.query("ROLLBACK");
+      }
+    });
   });
 });

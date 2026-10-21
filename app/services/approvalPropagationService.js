@@ -73,10 +73,11 @@ const SKIP_PUBLISHED_RFQ_SQL = `
  * sizeable in production — see the counts below.
  *
  * (2) is required because a policy edit DELETEs and re-INSERTs every step row
- * (generalController.upsertApprovalPolicy → deletePolicySteps + insertPolicySteps).
- * `fk_instance_step_policy_step` is ON DELETE SET NULL, so every live instance
- * older than the last policy edit has its link NULLed out. Dropping the ordinal
- * path would strand all of them.
+ * (generalController.upsertApprovalPolicy → deletePolicySteps + insertPolicySteps)
+ * and `fk_instance_step_policy_step` is ON DELETE SET NULL. The edit now captures
+ * every pending instance's links first (snapshotPendingInstanceStepLinks) and
+ * re-points them at the new rows, but instances edited before that change lost
+ * their links. Dropping the ordinal path would strand all of them.
  *
  * KNOWN LIMIT — a stored link may itself be ordinal-shaped. Until this commit,
  * propagatePolicyChangeToInstances refreshed links with
@@ -117,7 +118,7 @@ const SKIP_PUBLISHED_RFQ_SQL = `
  *
  * Assumes the calling SQL aliases the instance table `ai` and instance steps `ais`.
  */
-const POLICY_STEP_RESOLUTION_SQL = `
+export const POLICY_STEP_RESOLUTION_SQL = `
   LEFT JOIN LATERAL (
     SELECT
       p.id                AS matched_policy_step_id,
@@ -260,51 +261,155 @@ export async function snapshotPolicySteps(policyId, t = db) {
 }
 
 /**
- * Compute a structured diff between old and new policy steps.
- * Pure function — no DB access.
+ * Capture, for every PENDING instance of this policy, which policy step each
+ * instance step was built from: Map<instance step id, policy step id>.
+ *
+ * MUST be called inside the policy-edit transaction BEFORE deletePolicySteps().
+ * The edit deletes and re-inserts every policy step, and
+ * `fk_instance_step_policy_step` is ON DELETE SET NULL, so afterwards the
+ * database no longer knows which level any instance step came from. This map
+ * is what lets propagation match by that link instead of guessing by ordinal.
+ *
+ * A link into a different policy is treated as broken and left out, exactly as
+ * POLICY_STEP_RESOLUTION_SQL treats it. Published RFQs are left out as they are
+ * everywhere in propagation (SKIP_PUBLISHED_RFQ_SQL) — nothing touches them.
+ */
+export async function snapshotPendingInstanceStepLinks(policyId, t = db) {
+  const rows = await t.any(
+    `SELECT ais.id AS instance_step_id, ais.policy_step_id
+       FROM tbl_approval_instances ai
+       JOIN tbl_approval_instance_steps ais ON ais.approval_instance_id = ai.id
+       JOIN tbl_approval_policy_steps ps
+         ON ps.id = ais.policy_step_id AND ps.approval_policy_id = ai.approval_policy_id
+      WHERE ai.approval_policy_id = $1 AND ai.status = 'PENDING'
+      ${SKIP_PUBLISHED_RFQ_SQL}`,
+    [policyId]
+  );
+  return new Map(rows.map(r => [Number(r.instance_step_id), Number(r.policy_step_id)]));
+}
+
+// Rows carry integer step_order; request bodies may carry strings.
+const stepOrderOf = (s) => Number(s.step_order);
+// A policy level's identity is who approves at it.
+const approverKey = (s) => `${s.approver_source_type}:${s.approver_source_id}`;
+
+/**
+ * Pair the levels of a policy before an edit with the levels after it.
+ * Pure function — no DB access. Steps must carry `step_order`.
+ *
+ *   1. identity — steps naming the same approver (source type + id) pair up,
+ *      the k-th occurrence before the edit with the k-th occurrence after it,
+ *      both in step_order. Removing Level 1 of [A, B] therefore pairs B with B.
+ *   2. position — a step left unpaired on both sides at the same step_order:
+ *      the admin replaced that level's approver.
+ *   3. the rest are removed (old side) / added (new side).
+ *
+ * Pairing by position alone read "remove Level 1 of [A, B]" as "Level 1 changed
+ * from A to B, Level 2 removed" — and every instance waiting at Level 2 had its
+ * live step removed and auto-completed.
+ *
+ * @returns {{ pairs: Array<{oldStep, newStep, kind: 'identity'|'position'}>,
+ *             removed: Array, added: Array }} — pairs in old step_order
+ */
+export function pairPolicySteps(oldSteps = [], newSteps = []) {
+  const byOrder = (a, b) => stepOrderOf(a) - stepOrderOf(b);
+  const olds = [...oldSteps].sort(byOrder);
+  const news = [...newSteps].sort(byOrder);
+  const pairs = [];
+  const pairedOld = new Set();
+  const pairedNew = new Set();
+  const pair = (oldStep, newStep, kind) => {
+    pairs.push({ oldStep, newStep, kind });
+    pairedOld.add(oldStep);
+    pairedNew.add(newStep);
+  };
+
+  const newByKey = new Map();
+  for (const s of news) {
+    const key = approverKey(s);
+    if (!newByKey.has(key)) newByKey.set(key, []);
+    newByKey.get(key).push(s);
+  }
+  const occurrence = new Map();
+  for (const o of olds) {
+    const key = approverKey(o);
+    const k = occurrence.get(key) || 0;
+    occurrence.set(key, k + 1);
+    const n = newByKey.get(key)?.[k];
+    if (n) pair(o, n, 'identity');
+  }
+
+  for (const o of olds) {
+    if (pairedOld.has(o)) continue;
+    const n = news.find(s => !pairedNew.has(s) && stepOrderOf(s) === stepOrderOf(o));
+    if (n) pair(o, n, 'position');
+  }
+
+  pairs.sort((a, b) => byOrder(a.oldStep, b.oldStep));
+  return {
+    pairs,
+    removed: olds.filter(s => !pairedOld.has(s)),
+    added: news.filter(s => !pairedNew.has(s))
+  };
+}
+
+/**
+ * Compute a structured diff between old and new policy steps, built on
+ * pairPolicySteps. Pure function — no DB access.
+ *
+ *   identity pair, rule changed → STEP_MODIFIED (sourceChanged false, ruleChanged true)
+ *   identity pair, order changed → STEP_MOVED {from, to} — never changes an
+ *                                  instance's status, only its policy_step_id
+ *   identity pair, unchanged    → no entry
+ *   position pair               → STEP_MODIFIED (sourceChanged true)
+ *   removed / added             → STEP_REMOVED (old step_order) / STEP_ADDED (new step_order)
+ *
+ * Entries come back in policy order (old step_order; STEP_ADDED by new step_order).
  *
  * @param {Array} oldSteps — rows from tbl_approval_policy_steps (before deletion)
- * @param {Array} newSteps — step objects from the request body (after insertion, with IDs)
+ * @param {Array} newSteps — the inserted rows (with ids), or request-body steps for a preview
  * @returns {Array} Array of diff entries
  */
 export function computePolicyStepDiff(oldSteps, newSteps) {
+  const { pairs, removed, added } = pairPolicySteps(oldSteps, newSteps);
   const diffs = [];
 
-  const oldByOrder = new Map(oldSteps.map(s => [s.step_order, s]));
-  const newByOrder = new Map(newSteps.map(s => [s.step_order, s]));
+  for (const { oldStep, newStep, kind } of pairs) {
+    const oldRule = oldStep.decision_rule || 'ANY';
+    const newRule = newStep.decision_rule || 'ANY';
+    const ruleChanged = oldRule !== newRule;
 
-  const allOrders = new Set([...oldByOrder.keys(), ...newByOrder.keys()]);
-
-  for (const order of [...allOrders].sort((a, b) => a - b)) {
-    const old = oldByOrder.get(order);
-    const nw = newByOrder.get(order);
-
-    if (old && !nw) {
-      diffs.push({ type: 'STEP_REMOVED', step_order: order, oldStep: old });
-    } else if (!old && nw) {
-      diffs.push({ type: 'STEP_ADDED', step_order: order, newStep: nw });
-    } else if (old && nw) {
-      const sourceChanged = old.approver_source_type !== nw.approver_source_type ||
-                            String(old.approver_source_id) !== String(nw.approver_source_id);
-      const ruleChanged = (old.decision_rule || 'ANY') !== (nw.decision_rule || 'ANY');
-
-      if (sourceChanged || ruleChanged) {
-        diffs.push({
-          type: 'STEP_MODIFIED',
-          step_order: order,
-          oldStep: old,
-          newStep: nw,
-          sourceChanged,
-          ruleChanged,
-          oldRule: old.decision_rule || 'ANY',
-          newRule: nw.decision_rule || 'ANY'
-        });
-      }
-      // else: UNCHANGED — skip
+    if (kind === 'position' || ruleChanged) {
+      diffs.push({
+        type: 'STEP_MODIFIED',
+        step_order: stepOrderOf(oldStep),
+        oldStep,
+        newStep,
+        sourceChanged: kind === 'position',
+        ruleChanged,
+        oldRule,
+        newRule
+      });
+    } else if (stepOrderOf(oldStep) !== stepOrderOf(newStep)) {
+      diffs.push({ type: 'STEP_MOVED', from: stepOrderOf(oldStep), to: stepOrderOf(newStep), oldStep, newStep });
     }
   }
+  for (const oldStep of removed) {
+    diffs.push({ type: 'STEP_REMOVED', step_order: stepOrderOf(oldStep), oldStep });
+  }
+  for (const newStep of added) {
+    diffs.push({ type: 'STEP_ADDED', step_order: stepOrderOf(newStep), newStep });
+  }
 
-  return diffs;
+  const anchor = (d) => (d.type === 'STEP_MOVED' ? d.from : d.step_order);
+  return diffs.sort((a, b) => anchor(a) - anchor(b));
+}
+
+/** A diff entry as it is written to change logs and warning summaries. */
+export function summarizeDiffEntry(d) {
+  return d.type === 'STEP_MOVED'
+    ? { type: d.type, from: d.from, to: d.to }
+    : { type: d.type, step_order: d.step_order, sourceChanged: d.sourceChanged, ruleChanged: d.ruleChanged };
 }
 
 // ============================================================================
@@ -334,30 +439,50 @@ export async function reEvaluateInstanceStep(instanceStepId, t) {
 
   // No approvers left → auto-complete.
   //
-  // But FIRST distinguish the two ways a step can have nobody on it, because
+  // But FIRST distinguish the three ways a step can have nobody on it, because
   // they mean opposite things:
   //
-  //   * It HAD approvers and they were all removed mid-flight. Auto-completing
-  //     is the established behaviour — the step existed and was overtaken by a
-  //     membership change.
+  //   * It HAD approvers and a MEMBERSHIP change removed the last of them
+  //     (role revoked, user deactivated, …). Auto-completing is the
+  //     established behaviour — the step existed and was overtaken by that
+  //     change, and simulateApproverImpact warned about it beforehand.
   //   * It NEVER had a single approver row. That is a step that was added but
   //     could not be filled — it is BLOCKED, waiting for somebody to hold the
   //     role. Auto-approving it would manufacture consent nobody gave, and
   //     would silently undo the blocking behaviour in applyDiffToInstance.
+  //   * A POLICY EDIT emptied it: the edit pointed the level at an approver who
+  //     resolves to nobody in this scope and tombstoned the old approvers
+  //     (removal_reason 'policy_change'). The step still exists in the edited
+  //     policy — it is BLOCKED exactly like the never-filled one. Counting
+  //     those tombstones as "had approvers" approved it, so an edit completed
+  //     the approval and fired its post-approval handler. A policy edit never
+  //     completes a live approval.
   //
-  // The filtered query above cannot tell them apart (a fully-removed step and a
-  // never-populated step both return zero), so count the tombstones too.
+  // The filtered query above cannot tell them apart (all three return zero),
+  // so read the tombstones: how many, and what removed the last of them.
   if (approvers.length === 0) {
-    const everHad = await t.one(
-      `SELECT count(*)::int AS n FROM tbl_approval_step_approvers
-        WHERE approval_instance_step_id = $1`,
+    const history = await t.one(
+      `WITH r AS (
+         SELECT removal_reason, removed_at FROM tbl_approval_step_approvers
+          WHERE approval_instance_step_id = $1
+       )
+       SELECT (SELECT count(*)::int FROM r) AS n,
+              COALESCE((SELECT bool_or(removal_reason = 'policy_change') FROM r
+                         WHERE removed_at = (SELECT max(removed_at) FROM r)), false) AS emptied_by_policy_edit`,
       [instanceStepId]
     );
 
-    if (everHad.n === 0) {
+    if (history.n === 0) {
       logger.warn(
         { instance_step_id: instanceStepId },
         '[ApprovalPropagation] step has never had an approver — leaving it PENDING (blocked) rather than auto-approving an authority nobody exercised'
+      );
+      return { completed: false, status: 'PENDING', blocked: true };
+    }
+    if (history.emptied_by_policy_edit) {
+      logger.warn(
+        { instance_step_id: instanceStepId },
+        '[ApprovalPropagation] step was emptied by a policy edit (its level resolves to nobody) — leaving it PENDING (blocked) rather than approving it through the tombstones'
       );
       return { completed: false, status: 'PENDING', blocked: true };
     }
@@ -514,13 +639,13 @@ async function dispatchPostApprovalHandler(instanceId, changedBy, reason) {
  *
  * ── WHY THIS FAILS OPEN ON AN UNKNOWN RESOURCE ──
  * `tbl_permissions.resource` is the `resource_type` ENUM, and
- * ENTITY_APPROVE_RESOURCE_MAP still does not cover every entity type —
- * ARC_AMENDMENT and INDENT, for instance, fall back to
- * `entity_type.toLowerCase()`, which yields `arc_amendment` / `indent`, neither
- * of them enum members. (ARC_TECH and ARC_COMMITTEE WERE in that group; both are
- * mapped now — see the resource table on ENTITY_APPROVE_RESOURCE_MAP in
- * generalModel.js.) A "false" for an unmapped resource says nothing about the
- * role — it says the map has a hole.
+ * ENTITY_APPROVE_RESOURCE_MAP still does not cover every entity type — INDENT,
+ * for instance, falls back to `entity_type.toLowerCase()`, which yields
+ * `indent`, not an enum member. (ARC_TECH, ARC_COMMITTEE and ARC_AMENDMENT WERE
+ * in that group; all three are mapped now — ARC_AMENDMENT to 'arc' — see the
+ * resource table on ENTITY_APPROVE_RESOURCE_MAP in generalModel.js.) A "false"
+ * for an unmapped resource says nothing about the role — it says the map has a
+ * hole.
  *
  * `roleHasReadAndApprovePermission` no longer RAISES on such a value: it casts
  * the column (`p.resource::text = $2`) so an unknown resource returns false.
@@ -534,8 +659,8 @@ async function dispatchPostApprovalHandler(instanceId, changedBy, reason) {
  * catalogue can actually EXPRESS the requirement — i.e. when BOTH
  * `<resource>.read` and `<resource>.approve` rows exist:
  *
- *   RESOURCE_NOT_IN_CATALOGUE   neither row exists (e.g. 'indent',
- *                               'arc_amendment'). The map has a hole.
+ *   RESOURCE_NOT_IN_CATALOGUE   neither row exists (e.g. 'indent'). The map
+ *                               has a hole.
  *   RESOURCE_CANNOT_SATISFY_GATE  one of the two exists, the other does not.
  *
  * The second case is not hypothetical: production's `tender` resource holds
@@ -685,18 +810,46 @@ async function retireIneligibleRoleStep({ instanceId, stepId, roleId, resource, 
  * Apply a policy step diff to a single PENDING approval instance.
  * Must be called within a transaction that holds FOR UPDATE locks on the instance.
  *
+ * @param {Object} [mapping] — how instance steps map onto the OLD policy steps
+ * @param {Map}    [mapping.instanceLinks] — Map<instance step id, old policy step id>
+ *        captured by snapshotPendingInstanceStepLinks before the old policy
+ *        steps were deleted. Omitted → the links stored on the instance rows
+ *        are used (correct only while the old policy steps still exist).
+ * @param {Map}    [mapping.oldStepIdByOrder] — Map<old step_order, old policy
+ *        step id> covering EVERY old policy step. Omitted → the ordinal
+ *        fallback is never used.
+ * @param {Map}    [mapping.stepIdMap] — old policy step id → new policy step id
+ *        for every paired level.
+ * @param {Map}    [mapping.newOrderById] — new policy step id → step_order for
+ *        every level of the edited policy. With stepIdMap, added levels are
+ *        placed by their neighbours; omitted → by the policy ordinal.
+ *
  * @returns {{ approversAdded: Array, approversRemoved: Array,
  *             approversKeptApproved: Array, stepsAdded: Array, stepsRemoved: Array,
- *             stepsModified: Array, unmatchedDiffEntries: Array,
- *             rulesChanged: Array, autoCompleted: boolean }}
- *   `stepsModified` entries are `{step_order, instance_step_id, new_policy_step_id}`
- *   and exist so the caller can re-point `policy_step_id` BY ROW ID.
- *   `unmatchedDiffEntries` are `{type, step_order, policy_step_id}` for diff
- *   entries that found no instance step to apply to — a reconciliation this
- *   instance did NOT receive. Same reporting standard as PART 1's
- *   `unresolvedSteps` in revalidateApproverMembership.
+ *             stepsModified: Array, stepsMoved: Array, unmatchedDiffEntries: Array,
+ *             stepOrigins: Array, rulesChanged: Array, autoCompleted: boolean }}
+ *   `stepOrigins` are `{instance_step_id, policy_step_id}` — the OLD policy step
+ *   every instance step is known to come from, so the caller can re-point
+ *   `policy_step_id` at that level's new row BY INSTANCE STEP ID.
+ *   `unmatchedDiffEntries` are `{type: 'UNMATCHED_SKIPPED', diff_type,
+ *   step_order, policy_step_id}` for removals / modifications / moves that
+ *   found no instance step — a reconciliation this instance did NOT receive.
+ *   Same reporting standard as PART 1's `unresolvedSteps` in
+ *   revalidateApproverMembership. Additions are never unmatched: one that
+ *   cannot be placed is appended (`stepsAdded[].placement === 'appended'`).
+ *   A position-paired modification that lands on a closed step is reported as
+ *   an addition placed at that step (`stepsAdded[].converted_from ===
+ *   'STEP_MODIFIED'`, `placement: 'replaced_step'`, `replaces_instance_step_id`),
+ *   not in `stepsModified`. An added or modified
+ *   level that resolves to nobody carries `blocked: true, reason:
+ *   'NO_APPROVERS_RESOLVED'`: its step is PENDING and nobody can approve it.
+ *
+ * INVARIANT: a policy edit never completes a live approval. The only edit
+ * that may close the instance is an explicit removal of its last pending
+ * level with nothing added (`autoCompleted`).
  */
-export async function applyDiffToInstance(instance, diff, policy, changedBy, t) {
+export async function applyDiffToInstance(instance, diff, policy, changedBy, t, mapping = {}) {
+  const { instanceLinks = null, oldStepIdByOrder = null, stepIdMap = null, newOrderById = null } = mapping;
   // Steps / approvers of this live instance are about to change — announce
   // after commit (de-duplicated per transaction, dropped on rollback).
   notifyApprovalChanged({ instanceIds: instance.id }, t);
@@ -711,15 +864,17 @@ export async function applyDiffToInstance(instance, diff, policy, changedBy, t) 
     stepsAdded: [],
     stepsRemoved: [],
     // Instance steps matched to a STEP_MODIFIED diff entry, with the new policy
-    // step id they should now point at. The caller re-points `policy_step_id`
-    // from this list — by instance step ID, never by step_order.
+    // step id they now belong to.
     stepsModified: [],
-    // Diff entries that claimed no instance step at all: either the policy step
-    // was dropped at creation time (routine — nothing to reconcile) or an
-    // earlier entry already claimed the only candidate (a reconciliation this
-    // instance did NOT receive). Reported rather than silently dropped, matching
-    // how PART 1 reports `unresolvedSteps`.
+    // Instance steps whose level only moved within the policy. Nothing about
+    // them changes except the policy_step_id the caller re-points.
+    stepsMoved: [],
+    // Diff entries that claimed no instance step at all: the policy step was
+    // dropped at creation time (routine — nothing to reconcile), or the
+    // instance carries no link and does not line up with the old policy, so
+    // its steps cannot be attributed without guessing. Reported, never guessed.
     unmatchedDiffEntries: [],
+    stepOrigins: [],
     rulesChanged: [],
     autoCompleted: false
   };
@@ -737,95 +892,422 @@ export async function applyDiffToInstance(instance, diff, policy, changedBy, t) 
   // All entities are department-scoped
   const resolveDeptId = instance.department_id;
 
-  // Process diffs in order. Handle STEP_ADDED renumbering carefully.
-  // Sort diffs: process removals first, then modifications, then additions (to avoid renumbering conflicts)
+  // Applied in this order: moves (bookkeeping only), additions, removals,
+  // modifications. Additions go first so that removing the current level
+  // advances onto an added one instead of completing the instance.
   const removals = diff.filter(d => d.type === 'STEP_REMOVED');
   const modifications = diff.filter(d => d.type === 'STEP_MODIFIED');
+  const moves = diff.filter(d => d.type === 'STEP_MOVED');
   const additions = diff.filter(d => d.type === 'STEP_ADDED').sort((a, b) => a.step_order - b.step_order);
 
-  // Map each diff entry (expressed in POLICY step_order terms) onto the instance
-  // step it actually came from, with the same precedence the reconciler uses:
+  // ── WHICH INSTANCE STEP DOES A DIFF ENTRY (a POLICY level) BELONG TO? ──
   //
-  //   1. `ais.policy_step_id === d.oldStep.id` — the true link. `oldStep` is a
-  //      real pre-edit row from snapshotPolicySteps(), so its id is exactly what
-  //      createApprovalInstance stored. This is a comparison of stored values,
-  //      not a join, so it keeps working after the controller has DELETEd the
-  //      old policy step rows.
-  //   2. instance `step_order === d.step_order` — ordinal fallback.
+  // Instance numbering is NOT policy numbering: createApprovalInstance drops a
+  // policy step that resolves to nobody (or whose role cannot approve) WITHOUT
+  // consuming a number (generalModel.js `stepNumber++`), so policy level 2 is
+  // routinely instance step 1. Guessing by ordinal applies a removal or a
+  // source change to the wrong step of a live approval.
   //
-  // The ordinal alone is NOT sufficient, contrary to the comment that used to
-  // sit here. Instance and policy numbering coincide only when no policy step
-  // was dropped at creation; createApprovalInstance skips steps without
-  // consuming a number (generalModel.js:2226-2258), so policy step 3 can be
-  // instance step 2. Matching on the ordinal then applies a REMOVE or a source
-  // change to the wrong step of a live approval.
+  //   1. The link — the instance step whose originating policy step IS the
+  //      entry's old step. Captured before the edit deleted the old rows.
+  //   2. The ordinal — ONLY for an instance that carries no link at all AND
+  //      whose policy-built steps sit at exactly the old policy's step_orders,
+  //      i.e. nothing was dropped at creation, so the ordinal is a 1:1 mapping
+  //      rather than a guess. A step REMOVED mid-flight or added mid-flight was
+  //      not built from the old policy and is left out of that comparison.
+  //   3. Otherwise no match: the entry is recorded as UNMATCHED_SKIPPED and this
+  //      instance is not mutated for it. Fail closed — a skipped reconciliation
+  //      is visible in the change log; a wrong one silently grants or strips
+  //      approval authority.
   //
-  // The fallback still has to exist: a policy edit deletes and re-inserts every
-  // step row and `fk_instance_step_policy_step` is ON DELETE SET NULL, so any
-  // instance older than the last edit has a NULL link and the ordinal is the
-  // only mapping left.
-  //
-  // ── WHY THIS IS A TWO-PASS ASSIGNMENT AND NOT A per-entry lookup ──
-  // Matching on one key is injective for free: `idx_unique_instance_step_order`
-  // is UNIQUE (approval_instance_id, step_order) and computePolicyStepDiff emits
-  // at most one entry per step_order, so the old ordinal-only matcher was 1:1 by
-  // construction. Mixing TWO key spaces breaks that: entry X can ordinal-match
-  // instance step S while entry Y id-matches the SAME step S. The precondition is
-  // routine — propagatePolicyChangeToInstances re-points `policy_step_id` only
-  // for MODIFIED steps, so after any policy edit an instance holds a mix of live
-  // links and NULLs.
-  //
-  // A double claim is not cosmetic. If a STEP_REMOVED and a STEP_MODIFIED land on
-  // the same step, the removals loop kills it and the modifications loop then
-  // INSERTs PENDING approver rows + APPROVER_ADDED audit rows onto a dead step.
-  // getPendingApprovalsForUser (generalModel.js:3116-3121) filters on `sa.status`
-  // and `s.step_order = i.current_step` but NOT on `s.status`, so that row reads
-  // as a live approval and dispatchPropagationEmails emails the person "action
-  // required" for a step that no longer exists. Two removals colliding would
-  // write a duplicate STEP_REMOVED audit row; two modifications colliding would
-  // issue two policy_step_id UPDATEs (last wins) and leave a step unreconciled.
-  //
-  // So: resolve EVERY id-match first, globally, then hand out the ordinal matches
-  // from what is left. One instance step is claimed by at most one diff entry.
+  // The two keys never mix on one instance (the ordinal is only consulted when
+  // no link exists), and one instance step is claimed by at most one entry.
+  const linkOf = instanceLinks
+    ? (s) => instanceLinks.get(Number(s.id)) ?? null
+    : (s) => (s.policy_step_id == null ? null : Number(s.policy_step_id));
+  const hasLinks = instanceSteps.some(s => linkOf(s) != null);
+  const policyBuiltOrders = instanceSteps
+    .filter(s => s.status !== 'REMOVED' && !s.added_mid_flight)
+    .map(s => s.step_order)
+    .sort((a, b) => a - b);
+  const oldOrders = oldStepIdByOrder ? [...oldStepIdByOrder.keys()].sort((a, b) => a - b) : null;
+  const ordinalIsExact = !hasLinks && oldOrders !== null &&
+    policyBuiltOrders.length === oldOrders.length &&
+    policyBuiltOrders.every((order, i) => order === oldOrders[i]);
+
   const claimedStepIds = new Set();
   const stepForDiff = new Map(); // diff entry (by identity) -> instance step row
 
   // STEP_ADDED is excluded on purpose — it creates a new row rather than
   // claiming an existing one, and its position is derived separately below.
-  const claimingEntries = [...removals, ...modifications]
-    .sort((a, b) => a.step_order - b.step_order);
+  const claimingEntries = [...removals, ...modifications, ...moves]
+    .sort((a, b) => stepOrderOf(a.oldStep) - stepOrderOf(b.oldStep));
 
   for (const d of claimingEntries) {
-    const oldPolicyStepId = d.oldStep?.id;
-    if (oldPolicyStepId == null) continue;
-    const hit = instanceSteps.find(s => !claimedStepIds.has(s.id) && s.policy_step_id === oldPolicyStepId);
-    if (!hit) continue;
-    claimedStepIds.add(hit.id);
-    stepForDiff.set(d, hit);
-    logger.info(`[PropagateMatch] ${d.type} policy step_order=${d.step_order} (policy_step_id=${oldPolicyStepId}): claimed instance step id=${hit.id} step_order=${hit.step_order} status=${hit.status} via policy_step_id`);
-  }
-
-  for (const d of claimingEntries) {
-    if (stepForDiff.has(d)) continue;
-    const hit = instanceSteps.find(s => !claimedStepIds.has(s.id) && s.step_order === d.step_order);
+    const oldPolicyStepId = d.oldStep?.id == null ? null : Number(d.oldStep.id);
+    const oldOrder = stepOrderOf(d.oldStep);
+    let hit = null;
+    let via = null;
+    if (oldPolicyStepId != null) {
+      hit = instanceSteps.find(s => !claimedStepIds.has(s.id) && linkOf(s) === oldPolicyStepId);
+      via = 'policy_step_id';
+    }
+    if (!hit && ordinalIsExact) {
+      hit = instanceSteps.find(s => !claimedStepIds.has(s.id) && s.step_order === oldOrder);
+      via = 'step_order';
+    }
     if (!hit) {
-      // Either the policy step was dropped at creation (routine) or another
-      // entry took the only candidate. Either way this instance does not get
-      // this part of the policy change, which is a fact worth surfacing.
-      logger.warn(`[PropagateMatch] instance ${instance.id}: ${d.type} policy step_order=${d.step_order} (policy_step_id=${d.oldStep?.id ?? 'n/a'}) matched NO unclaimed instance step — this reconciliation was not applied`);
+      logger.warn(`[PropagateMatch] instance ${instance.id}: ${d.type} policy step_order=${oldOrder} (policy_step_id=${oldPolicyStepId ?? 'n/a'}) matched NO instance step (linked=${hasLinks}) — UNMATCHED_SKIPPED, this reconciliation was not applied`);
       result.unmatchedDiffEntries.push({
-        type: d.type,
-        step_order: d.step_order,
-        policy_step_id: d.oldStep?.id ?? null
+        type: 'UNMATCHED_SKIPPED',
+        diff_type: d.type,
+        step_order: oldOrder,
+        policy_step_id: oldPolicyStepId
       });
       continue;
     }
     claimedStepIds.add(hit.id);
     stepForDiff.set(d, hit);
-    logger.info(`[PropagateMatch] ${d.type} policy step_order=${d.step_order} (policy_step_id=${d.oldStep?.id ?? 'n/a'}): claimed instance step id=${hit.id} step_order=${hit.step_order} status=${hit.status} via step_order`);
+    logger.info(`[PropagateMatch] ${d.type} policy step_order=${oldOrder} (policy_step_id=${oldPolicyStepId ?? 'n/a'}): claimed instance step id=${hit.id} step_order=${hit.step_order} status=${hit.status} via ${via}`);
+  }
+
+  // Every instance step whose originating policy step is known — by link, or by
+  // the exact ordinal — whether or not this edit touches it. The caller
+  // re-points them all, so the instance leaves this edit fully linked.
+  for (const s of instanceSteps) {
+    let origin = linkOf(s);
+    if (origin == null && ordinalIsExact && s.status !== 'REMOVED' && !s.added_mid_flight) {
+      origin = oldStepIdByOrder.get(s.step_order) ?? null;
+    }
+    if (origin != null) result.stepOrigins.push({ instance_step_id: s.id, policy_step_id: origin });
   }
 
   const findInstanceStepForDiff = (d) => stepForDiff.get(d);
+
+  // --- STEP MOVES ---
+  // A level that only changed position. The instance keeps its own order (it is
+  // mid-flight); the move is recorded and the link re-pointed by the caller.
+  for (const d of moves) {
+    const instStep = findInstanceStepForDiff(d);
+    if (!instStep) continue;
+    result.stepsMoved.push({ instance_step_id: instStep.id, step_order: instStep.step_order, from: d.from, to: d.to });
+  }
+
+  // ── HELPERS SHARED BY ADDITIONS, REMOVALS AND MODIFICATIONS ──
+
+  // Open a gap at `fromOrder`. Two statements, not `step_order = step_order + 1`:
+  // idx_unique_instance_step_order is checked row by row, so a one-statement
+  // shift of two or more rows collides with itself and the edit fails.
+  const shiftInstanceSteps = async (fromOrder) => {
+    await t.none(
+      `UPDATE tbl_approval_instance_steps SET step_order = -(step_order + 1)
+        WHERE approval_instance_id = $1 AND step_order >= $2`,
+      [instance.id, fromOrder]
+    );
+    await t.none(
+      `UPDATE tbl_approval_instance_steps SET step_order = -step_order
+        WHERE approval_instance_id = $1 AND step_order < 0`,
+      [instance.id]
+    );
+    // Later loops compare in-memory step_order with current_step.
+    for (const s of instanceSteps) if (s.step_order >= fromOrder) s.step_order += 1;
+  };
+
+  // Who the EDITED policy's level names, in this instance's scope. Same
+  // eligibility rule creation uses — see policyStepApproverEligibility.
+  // Without it, editing a live policy could install an approver that creating
+  // the same instance would have dropped, and that approver is binding
+  // (submitApprovalAction re-checks nothing). An ineligible source resolves to
+  // NOBODY. Both callers treat nobody the same way — fillAddedStep and the
+  // STEP_MODIFIED path BLOCK the step (PENDING, an audit row saying why, a
+  // `blocked` report); neither ever approves it.
+  const resolveEditedLevel = async (policyStep, diffType) => {
+    const eligibility = await policyStepApproverEligibility(
+      policyStep, instance.entity_type,
+      {
+        hospitality_company_id: instance.hospitality_company_id,
+        hotel_id: instance.hotel_id,
+        department_id: resolveDeptId,
+        process_id: instance.process_id || null,
+      }, t
+    );
+    if (!eligibility.eligible) {
+      logger.warn(
+        `[PropagateGate] ${diffType}: policy step ${policyStep.id} source ` +
+        `${policyStep.approver_source_type}/${policyStep.approver_source_id} is INELIGIBLE ` +
+        `for ${instance.entity_type} (${eligibility.reason}, resource '${eligibility.resource}') — ` +
+        `resolving to nobody on instance ${instance.id} instead of installing them.`
+      );
+      return [];
+    }
+    return resolveApprovers(
+      policyStep, instance.hospitality_company_id, instance.hotel_id,
+      resolveDeptId, t, null, instance.process_id || null
+    );
+  };
+
+  // Resolve and attach approvers to an added step that is (now) PENDING.
+  // Returns the stepsAdded report fields for it.
+  const fillAddedStep = async (stepRow, newStep) => {
+    const newResolvedIds = await resolveEditedLevel(newStep, 'STEP_ADDED');
+
+    if (newResolvedIds.length === 0) {
+      // A NEW authority that resolves to nobody RIGHT NOW must BLOCK, not
+      // vanish. The step stays PENDING with zero approvers so the instance
+      // stalls until somebody is granted the role.
+      //
+      // This used to be written SKIPPED, and that voided the final authority
+      // on two production POs (138699 / 138701): an admin added a 4th level at
+      // 20:57 and granted the role ten hours later; the level was already
+      // SKIPPED, the add-approver reconciler only looks at PENDING steps (see
+      // revalidateApproverMembership PART 2), so the grant never reached it.
+      // PENDING is what makes this recoverable. A stalled approval is visible
+      // and fixable; a bypassed one is neither.
+      logger.error(
+        {
+          instance_id: instance.id,
+          entity_type: instance.entity_type,
+          entity_id: instance.entity_id,
+          step_order: stepRow.step_order,
+          policy_step_id: newStep.id,
+          approver_source_type: newStep.approver_source_type,
+          approver_source_id: newStep.approver_source_id,
+        },
+        '[ApprovalPropagation] BLOCKED: a policy step was added to a live instance but resolves to no approvers. The approval cannot proceed until somebody holds that role in scope.'
+      );
+      await t.none(
+        `INSERT INTO tbl_approval_actions
+           (approval_instance_id, approval_instance_step_id, approver_user_id, action, comment)
+         VALUES ($1, $2, $3, 'STEP_ADDED', $4)`,
+        [
+          instance.id,
+          stepRow.id,
+          instance.initiated_by,
+          `Step ${stepRow.step_order} added by a policy change but resolves to no approver in this scope — approval is blocked here until the role is granted.`,
+        ]
+      );
+      return { status: 'PENDING', blocked: true, reason: 'NO_APPROVERS_RESOLVED' };
+    }
+
+    for (const userId of newResolvedIds) {
+      const isInitiator = userId === instance.initiated_by;
+      await t.none(
+        `INSERT INTO tbl_approval_step_approvers
+         (approval_instance_step_id, approver_user_id, status, added_mid_flight, acted_at, comment)
+         VALUES ($1, $2, $3, true, $4, NULL)`,
+        [stepRow.id, userId, isInitiator ? 'APPROVED' : 'PENDING', isInitiator ? new Date() : null]
+      );
+      if (isInitiator) {
+        await t.none(
+          `INSERT INTO tbl_approval_actions
+           (approval_instance_id, approval_instance_step_id, approver_user_id, action, comment)
+           VALUES ($1, $2, $3, 'APPROVE', NULL)`,
+          [instance.id, stepRow.id, userId]
+        );
+      }
+      result.approversAdded.push({ user_id: userId, step_order: stepRow.step_order, auto_approved: isInitiator });
+    }
+    await t.none(
+      `INSERT INTO tbl_approval_actions
+       (approval_instance_id, approval_instance_step_id, approver_user_id, action, comment)
+       VALUES ($1, $2, $3, 'STEP_ADDED', 'Step added due to policy change')`,
+      [instance.id, stepRow.id, changedBy]
+    );
+    return { status: 'PENDING', approverCount: newResolvedIds.length };
+  };
+
+  // Added levels written SKIPPED because they landed inside the completed
+  // prefix: { row, newStep, reported }.
+  const skippedAdditions = [];
+
+  // The step at current_step just closed (removed, or completed by a
+  // modification). Move on — except that an edit which ADDS levels never leaves
+  // the instance completed: if nothing PENDING remains ahead, the added levels
+  // that were written SKIPPED are the only authority left, so they become
+  // PENDING and the first of them current. Removing the last pending level with
+  // NO additions still completes the instance — that is what the admin asked for.
+  const advancePastClosedStep = async () => {
+    if (skippedAdditions.length > 0) {
+      const pendingAhead = await t.oneOrNone(
+        `SELECT 1 FROM tbl_approval_instance_steps
+          WHERE approval_instance_id = $1 AND status = 'PENDING' AND step_order > $2 LIMIT 1`,
+        [instance.id, instance.current_step]
+      );
+      if (!pendingAhead) {
+        const revived = skippedAdditions.splice(0).sort((a, b) => a.row.step_order - b.row.step_order);
+        for (const a of revived) {
+          await t.none(
+            `UPDATE tbl_approval_instance_steps SET status = 'PENDING', completed_at = NULL WHERE id = $1`,
+            [a.row.id]
+          );
+          a.row.status = 'PENDING';
+          Object.assign(a.reported, await fillAddedStep(a.row, a.newStep), { revived: true });
+        }
+        instance.current_step = revived[0].row.step_order;
+        await t.none(
+          `UPDATE tbl_approval_instances SET current_step = $1 WHERE id = $2`,
+          [instance.current_step, instance.id]
+        );
+        logger.warn(`[PropagateAdd] instance ${instance.id}: the edit left no pending level, so ${revived.length} added level(s) placed before the current step were made PENDING instead of SKIPPED; current_step=${instance.current_step}`);
+        return;
+      }
+    }
+    const adv = await advanceInstanceToNextStep(instance.id, t);
+    if (adv.instanceCompleted) {
+      result.autoCompleted = true;
+    } else if (adv.nextStepOrder) {
+      instance.current_step = adv.nextStepOrder;
+    }
+  };
+
+  // ── A POSITION PAIR THAT LANDS ON A CLOSED STEP IS AN ADDITION ──
+  // A position-paired STEP_MODIFIED (sourceChanged) says "a DIFFERENT approver
+  // now sits at this level". When the instance step built from that level is
+  // already closed (APPROVED, SKIPPED, REMOVED, …) there is nothing left on it
+  // to modify — and dropping the change let an edit that also closes the
+  // current step complete the instance with the new approver never asked:
+  // [A,B] → [C] pairs A↔C onto A's approved step and removes B, and the
+  // instance finished. For THIS instance such a pair is the removal of the old
+  // level plus the ADDITION of the new one: the closed step stays as history,
+  // no longer linked to the level (it is left out of `stepOrigins`, and it
+  // anchors nothing below), and the new source goes through the additions
+  // below, placed AT the closed step's position (`placement:
+  // 'replaced_step'`, controller ruling). Then R2/R3: inside the completed
+  // prefix → SKIPPED, so [A,B] → [C,B] waiting at B does not send the approval
+  // back to level 1; revived as the current PENDING step only if the instance
+  // would otherwise complete ([A,B] → [C]). A closed step after the current
+  // one (a dead SKIPPED/REMOVED step ahead) puts the new level ahead → PENDING.
+  const retiredStepIds = new Set();
+  const convertedModifications = new Set();
+  const convertedAdditions = [];
+  for (const d of modifications) {
+    if (!d.sourceChanged) continue;
+    const instStep = findInstanceStepForDiff(d);
+    if (!instStep || instStep.status === 'PENDING') continue;
+    retiredStepIds.add(instStep.id);
+    convertedModifications.add(d);
+    convertedAdditions.push({ type: 'STEP_ADDED', step_order: stepOrderOf(d.newStep), newStep: d.newStep, replaces: instStep });
+    logger.info(`[PropagateModify] instance ${instance.id}: position-paired level change (policy step_order=${stepOrderOf(d.oldStep)} → ${stepOrderOf(d.newStep)}) lands on closed instance step id=${instStep.id} (${instStep.status}) — the new source is ADDED instead`);
+  }
+  const allAdditions = [...additions, ...convertedAdditions].sort((a, b) => a.step_order - b.step_order);
+
+  // --- STEP ADDITIONS (before removals, so a removal never completes an
+  //     instance the edit also extended) ---
+  //
+  // WHERE an added level goes. With the full new policy known (`stepIdMap` +
+  // `newOrderById`, i.e. every real policy edit), it goes by its NEIGHBOURS in
+  // the new policy: immediately before the instance step built from the
+  // nearest following level; with no following level, after every existing
+  // step (so after the one built from the preceding level). Steps of levels
+  // this edit removes anchor nothing — they are about to go. That needs every
+  // live instance step to be attributable to a level; if one is not, or the
+  // two neighbours sit in the instance in the opposite order, the level is
+  // APPENDED after every existing step instead (`placement: 'appended'`).
+  // An added level is never dropped: dropping it lets an edit that also closes
+  // the current step complete the instance with the new approver never asked.
+  // Appended levels are PENDING, so closing the current step advances onto the
+  // first of them. Callers that pass no new-policy map (direct callers of this
+  // exported function) get the policy ordinal.
+  //
+  // WHAT it becomes, by where it lands relative to the current step:
+  //   before it — its following level's step is already completed, i.e. it is
+  //               inside the completed prefix → SKIPPED (but see
+  //               advancePastClosedStep: never if that would finish the instance);
+  //   at it     — its following level IS the current step → PENDING and
+  //               current; the old current step waits after it;
+  //   after it  → PENDING.
+  const placeByNeighbours = Boolean(stepIdMap && newOrderById);
+  const newOrderOfStep = new Map(); // live instance step id -> its level's new step_order
+  let additionsPlaceable = true;
+  if (placeByNeighbours && allAdditions.length > 0) {
+    const originOf = new Map(result.stepOrigins.map(o => [o.instance_step_id, o.policy_step_id]));
+    for (const s of instanceSteps) {
+      if (s.status === 'REMOVED') continue;
+      if (!originOf.has(s.id)) { additionsPlaceable = false; break; }
+      // Attributable, but its level was replaced by this edit (see above).
+      if (retiredStepIds.has(s.id)) continue;
+      const newId = stepIdMap.get(originOf.get(s.id));
+      // A level removed by this edit has no new position; its step is about
+      // to be removed and anchors nothing.
+      if (newId != null && newOrderById.has(Number(newId))) newOrderOfStep.set(s.id, newOrderById.get(Number(newId)));
+    }
+  }
+
+  let renumberOffset = 0;
+  const afterLastStep = () => Math.max(0, ...instanceSteps.map(s => s.step_order)) + 1;
+  for (const d of allAdditions) {
+    const newOrder = stepOrderOf(d.newStep);
+    let insertPosition;
+    let placement;
+    if (d.replaces) {
+      // A converted position pair takes the place of the closed step it
+      // replaces (that step moves down one). Before the current step that is
+      // inside the completed prefix → SKIPPED: the approval is not sent back
+      // to a level it has passed. R3 still revives it if this edit would
+      // otherwise complete the instance.
+      insertPosition = d.replaces.step_order;
+      placement = 'replaced_step';
+      if (!placeByNeighbours) renumberOffset++;
+    } else if (placeByNeighbours) {
+      let pred = null;
+      let succ = null;
+      if (additionsPlaceable) {
+        for (const s of instanceSteps) {
+          const o = newOrderOfStep.get(s.id);
+          if (o === undefined) continue;
+          if (o < newOrder && (!pred || o > newOrderOfStep.get(pred.id))) pred = s;
+          if (o > newOrder && (!succ || o < newOrderOfStep.get(succ.id))) succ = s;
+        }
+      }
+      if (!additionsPlaceable || (!pred && !succ) || (pred && succ && pred.step_order >= succ.step_order)) {
+        insertPosition = afterLastStep();
+        placement = 'appended';
+        logger.warn(`[PropagateAdd] instance ${instance.id}: STEP_ADDED policy step_order=${newOrder} (policy_step_id=${d.newStep.id}) has no reliable place between its neighbours (placeable=${additionsPlaceable}) — APPENDED as PENDING at step ${insertPosition}`);
+      } else {
+        insertPosition = succ ? succ.step_order : afterLastStep();
+        placement = 'neighbours';
+      }
+    } else {
+      insertPosition = d.step_order + renumberOffset;
+      renumberOffset++;
+      placement = 'ordinal';
+    }
+
+    const currentOrder = instance.current_step;
+    await shiftInstanceSteps(insertPosition);
+    if (insertPosition < currentOrder) {
+      // The current step moved down one place.
+      instance.current_step += 1;
+      await t.none(
+        `UPDATE tbl_approval_instances SET current_step = $1 WHERE id = $2`,
+        [instance.current_step, instance.id]
+      );
+    }
+    // insertPosition === currentOrder: current_step now names the added step.
+
+    const insideCompletedPrefix = insertPosition < currentOrder;
+    const row = await t.one(
+      `INSERT INTO tbl_approval_instance_steps
+       (approval_instance_id, step_order, decision_rule, status, policy_step_id, added_mid_flight, completed_at)
+       VALUES ($1, $2, $3, $4, $5, true, ${insideCompletedPrefix ? 'NOW()' : 'NULL'}) RETURNING *`,
+      [instance.id, insertPosition, d.newStep.decision_rule || 'ANY',
+        insideCompletedPrefix ? 'SKIPPED' : 'PENDING', d.newStep.id]
+    );
+    instanceSteps.push(row);
+    newOrderOfStep.set(row.id, newOrder);
+
+    // A converted position pair names the closed step it took over from.
+    const replaced = d.replaces
+      ? { converted_from: 'STEP_MODIFIED', replaces_instance_step_id: d.replaces.id }
+      : {};
+    if (insideCompletedPrefix) {
+      const reported = { step_order: insertPosition, placement, status: 'SKIPPED', ...replaced };
+      result.stepsAdded.push(reported);
+      skippedAdditions.push({ row, newStep: d.newStep, reported });
+    } else {
+      result.stepsAdded.push({ step_order: insertPosition, placement, ...replaced, ...(await fillAddedStep(row, d.newStep)) });
+    }
+  }
 
   // --- STEP REMOVALS ---
   for (const d of removals) {
@@ -883,31 +1365,62 @@ export async function applyDiffToInstance(instance, diff, policy, changedBy, t) 
 
     // If this was the current step, advance
     if (instStep.step_order === instance.current_step) {
-      const adv = await advanceInstanceToNextStep(instance.id, t);
-      if (adv.instanceCompleted) {
-        result.autoCompleted = true;
-      } else if (adv.nextStepOrder) {
-        instance.current_step = adv.nextStepOrder;
-      }
+      await advancePastClosedStep();
     }
   }
 
+  // A modified level whose EDITED authority resolves to nobody in this scope
+  // BLOCKS its step — exactly like fillAddedStep's 0-approver addition: the
+  // step stays PENDING, an audit row says why, the change log reports it
+  // `blocked`, and it is NOT re-evaluated. Re-evaluating it approved the step
+  // through the tombstones of the approvers this edit had just removed (or
+  // through an approval given under the authority the edit replaced), so an
+  // edit completed a live approval and fired its post-approval handler.
+  // PENDING keeps it recoverable: a later edit naming somebody who holds the
+  // level, or a grant reaching it, fills it.
+  const blockModifiedStep = async (instStep, d, reported) => {
+    logger.error(
+      {
+        instance_id: instance.id,
+        entity_type: instance.entity_type,
+        entity_id: instance.entity_id,
+        step_order: instStep.step_order,
+        policy_step_id: d.newStep?.id,
+        approver_source_type: d.newStep?.approver_source_type,
+        approver_source_id: d.newStep?.approver_source_id,
+      },
+      '[ApprovalPropagation] BLOCKED: a policy edit points a live level at an approver who resolves to nobody in this scope. The approval cannot proceed until somebody holds that level.'
+    );
+    await t.none(
+      `INSERT INTO tbl_approval_actions
+         (approval_instance_id, approval_instance_step_id, approver_user_id, action, comment)
+       VALUES ($1, $2, $3, 'POLICY_CHANGE', $4)`,
+      [
+        instance.id,
+        instStep.id,
+        changedBy,
+        `Step ${instStep.step_order} changed by a policy edit but resolves to no approver in this scope — approval is blocked here until somebody holds that level.`,
+      ]
+    );
+    Object.assign(reported, { blocked: true, reason: 'NO_APPROVERS_RESOLVED' });
+  };
+
   // --- STEP MODIFICATIONS (approver/rule changes) ---
   for (const d of modifications) {
+    // Landed on a closed step: handled above as an addition of the new source.
+    if (convertedModifications.has(d)) continue;
     const instStep = findInstanceStepForDiff(d);
     if (!instStep) continue;
 
-    // Record the match regardless of the step's status so the caller re-points
-    // `policy_step_id` at the new policy step row for completed steps too —
-    // otherwise their link dangles forever and every later reconciliation of
-    // this instance falls back to the ordinal.
-    if (d.newStep?.id) {
-      result.stepsModified.push({
-        step_order: instStep.step_order,
-        instance_step_id: instStep.id,
-        new_policy_step_id: d.newStep.id
-      });
-    }
+    // Recorded regardless of the step's status — it is the change log's account
+    // of which step this level change landed on. (Re-pointing `policy_step_id`
+    // is driven by `stepOrigins`, which covers every attributable step.)
+    const modifiedReport = {
+      step_order: instStep.step_order,
+      instance_step_id: instStep.id,
+      new_policy_step_id: d.newStep?.id
+    };
+    if (d.newStep?.id) result.stepsModified.push(modifiedReport);
 
     if (instStep.status !== 'PENDING') {
       // Historical (APPROVED/REJECTED) or dead (REMOVED/SKIPPED) — audit note
@@ -915,11 +1428,14 @@ export async function applyDiffToInstance(instance, diff, policy, changedBy, t) 
       // approver row onto a dead step produces an approver record nobody can
       // act on, which getPendingApprovalsForUser still surfaces (it filters on
       // sa.status, not s.status) and dispatchPropagationEmails then emails
-      // about. The two-pass assignment above already makes a removal and a
-      // modification claiming the same step impossible; this is the backstop
-      // for a step that was REMOVED by an earlier propagation.
+      // about. The one-claim-per-step matcher above already makes a removal
+      // and a modification claiming the same step impossible; this is the
+      // backstop for a step that was REMOVED by an earlier propagation.
       continue;
     }
+
+    // Set when the edited level resolves to nobody here → the step is BLOCKED.
+    let resolvesToNobody = false;
 
     // Handle approver source change
     if (d.sourceChanged) {
@@ -938,38 +1454,14 @@ export async function applyDiffToInstance(instance, diff, policy, changedBy, t) 
       );
       const currentApproverIds = currentApproverRows.map(r => r.approver_user_id);
 
-      // Same eligibility rule creation uses — see
-      // policyStepApproverEligibility. Without this, editing a live policy
-      // could install an approver that creating the same instance would have
-      // dropped, and that approver is binding (submitApprovalAction re-checks
-      // nothing). An ineligible source resolves to NOBODY here, so the step
-      // below takes the existing "resolves to nobody" branch: it stalls rather
-      // than silently granting authority.
-      const modEligibility = await policyStepApproverEligibility(
-        d.newStep, instance.entity_type,
-        {
-          hospitality_company_id: instance.hospitality_company_id,
-          hotel_id: instance.hotel_id,
-          department_id: resolveDeptId,
-          process_id: instance.process_id || null,
-        }, t
-      );
-      if (!modEligibility.eligible) {
-        logger.warn(
-          `[PropagateGate] STEP_MODIFIED: policy step ${d.newStep.id} source ` +
-          `${d.newStep.approver_source_type}/${d.newStep.approver_source_id} is INELIGIBLE ` +
-          `for ${instance.entity_type} (${modEligibility.reason}, resource '${modEligibility.resource}') — ` +
-          `resolving to nobody on instance ${instance.id} instead of installing them.`
-        );
-      }
-
-      // Resolve NEW approvers (from new policy step definition)
-      const newResolvedIds = modEligibility.eligible
-        ? await resolveApprovers(
-            d.newStep, instance.hospitality_company_id, instance.hotel_id,
-            resolveDeptId, t, null, instance.process_id || null
-          )
-        : [];
+      // Resolve NEW approvers (from the new policy step definition), with the
+      // creation-time eligibility rule (resolveEditedLevel). NOBODY — an
+      // ineligible source, or nobody holding it here — still tombstones the
+      // old approvers below (they no longer hold this level), and then the
+      // step is BLOCKED (blockModifiedStep): it stays PENDING and is never
+      // approved through those tombstones.
+      const newResolvedIds = await resolveEditedLevel(d.newStep, 'STEP_MODIFIED');
+      if (newResolvedIds.length === 0) resolvesToNobody = true;
 
       logger.info(`[PropagateModify] Current DB approvers (non-REMOVED): [${currentApproverIds.join(',')}], New resolved: [${newResolvedIds.join(',')}]`);
 
@@ -1080,213 +1572,41 @@ export async function applyDiffToInstance(instance, diff, policy, changedBy, t) 
       });
     }
 
+    // A rule-only change keeps the level's approver, but that approver may
+    // already resolve to nobody (a step blocked by an earlier edit). With no
+    // live PENDING approver left on the step, relaxing the rule must not
+    // complete it through history — check who the level names now.
+    if (!d.sourceChanged && d.ruleChanged) {
+      const livePending = await t.oneOrNone(
+        `SELECT 1 FROM tbl_approval_step_approvers
+          WHERE approval_instance_step_id = $1 AND status = 'PENDING' LIMIT 1`,
+        [instStep.id]
+      );
+      if (!livePending && (await resolveEditedLevel(d.newStep, 'STEP_MODIFIED')).length === 0) {
+        resolvesToNobody = true;
+      }
+    }
+
+    if (resolvesToNobody) {
+      await blockModifiedStep(instStep, d, modifiedReport);
+      continue;
+    }
+
     // Re-evaluate step completion after any modification
     if (d.sourceChanged || d.ruleChanged) {
       const evalResult = await reEvaluateInstanceStep(instStep.id, t);
+      if (evalResult.completed) instStep.status = evalResult.status;
       if (evalResult.completed && instStep.step_order === instance.current_step) {
-        const adv = await advanceInstanceToNextStep(instance.id, t);
-        if (adv.instanceCompleted) {
-          result.autoCompleted = true;
-        } else if (adv.nextStepOrder) {
-          instance.current_step = adv.nextStepOrder;
-        }
+        await advancePastClosedStep();
       }
     }
   }
 
-  // --- STEP ADDITIONS (with renumbering) ---
-  // Process additions in ascending order to handle renumbering correctly.
-  //
-  // Insert POSITION stays ordinal, deliberately. A STEP_ADDED entry describes a
-  // policy step that did not exist before, so there is no `policy_step_id` on
-  // any instance step that could point at it — the id-first precedence used for
-  // removals/modifications has nothing to match. Nor can the neighbouring steps
-  // supply it: the controller deletes and re-inserts EVERY policy step on save,
-  // and the FK NULLs each link as it goes, so at this moment every surviving
-  // instance step's link is NULL except the ones re-pointed a few lines above.
-  // The ordinal is the only mapping that exists here.
-  //
-  // Residual risk, stated plainly: on an instance whose numbering diverged, a
-  // step can be inserted one position off, and a position below current_step is
-  // inserted as SKIPPED rather than PENDING — i.e. an approval that should have
-  // been collected is not. The approver SET is still correct (resolveApprovers
-  // runs fresh against the new policy step), so this is a sequencing error, not
-  // a wrong-approver error. Fixing it properly needs the full new step list
-  // threaded through applyDiffToInstance and a policy→instance position map;
-  // that is a larger change than this defect and is left out on purpose.
-  let renumberOffset = 0;
-  for (const d of additions) {
-    const insertPosition = d.step_order + renumberOffset;
-    const currentStep = instance.current_step;
-
-    // Shift existing instance steps at >= insertPosition
-    await t.none(
-      `UPDATE tbl_approval_instance_steps
-       SET step_order = step_order + 1
-       WHERE approval_instance_id = $1 AND step_order >= $2`,
-      [instance.id, insertPosition]
-    );
-
-    // Update current_step if it was shifted
-    if (currentStep >= insertPosition) {
-      instance.current_step += 1;
-      await t.none(
-        `UPDATE tbl_approval_instances SET current_step = $1 WHERE id = $2`,
-        [instance.current_step, instance.id]
-      );
-    }
-
-    const isPastStep = insertPosition < instance.current_step;
-
-    if (isPastStep) {
-      // Past step — insert as SKIPPED
-      await t.one(
-        `INSERT INTO tbl_approval_instance_steps
-         (approval_instance_id, step_order, decision_rule, status, policy_step_id, added_mid_flight, completed_at)
-         VALUES ($1, $2, $3, 'SKIPPED', $4, true, NOW()) RETURNING id`,
-        [instance.id, insertPosition, d.newStep.decision_rule || 'ANY', d.newStep.id]
-      );
-      result.stepsAdded.push({ step_order: insertPosition, status: 'SKIPPED' });
-    } else {
-      // Future step — insert as PENDING with resolved approvers
-      // Same eligibility rule creation uses — see
-      // policyStepApproverEligibility. Without this, editing a live policy
-      // could install an approver that creating the same instance would have
-      // dropped, and that approver is binding (submitApprovalAction re-checks
-      // nothing). An ineligible source resolves to NOBODY here, so the step
-      // below takes the existing "resolves to nobody" branch: it stalls rather
-      // than silently granting authority.
-      const addEligibility = await policyStepApproverEligibility(
-        d.newStep, instance.entity_type,
-        {
-          hospitality_company_id: instance.hospitality_company_id,
-          hotel_id: instance.hotel_id,
-          department_id: resolveDeptId,
-          process_id: instance.process_id || null,
-        }, t
-      );
-      if (!addEligibility.eligible) {
-        logger.warn(
-          `[PropagateGate] STEP_ADDED: policy step ${d.newStep.id} source ` +
-          `${d.newStep.approver_source_type}/${d.newStep.approver_source_id} is INELIGIBLE ` +
-          `for ${instance.entity_type} (${addEligibility.reason}, resource '${addEligibility.resource}') — ` +
-          `resolving to nobody on instance ${instance.id} instead of installing them.`
-        );
-      }
-
-      const newResolvedIds = addEligibility.eligible
-        ? await resolveApprovers(
-            d.newStep, instance.hospitality_company_id, instance.hotel_id,
-            resolveDeptId, t, null, instance.process_id || null
-          )
-        : [];
-
-      if (newResolvedIds.length === 0) {
-        // A NEW authority that resolves to nobody RIGHT NOW must BLOCK, not
-        // vanish. It is inserted PENDING with zero approvers so the instance
-        // stalls until somebody is granted the role.
-        //
-        // This used to insert SKIPPED, and the comment claimed it matched
-        // createApprovalInstance. It does not: creation DROPS such a step (it
-        // never exists and never consumes a step number), whereas this path
-        // wrote a terminal row that silently satisfied a mandatory level.
-        //
-        // That difference voided the final authority on two production POs
-        // (138699 / 138701). An admin added a 4th approval level at 20:57 and
-        // granted the role ten hours later; the level had already been written
-        // SKIPPED, the add-approver reconciler only looks at PENDING steps
-        // (see revalidateApproverMembership PART 2), so the grant could never
-        // reach it, and both POs completed without their final approver.
-        //
-        // Inserting PENDING is what makes this recoverable: the same reconciler
-        // now finds the step the moment the role is granted and fills it in.
-        // Failing closed on a financial control is the right trade — a stalled
-        // approval is visible and fixable; a bypassed one is neither.
-        const blockedStep = await t.one(
-          `INSERT INTO tbl_approval_instance_steps
-           (approval_instance_id, step_order, decision_rule, status, policy_step_id, added_mid_flight)
-           VALUES ($1, $2, $3, 'PENDING', $4, true) RETURNING id`,
-          [instance.id, insertPosition, d.newStep.decision_rule || 'ANY', d.newStep.id]
-        );
-
-        // Say so loudly. The old path emitted nothing — no log, no audit row,
-        // only an undifferentiated count in the change summary — which is why
-        // this went unnoticed for a week.
-        logger.error(
-          {
-            instance_id: instance.id,
-            entity_type: instance.entity_type,
-            entity_id: instance.entity_id,
-            step_order: insertPosition,
-            policy_step_id: d.newStep.id,
-            approver_source_type: d.newStep.approver_source_type,
-            approver_source_id: d.newStep.approver_source_id,
-          },
-          '[ApprovalPropagation] BLOCKED: a policy step was added to a live instance but resolves to no approvers. The approval cannot proceed until somebody holds that role in scope.'
-        );
-
-        await t.none(
-          `INSERT INTO tbl_approval_actions
-             (approval_instance_id, approval_instance_step_id, approver_user_id, action, comment)
-           VALUES ($1, $2, $3, 'STEP_ADDED', $4)`,
-          [
-            instance.id,
-            blockedStep.id,
-            instance.initiated_by,
-            `Step ${insertPosition} added by a policy change but resolves to no approver in this scope — approval is blocked here until the role is granted.`,
-          ]
-        );
-
-        result.stepsAdded.push({
-          step_order: insertPosition,
-          status: 'PENDING',
-          blocked: true,
-          reason: 'NO_APPROVERS_RESOLVED',
-        });
-      } else {
-        const newInstStep = await t.one(
-          `INSERT INTO tbl_approval_instance_steps
-           (approval_instance_id, step_order, decision_rule, status, policy_step_id, added_mid_flight)
-           VALUES ($1, $2, $3, 'PENDING', $4, true) RETURNING *`,
-          [instance.id, insertPosition, d.newStep.decision_rule || 'ANY', d.newStep.id]
-        );
-
-        for (const userId of newResolvedIds) {
-          const isInitiator = userId === instance.initiated_by;
-          const status = isInitiator ? 'APPROVED' : 'PENDING';
-          const comment = null;
-
-          await t.none(
-            `INSERT INTO tbl_approval_step_approvers
-             (approval_instance_step_id, approver_user_id, status, added_mid_flight, acted_at, comment)
-             VALUES ($1, $2, $3, true, $4, $5)`,
-            [newInstStep.id, userId, status, isInitiator ? new Date() : null, comment]
-          );
-
-          if (isInitiator) {
-            await t.none(
-              `INSERT INTO tbl_approval_actions
-               (approval_instance_id, approval_instance_step_id, approver_user_id, action, comment)
-               VALUES ($1, $2, $3, 'APPROVE', NULL)`,
-              [instance.id, newInstStep.id, userId]
-            );
-          }
-
-          result.approversAdded.push({ user_id: userId, step_order: insertPosition, auto_approved: isInitiator });
-        }
-
-        await t.none(
-          `INSERT INTO tbl_approval_actions
-           (approval_instance_id, approval_instance_step_id, approver_user_id, action, comment)
-           VALUES ($1, $2, $3, 'STEP_ADDED', 'Step added due to policy change')`,
-          [instance.id, newInstStep.id, changedBy]
-        );
-
-        result.stepsAdded.push({ step_order: insertPosition, status: 'PENDING', approverCount: newResolvedIds.length });
-      }
-    }
-
-    renumberOffset++;
+  // A closed step whose level a position pair replaced is history, not the new
+  // level's step: leave it out of the re-pointing, so it does not end up
+  // linked to the level its successor (the added step) now carries.
+  if (retiredStepIds.size > 0) {
+    result.stepOrigins = result.stepOrigins.filter(o => !retiredStepIds.has(o.instance_step_id));
   }
 
   return result;
@@ -1295,6 +1615,65 @@ export async function applyDiffToInstance(instance, diff, policy, changedBy, t) 
 // ============================================================================
 // SECTION 4: POLICY CHANGE PROPAGATION (MAIN ORCHESTRATOR)
 // ============================================================================
+
+/**
+ * Old policy step id → new policy step id for the levels a diff changed
+ * (STEP_MODIFIED / STEP_MOVED). Used only when the caller supplies no stepIdMap
+ * — then the old policy steps still exist, unchanged levels keep valid links,
+ * and only the changed levels need re-pointing.
+ */
+function stepIdMapFromDiff(diff) {
+  const map = new Map();
+  for (const d of diff) {
+    if ((d.type === 'STEP_MODIFIED' || d.type === 'STEP_MOVED') && d.oldStep?.id != null && d.newStep?.id != null) {
+      map.set(Number(d.oldStep.id), Number(d.newStep.id));
+    }
+  }
+  return map;
+}
+
+/**
+ * Map<old step_order, old policy step id> over EVERY old policy step, rebuilt
+ * after the old rows were deleted. A step in the diff carries its old row; a
+ * step absent from the diff was paired by identity with nothing changed —
+ * position included, or it would be STEP_MOVED — so its old step_order is its
+ * new row's step_order (`newOrderById`). Returns null (ordinal fallback
+ * disabled) if any of that cannot be established.
+ */
+function rebuildOldStepIdByOrder(diff, stepIdMap, newOrderById) {
+  const byOrder = new Map();
+  const inDiff = new Set();
+  for (const d of diff) {
+    if (!d.oldStep || d.oldStep.id == null) continue;
+    inDiff.add(Number(d.oldStep.id));
+    byOrder.set(stepOrderOf(d.oldStep), Number(d.oldStep.id));
+  }
+  for (const [oldId, newId] of stepIdMap) {
+    if (inDiff.has(Number(oldId))) continue;
+    const order = newOrderById.get(Number(newId));
+    if (order === undefined || byOrder.has(order)) return null;
+    byOrder.set(order, Number(oldId));
+  }
+  return byOrder;
+}
+
+/**
+ * Re-point instance steps at new policy step rows, by instance step id —
+ * confined to one instance, or to the pending instances of one policy.
+ */
+async function repointInstanceSteps(stepIds, newPolicyStepIds, t, { instanceId = null, policyId = null }) {
+  if (stepIds.length === 0) return;
+  await t.none(
+    `UPDATE tbl_approval_instance_steps ais
+        SET policy_step_id = m.new_policy_step_id
+       FROM unnest($1::int[], $2::int[]) AS m(instance_step_id, new_policy_step_id)
+      WHERE ais.id = m.instance_step_id
+        AND ($3::int IS NULL OR ais.approval_instance_id = $3)
+        AND ($4::int IS NULL OR ais.approval_instance_id IN (
+              SELECT id FROM tbl_approval_instances WHERE approval_policy_id = $4 AND status = 'PENDING'))`,
+    [stepIds, newPolicyStepIds, instanceId, policyId]
+  );
+}
 
 /**
  * Propagate a policy step diff to all PENDING instances that use this policy.
@@ -1306,11 +1685,32 @@ export async function applyDiffToInstance(instance, diff, policy, changedBy, t) 
  * @param {number} params.changedBy — user who made the policy change
  * @param {Object} params.policy — full policy row
  * @param {Object} params.t — transaction context
+ * @param {Map}    [params.instanceLinks] — snapshotPendingInstanceStepLinks(),
+ *        taken in this transaction BEFORE the old policy steps were deleted
+ * @param {Map}    [params.stepIdMap] — old policy step id → new policy step id
+ *        for EVERY paired level (pairPolicySteps). Drives the re-pointing of
+ *        every attributable instance step, changed by this edit or not.
  * @returns {Object} propagation summary
  */
-export async function propagatePolicyChangeToInstances({ policyId, diff, changedBy, policy, t }) {
+export async function propagatePolicyChangeToInstances({ policyId, diff, changedBy, policy, t, instanceLinks = null, stepIdMap = null }) {
   if (!diff || diff.length === 0) {
-    return { instancesAffected: 0, details: [] };
+    // Nothing about any level changed, but the save still deleted and
+    // re-inserted every policy step, NULLing every instance link through the
+    // FK. Put the captured links back so the next edit can still match by them.
+    let linksRestored = 0;
+    if (instanceLinks && stepIdMap) {
+      const stepIds = [];
+      const newIds = [];
+      for (const [instanceStepId, oldPolicyStepId] of instanceLinks) {
+        const newId = stepIdMap.get(oldPolicyStepId);
+        if (newId == null) continue;
+        stepIds.push(instanceStepId);
+        newIds.push(Number(newId));
+      }
+      await repointInstanceSteps(stepIds, newIds, t, { policyId });
+      linksRestored = stepIds.length;
+    }
+    return { instancesAffected: 0, details: [], linksRestored };
   }
 
   // Lock all PENDING instances for this policy (ascending ID to prevent deadlocks).
@@ -1331,6 +1731,21 @@ export async function propagatePolicyChangeToInstances({ policyId, diff, changed
     return { instancesAffected: 0, details: [] };
   }
 
+  const newStepIdFor = stepIdMap || stepIdMapFromDiff(diff);
+  // With the full old→new map the new policy is known end to end: read its
+  // rows (inserted in this transaction) for their step_order. That places
+  // added levels by their neighbours and rebuilds the old ordinal map.
+  let newOrderById = null;
+  let oldStepIdByOrder = null;
+  if (stepIdMap) {
+    const newRows = await t.any(
+      'SELECT id, step_order FROM tbl_approval_policy_steps WHERE approval_policy_id = $1',
+      [policyId]
+    );
+    newOrderById = new Map(newRows.map(r => [Number(r.id), Number(r.step_order)]));
+    oldStepIdByOrder = rebuildOldStepIdByOrder(diff, stepIdMap, newOrderById);
+  }
+
   const details = [];
   const allApproversAdded = [];
   const allApproversRemoved = [];
@@ -1346,23 +1761,27 @@ export async function propagatePolicyChangeToInstances({ policyId, diff, changed
       [instance.id]
     );
 
-    const instanceResult = await applyDiffToInstance(instance, diff, policy, changedBy, t);
+    const { stepOrigins, ...instanceResult } = await applyDiffToInstance(
+      instance, diff, policy, changedBy, t, { instanceLinks, oldStepIdByOrder, stepIdMap, newOrderById }
+    );
 
-    // Re-point policy_step_id on modified steps at the newly inserted policy
-    // step rows, BY INSTANCE STEP ID. applyDiffToInstance already resolved which
-    // instance step each diff entry belongs to (policy_step_id first, ordinal
-    // fallback); reusing that decision is the whole point. The previous form
-    // updated `WHERE step_order = <policy step_order>`, which wrote the new link
-    // onto whichever instance step shared the ordinal — actively corrupting the
-    // one column the reconciler depends on, on exactly the instances whose
-    // numbering had diverged.
-    for (const mod of instanceResult.stepsModified) {
-      await t.none(
-        `UPDATE tbl_approval_instance_steps SET policy_step_id = $1
-         WHERE id = $2 AND approval_instance_id = $3`,
-        [mod.new_policy_step_id, mod.instance_step_id, instance.id]
-      );
+    // Re-point EVERY instance step whose originating level is known at that
+    // level's new row, BY INSTANCE STEP ID — not only the steps this edit
+    // modified. The edit replaced every policy step row, so a step left out
+    // here would lose its link and every later reconciliation of it would have
+    // to guess. A removed level has no new row; its steps stay unlinked.
+    const stepsRelinked = [];
+    for (const { instance_step_id, policy_step_id } of stepOrigins) {
+      const newId = newStepIdFor.get(policy_step_id);
+      if (newId == null || Number(newId) === policy_step_id) continue;
+      stepsRelinked.push({ instance_step_id, from_policy_step_id: policy_step_id, to_policy_step_id: Number(newId) });
     }
+    await repointInstanceSteps(
+      stepsRelinked.map(r => r.instance_step_id),
+      stepsRelinked.map(r => r.to_policy_step_id),
+      t,
+      { instanceId: instance.id }
+    );
 
     // Update policy_version on instance
     await t.none(
@@ -1377,7 +1796,8 @@ export async function propagatePolicyChangeToInstances({ policyId, diff, changed
        VALUES ($1, NULL, $2)`,
       [instance.id, JSON.stringify({
         reason: 'policy_change',
-        ...instanceResult
+        ...instanceResult,
+        stepsRelinked
       })]
     );
 
@@ -1390,10 +1810,14 @@ export async function propagatePolicyChangeToInstances({ policyId, diff, changed
       steps_added: instanceResult.stepsAdded.length,
       steps_removed: instanceResult.stepsRemoved.length,
       rules_changed: instanceResult.rulesChanged.length,
+      steps_moved: instanceResult.stepsMoved.length,
       // Parts of the policy change this instance did not receive because no
       // instance step claimed them. Surfaced alongside the applied counts so a
       // partial reconciliation is visible in the propagation summary.
       unmatched_diff_entries: instanceResult.unmatchedDiffEntries.length,
+      // Steps this edit left PENDING with nobody able to approve them (an
+      // added or modified level that resolves to nobody here).
+      steps_blocked: [...instanceResult.stepsAdded, ...instanceResult.stepsModified].filter(r => r.blocked).length,
       auto_completed: instanceResult.autoCompleted
     });
 
@@ -1411,7 +1835,7 @@ export async function propagatePolicyChangeToInstances({ policyId, diff, changed
     `INSERT INTO tbl_approval_policy_change_log
      (approval_policy_id, changed_by, change_type, change_summary, affected_instance_ids)
      VALUES ($1, $2, 'POLICY_STEPS_CHANGED', $3, $4) RETURNING id`,
-    [policyId, changedBy, JSON.stringify({ diff: diff.map(d => ({ type: d.type, step_order: d.step_order })) }),
+    [policyId, changedBy, JSON.stringify({ diff: diff.map(summarizeDiffEntry) }),
      pendingInstances.map(i => i.id)]
   );
 
@@ -2410,7 +2834,12 @@ export async function handleAutoCompletedInstances(instanceIds, changedBy, reaso
 
 /**
  * Get pending instances that would be affected by a policy change.
- * Used by the preview endpoint.
+ * Used by the preview endpoint and the save-time APPROVAL_IMPACT_WARNING.
+ *
+ * Must select exactly the instances propagatePolicyChangeToInstances will
+ * touch — published RFQs are skipped there, so they are skipped here. A
+ * warning that counts an instance the save will never change is a false alarm
+ * the admin learns to click through.
  */
 export async function getPendingInstancesForPolicy(policyId) {
   return db.any(`
@@ -2420,6 +2849,7 @@ export async function getPendingInstancesForPolicy(policyId) {
       (SELECT COUNT(*) FROM tbl_approval_instance_steps WHERE approval_instance_id = ai.id) as total_steps
     FROM tbl_approval_instances ai
     WHERE ai.approval_policy_id = $1 AND ai.status = 'PENDING'
+    ${SKIP_PUBLISHED_RFQ_SQL}
     ORDER BY ai.created_at DESC
   `, [policyId]);
 }
@@ -2472,6 +2902,21 @@ export async function dispatchPropagationEmails(emailData, changedBy, changeReas
     const changedByUser = await db.oneOrNone('SELECT name FROM tbl_users WHERE id = $1', [changedBy]);
     const changedByName = changedByUser?.name || 'Administrator';
 
+    // Group ARC instances keep unit entity types; only their policy says "group".
+    const allIds = [...new Set([
+      ...(emailData.approversRemoved || []), ...(emailData.approversKeptApproved || []),
+      ...(emailData.approversAdded || []),
+    ].map(a => a.instance_id).filter(Boolean))];
+    const groupRows = allIds.length
+      ? await db.any(
+          `SELECT ai.id FROM tbl_approval_instances ai
+             JOIN tbl_approval_policies pol ON pol.id = ai.approval_policy_id
+            WHERE ai.id = ANY($1::int[]) AND pol.entity_type LIKE 'ARC\\_GROUP%'`,
+          [allIds])
+      : [];
+    const groupInstanceIds = new Set(groupRows.map(r => Number(r.id)));
+    const isGroupInst = (id) => groupInstanceIds.has(Number(id));
+
     // 1. Removal notifications
     if (emailData.approversRemoved?.length > 0) {
       const byInstance = {};
@@ -2489,7 +2934,7 @@ export async function dispatchPropagationEmails(emailData, changedBy, changeReas
           changedByName, changeReason,
           stepOrder: inst.step_order,
           approvers: inst.approvers,
-          extraContext: { rfq_id: metadata?.rfq_id || inst.entity_id }
+          extraContext: { rfq_id: metadata?.rfq_id || inst.entity_id, is_group: isGroupInst(inst.instance_id) }
         });
       }
     }
@@ -2511,7 +2956,7 @@ export async function dispatchPropagationEmails(emailData, changedBy, changeReas
           changedByName, changeReason,
           stepOrder: inst.step_order,
           approvers: inst.approvers,
-          extraContext: { rfq_id: metadata?.rfq_id || inst.entity_id }
+          extraContext: { rfq_id: metadata?.rfq_id || inst.entity_id, is_group: isGroupInst(inst.instance_id) }
         });
       }
     }
@@ -2541,7 +2986,7 @@ export async function dispatchPropagationEmails(emailData, changedBy, changeReas
             stepOrder: inst.step_order, totalSteps: parseInt(totalSteps.count),
             initiatorName: initiator?.name || 'Unknown',
             approvers: currentStepApprovers,
-            extraContext: { rfq_id: metadata?.rfq_id || inst.entity_id }
+            extraContext: { rfq_id: metadata?.rfq_id || inst.entity_id, is_group: isGroupInst(inst.instance_id) }
           });
         }
       }
@@ -2584,7 +3029,7 @@ export async function dispatchPropagationEmails(emailData, changedBy, changeReas
               stepsRemoved: 0, stepsAdded: 0, rulesChanged: 0
             },
             approvers: toNotify,
-            extraContext: { rfq_id: metadata?.rfq_id || instance.entity_id }
+            extraContext: { rfq_id: metadata?.rfq_id || instance.entity_id, is_group: isGroupInst(instanceId) }
           });
         }
       }

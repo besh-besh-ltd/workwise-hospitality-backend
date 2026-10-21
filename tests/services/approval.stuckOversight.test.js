@@ -135,6 +135,32 @@ describe("classifying what is stuck", () => {
     expect(row.entity_ref).not.toBe(String(rfqId));
   });
 
+  it("tells the screen whether the item belongs to a Group ARC (an RFQ never does)", async () => {
+    const { instanceId } = await seedRfqApproval({ bidOffsetMs: 7 * 86400_000 });
+    const client = await httpClient(ADMIN);
+    const row = rowFor((await client.get(STUCK_URL)).body, instanceId);
+    expect(row.is_group).toBe(false);
+  });
+
+  it("flags an instance on an ARC_GROUP_* policy as a Group ARC item", async () => {
+    const { instanceId } = await seedRfqApproval({ bidOffsetMs: 7 * 86400_000 });
+    const pol = await db.one(
+      `INSERT INTO tbl_approval_policies
+         (entity_type, hospitality_company_id, is_active, created_by, is_master)
+       VALUES ('ARC_GROUP_TECH', $1, true, $2, false) RETURNING id`,
+      [IDS.hospitality.A, IDS.users.companyA_admin]
+    );
+    try {
+      await db.none(`UPDATE tbl_approval_instances SET approval_policy_id = $1 WHERE id = $2`, [pol.id, instanceId]);
+      const client = await httpClient(ADMIN);
+      const row = rowFor((await client.get(STUCK_URL)).body, instanceId);
+      expect(row.is_group).toBe(true);
+    } finally {
+      await db.none(`UPDATE tbl_approval_instances SET approval_policy_id = $1 WHERE id = $2`, [IDS.policies.A1_P1_RFQ, instanceId]);
+      await db.none(`DELETE FROM tbl_approval_policies WHERE id = $1`, [pol.id]);
+    }
+  });
+
   it("calls it waiting when a live person could act right now", async () => {
     const { instanceId } = await seedRfqApproval({ bidOffsetMs: 7 * 86400_000 });
     const client = await httpClient(ADMIN);
