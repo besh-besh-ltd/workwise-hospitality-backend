@@ -8,6 +8,7 @@ import { notifyBuyerOnPersistenceViaEmail } from '../controllers/rfq/rfqControll
 import { PO_STATUSES } from '../util/constants.js';
 import rbacModel from './rbacModel.js';
 import { hasOpenVendorDisagreement } from './dashboard/dashboardMetrics.js';
+import { techStuckSql, bidWindowOpenSql, eligibleUnscoredResponderSql, techReopenedSql } from './techEvalStuck.js';
 import { buildApproverReadExemption } from '../services/authorizationService.js';
 import { collapsePickerRowsToPrincipals } from '../services/vendorNetwork/directInvites.js';
 import { lockLiveRfqAssignments, propagateRoutedCopies } from '../services/vendorNetwork/subjects/rfqRoutedCopies.js';
@@ -2875,13 +2876,14 @@ WHERE NOT EXISTS (
             )
         )
       ) AS has_dead_end_product,
-      -- has_tech_stuck_product: any product where tech eval exhausted all eligible vendors, none passed
+      -- has_tech_stuck_product: a product whose evaluation is blocked with nobody
+      -- passed, bidding closed and nobody left to evaluate (techEvalStuck.js — the
+      -- one predicate every screen shares; extending the deadline reopens it).
       (
         SELECT EXISTS (
           SELECT 1 FROM tbl_rfq_product_tech_evaluation _te_stuck
           WHERE _te_stuck.rfq_id = RFQ.id
-            AND _te_stuck.blocked_insufficient_vendors = TRUE
-            AND COALESCE(_te_stuck.total_passed_verified, 0) = 0
+            AND ${techStuckSql({ te: '_te_stuck', rfq: 'RFQ' })}
         )
       ) AS has_tech_stuck_product,
       -- has_tech_unstartable_product: the bid window has CLOSED and a product carries
@@ -3573,13 +3575,12 @@ LIMIT 1;`;
               )
           )
         ) AS is_dead_end
-        -- is_tech_stuck: this product has all vendors tech-failed, no replacements available
+        -- is_tech_stuck: this product's evaluation is stuck right now (techEvalStuck.js)
         ,(
           EXISTS (
             SELECT 1 FROM tbl_rfq_product_tech_evaluation _te_s
             WHERE _te_s.tbl_rfq_product_id = RFQ_P.id
-              AND _te_s.blocked_insufficient_vendors = TRUE
-              AND COALESCE(_te_s.total_passed_verified, 0) = 0
+              AND ${techStuckSql({ te: '_te_s', rfq: 'RFQ' })}
           )
         ) AS is_tech_stuck
 
@@ -4266,13 +4267,12 @@ LIMIT 2;
                 )
             )
           ) AS has_po_rejection,
-          -- has_tech_stuck_product: any product where tech eval exhausted all eligible vendors, none passed
+          -- has_tech_stuck_product: a product's evaluation is stuck right now (techEvalStuck.js)
           (
             SELECT EXISTS (
               SELECT 1 FROM tbl_rfq_product_tech_evaluation _te_stuck
               WHERE _te_stuck.rfq_id = RFQ.id
-                AND _te_stuck.blocked_insufficient_vendors = TRUE
-                AND COALESCE(_te_stuck.total_passed_verified, 0) = 0
+                AND ${techStuckSql({ te: '_te_stuck', rfq: 'RFQ' })}
             )
           ) AS has_tech_stuck_product,
           -- has_tech_unstartable_product: the bid window has CLOSED and a product carries
@@ -4868,8 +4868,7 @@ LIMIT 2;
           SELECT EXISTS (
             SELECT 1 FROM tbl_rfq_product_tech_evaluation _te_stuck
             WHERE _te_stuck.rfq_id = RFQ.id
-              AND _te_stuck.blocked_insufficient_vendors = TRUE
-              AND COALESCE(_te_stuck.total_passed_verified, 0) = 0
+              AND ${techStuckSql({ te: '_te_stuck', rfq: 'RFQ' })}
           )
         ) AS has_tech_stuck_product,
         (
@@ -5102,7 +5101,11 @@ LIMIT 2;
         SELECT rfq_id, status FROM tech_approval WHERE rn = 1
       ),
       -- Products where tech eval is done AND at least one vendor passed.
-      -- Excludes tech-stuck products (blocked_insufficient_vendors + zero passed).
+      -- Excludes every blocked product with nobody passed — deliberately NOT the
+      -- techStuckSql predicate. A REOPENED evaluation (blocked, is_complete reset
+      -- by a deadline extension) is not stuck while bidding is open or a new
+      -- vendor waits to be scored, but it has still cleared nobody: counting it
+      -- here would send a line with zero passed vendors to commercial evaluation.
       products_with_cleared AS (
         SELECT te.rfq_id, COUNT(DISTINCT te.tbl_rfq_product_id)::int AS products_cleared
         FROM tbl_rfq_product_tech_evaluation te
@@ -5131,13 +5134,17 @@ LIMIT 2;
           )
         GROUP BY te.rfq_id
       ),
-      -- Products where tech eval is stuck (all vendors failed, no replacements)
+      -- Products whose tech eval is stuck right now (techEvalStuck.js): blocked,
+      -- nobody passed, bidding closed, nobody left to evaluate. A reopened line
+      -- (deadline extended, or a new vendor waiting to be scored) is NOT here, so
+      -- it no longer counts as "evaluated" and the RFQ falls through to the
+      -- awaiting-quotes / evaluating stages instead of RFQ_STUCK_TECHNICAL.
       products_tech_stuck AS (
         SELECT te.rfq_id, COUNT(DISTINCT te.tbl_rfq_product_id)::int AS products_stuck
         FROM tbl_rfq_product_tech_evaluation te
+        JOIN tbl_rfq r_ts ON r_ts.id = te.rfq_id
         WHERE te.rfq_id = ANY($1::int[])
-          AND te.blocked_insufficient_vendors = true
-          AND COALESCE(te.total_passed_verified, 0) = 0
+          AND ${techStuckSql({ te: 'te', rfq: 'r_ts' })}
         GROUP BY te.rfq_id
       ),
       -- All evaluated products = cleared + stuck (used to determine if TE phase is "done")
@@ -5292,7 +5299,11 @@ LIMIT 2;
             AND pae.products_evaluated >= tepc.te_products
             AND COALESCE(pwc.products_cleared, 0) > 0
             THEN 'COMMERCIAL_EVALUATION'
-          -- Stage 5a-stuck: All TE products evaluated but ALL are stuck (zero cleared)
+          -- Stage 5a-stuck: All TE products evaluated but ALL are stuck (zero cleared).
+          -- "Stuck" is products_tech_stuck above, i.e. the shared techStuckSql
+          -- predicate — so it already requires the bid window to be closed and
+          -- nobody waiting to be evaluated. Extending the deadline therefore takes
+          -- the RFQ out of this stage without any rule of its own here.
           WHEN pae.products_evaluated IS NOT NULL AND tepc.te_products IS NOT NULL
             AND pae.products_evaluated >= tepc.te_products
             AND COALESCE(pwc.products_cleared, 0) = 0
@@ -15476,13 +15487,12 @@ ORDER BY tq.timestamp DESC;
               AND _po_link.status NOT IN ('rejected', 'rejected_by_vendor', 'cancelled')
           )
         ) AS has_pending_po_approval,
-        -- has_tech_stuck_product: any product where tech eval exhausted all eligible vendors, none passed
+        -- has_tech_stuck_product: a product's evaluation is stuck right now (techEvalStuck.js)
         (
           SELECT EXISTS (
             SELECT 1 FROM tbl_rfq_product_tech_evaluation _te_stuck
             WHERE _te_stuck.rfq_id = RFQ.id
-              AND _te_stuck.blocked_insufficient_vendors = TRUE
-              AND COALESCE(_te_stuck.total_passed_verified, 0) = 0
+              AND ${techStuckSql({ te: '_te_stuck', rfq: 'RFQ' })}
           )
         ) AS has_tech_stuck_product
       , -- has_tech_unstartable_product: the bid window has CLOSED and a product carries
@@ -17468,9 +17478,13 @@ ORDER BY tq.timestamp DESC;
   getTechEvalStatusByProductId: async (rfq_product_id, txContext = null) => {
     const dbContext = txContext || db;
 
-    // Get tech evaluation with product info
+    // Get tech evaluation with product info, and where it stands (techEvalStuck.js
+    // — the same predicate the listing, the lifecycle and the edit unlock use).
     const techEval = await dbContext.oneOrNone(
-      `SELECT te.*, rp.product_variant_id, rp.variant, pv.name AS product_name, r.rfq_no
+      `SELECT te.*, rp.product_variant_id, rp.variant, pv.name AS product_name, r.rfq_no,
+              ${techStuckSql({ te: 'te', rfq: 'r' })} AS is_stuck,
+              ${bidWindowOpenSql({ rfq: 'r' })} AS bid_window_open,
+              ${techReopenedSql({ te: 'te' })} AS reopened
        FROM tbl_rfq_product_tech_evaluation te
        JOIN tbl_rfq_products rp ON rp.id = te.tbl_rfq_product_id
        JOIN tbl_product_variant pv ON pv.id = rp.product_variant_id
@@ -17600,6 +17614,24 @@ ORDER BY tq.timestamp DESC;
       [techEval.id, techEval.rfq_id, techEval.product_variant_id, techEval.variant]
     );
 
+    // Vendors the buyer can evaluate in the next round: answered, quoted the
+    // line, no verdict yet. Unlike pending_evaluation above this leaves out
+    // vendors who answered but never quoted — they cannot be scored.
+    const eligibleUnscored = await dbContext.any(
+      `SELECT DISTINCT vr.vendor_id,
+              COALESCE(tc.company_name, tu.organization_name, tu.name) AS vendor_name
+         FROM tbl_rfq_product_tech_evaluation te
+         JOIN tbl_rfq_product_tech_evaluation_clauses c ON c.tbl_rfq_product_tech_evaluation_id = te.id
+         JOIN tbl_rfq_product_tech_evaluation_vendors_response vr
+           ON vr.tbl_rfq_product_tech_evaluation_clauses_id = c.id
+         JOIN tbl_users tu ON tu.id = vr.vendor_id
+         LEFT JOIN tbl_company tc ON tc.id = tu.company_id
+        WHERE te.id = $1
+          AND ${eligibleUnscoredResponderSql({ te: 'te', vendor: 'vr.vendor_id' })}
+        ORDER BY vr.vendor_id`,
+      [techEval.id]
+    );
+
     const latestRound = rounds.length > 0 ? rounds[rounds.length - 1] : null;
     let currentPendingApprovers = [];
 
@@ -17639,6 +17671,17 @@ ORDER BY tq.timestamp DESC;
       total_passed_verified: Math.max(actualPassedVerifiedCount, techEval.total_passed_verified || 0),
       required_passed_vendors: techEval.required_passed_vendors || 5,
       blocked_insufficient_vendors: techEval.blocked_insufficient_vendors || false,
+      // Additive (plan 2026-10-21). is_stuck: blocked, nobody passed, bidding
+      // closed, nobody left to evaluate — only a deadline extension (which
+      // reopens it) or closing the RFQ moves it. reopened: blocked but unlocked
+      // for another round. eligible_unscored_vendors: who that round can carry.
+      is_stuck: techEval.is_stuck === true,
+      bid_window_open: techEval.bid_window_open === true,
+      reopened: techEval.reopened === true,
+      eligible_unscored_vendors: eligibleUnscored.map((v) => ({
+        vendor_id: v.vendor_id,
+        vendor_name: v.vendor_name,
+      })),
       minimum_passing_score: techEval.minimum_passing_score,
       rounds: rounds.map(r => ({
         round_id: r.id,

@@ -11,6 +11,7 @@ import {
   normalizeErrors
 } from '../../helper/common.js';
 import rfqModel from '../../models/rfqModel.js';
+import { techStuckSql, bidWindowOpenSql } from '../../models/techEvalStuck.js';
 import { shapeRfqLifecycle } from '../../models/rfq/rfqLifecycleShaper.js';
 import userModel from '../../models/userModel.js';
 import { sendNotification, dispatch as dispatchNotification } from '../../services/notificationService.js';
@@ -4812,12 +4813,27 @@ const handleTechnicalPostApproval = async (approval_instance_id, approver_user_i
         // No more replacement vendors available — all eligible vendors
         // have been evaluated, so mark as complete even if the passed
         // count is below the configured threshold.
+        //
+        // Except while bidding is still open and nobody has passed: then
+        // "every eligible vendor has been evaluated" is not yet true — a vendor
+        // can still quote — and closing the evaluation here would leave that
+        // vendor unevaluable once the window shuts (not stuck, because they are
+        // waiting to be scored; yet every submit refused as already complete).
+        // Keep it open and blocked: the same state a deadline extension
+        // produces (reopenStuckTechEvals), handled by the same screens.
+        const { window_open: windowOpen } = await t.one(
+          `SELECT ${bidWindowOpenSql({ rfq: 'r' })} AS window_open FROM tbl_rfq r WHERE r.id = $1`,
+          [techEval.rfq_id]
+        );
+        const keepOpen = windowOpen === true && totalPassedVerified === 0;
         await rfqModel.updateTechEvalStatus(techEval.id, {
-          is_complete: true,
+          is_complete: !keepOpen,
           blocked_insufficient_vendors: true,
           total_passed_verified: totalPassedVerified
         }, t);
-        logger.info(`Tech evaluation ${techEval.id} complete (all eligible vendors evaluated, ${totalPassedVerified} passed)`);
+        logger.info(keepOpen
+          ? `Tech evaluation ${techEval.id} blocked with 0 passed; bidding still open, evaluation stays open`
+          : `Tech evaluation ${techEval.id} complete (all eligible vendors evaluated, ${totalPassedVerified} passed)`);
       }
     } else {
       // All vendors passed — if no failed vendors remain, all eligible
@@ -4834,6 +4850,73 @@ const handleTechnicalPostApproval = async (approval_instance_id, approver_user_i
     // Log but don't fail the transaction
     logError('Error handling TECHNICAL post-approval', techEvalError);
   }
+};
+
+const TECH_EVAL_REOPENED_REMARK = 'Technical evaluation reopened — bid deadline extended';
+
+/**
+ * Reopen tech-stuck evaluations after the RFQ's bid deadline was extended.
+ *
+ * Called by `update` inside its transaction, AFTER the new bid_end_date has
+ * been written, with the evaluations that were tech-stuck BEFORE the edit (the
+ * predicate cannot be re-read afterwards: an open window is, by definition,
+ * not stuck).
+ *
+ * Only the lock lifts. blocked_insufficient_vendors, current_round,
+ * total_passed_verified and every approved verdict (cleared_vendors rows,
+ * APPROVED rounds) stay exactly as they were: the next round is numbered
+ * MAX(round_number) + 1 by startApprovalForTechEval and carries only vendors
+ * with no verified verdict, so round 1's failures are neither re-judged nor
+ * lost.
+ *
+ * Re-checks the window on the written row, in IST, so a deadline that is not
+ * actually in the future (or one stored in a shape the predicate reads as
+ * closed) reopens nothing.
+ *
+ * @returns {Promise<Array<{id:number, tbl_rfq_product_id:number}>>} reopened evaluations
+ */
+const reopenStuckTechEvals = async (t, { rfqId, techEvalIds, userId, editSessionId, previousBidEndDate }) => {
+  if (!techEvalIds || techEvalIds.length === 0) return [];
+
+  const reopened = await t.any(
+    `UPDATE tbl_rfq_product_tech_evaluation te
+        SET is_complete = FALSE
+       FROM tbl_rfq r
+      WHERE te.id = ANY($1::int[])
+        AND te.rfq_id = $2
+        AND r.id = te.rfq_id
+        AND te.blocked_insufficient_vendors = TRUE
+        AND COALESCE(te.total_passed_verified, 0) = 0
+        AND ${bidWindowOpenSql({ rfq: 'r' })}
+      RETURNING te.id, te.tbl_rfq_product_id, r.bid_end_date`,
+    [techEvalIds, rfqId]
+  );
+
+  for (const te of reopened) {
+    await recordLifecycleEvent({
+      entity_type: 'TECHNICAL',
+      entity_id: te.tbl_rfq_product_id,
+      stage: 'REOPENED',
+      action: 'REOPEN',
+      performed_by: userId,
+      remarks: TECH_EVAL_REOPENED_REMARK,
+      metadata: {
+        rfq_id: rfqId,
+        rfq_product_id: te.tbl_rfq_product_id,
+        tech_evaluation_id: te.id,
+        reason: 'BID_DEADLINE_EXTENDED',
+        previous_bid_end_date: previousBidEndDate ?? null,
+        bid_end_date: te.bid_end_date,
+        edit_session_id: editSessionId,
+      },
+      txContext: t,
+    });
+  }
+
+  if (reopened.length > 0) {
+    logger.info({ rfqId, techEvalIds: reopened.map((r) => r.id) }, TECH_EVAL_REOPENED_REMARK);
+  }
+  return reopened.map(({ id, tbl_rfq_product_id }) => ({ id, tbl_rfq_product_id }));
 };
 
 /**
@@ -6572,15 +6655,20 @@ const rfqController = {
           LIMIT 1
         `, [rfq_id]));
 
-        // 1d. Check for tech-eval-stuck products — allows restricted editing
-        //     (only bid_end_date + vendor refresh) when all vendors failed tech eval.
-        const hasTechStuckProduct = !!(await t.oneOrNone(`
-          SELECT 1 FROM tbl_rfq_product_tech_evaluation te_stuck
-          WHERE te_stuck.rfq_id = $1
-            AND te_stuck.blocked_insufficient_vendors = TRUE
-            AND COALESCE(te_stuck.total_passed_verified, 0) = 0
-          LIMIT 1
-        `, [rfq_id]));
+        // 1d. Tech-eval-stuck products — allows restricted editing (only
+        //     bid_end_date + vendor refresh). Stuck is the shared predicate
+        //     (techEvalStuck.js): blocked, nobody passed, bidding closed, nobody
+        //     left to evaluate. Read BEFORE the edit is applied: these are the
+        //     evaluations a deadline extension reopens in step 6b.
+        const techStuckEvals = await t.any(`
+          SELECT te_stuck.id, te_stuck.tbl_rfq_product_id
+            FROM tbl_rfq_product_tech_evaluation te_stuck
+            JOIN tbl_rfq r_stuck ON r_stuck.id = te_stuck.rfq_id
+           WHERE te_stuck.rfq_id = $1
+             AND ${techStuckSql({ te: 'te_stuck', rfq: 'r_stuck' })}
+           ORDER BY te_stuck.id
+        `, [rfq_id]);
+        const hasTechStuckProduct = techStuckEvals.length > 0;
 
         // 1e. Check for tech-eval-UNSTARTABLE products — the bid window has closed
         //     and a product carrying technical clauses has a real (non-regret) quote
@@ -6769,6 +6857,21 @@ const rfqController = {
 
         const allHistory = [...rfqHistory, ...productHistory, ...termsHistory, ...termFilesHistory];
 
+        // 6b. A deadline extension reopens every tech-stuck evaluation on the RFQ
+        //     (RFQ #536894: the client extended, and nothing reopened, because
+        //     nothing anywhere ever reset is_complete). Same transaction as the
+        //     edit, so the deadline and the reopen land together or not at all.
+        const bidEndChange = diff.rfqFields.find((f) => f.field_name === 'bid_end_date');
+        const reopenedTechEvals = bidEndChange && techStuckEvals.length > 0
+          ? await reopenStuckTechEvals(t, {
+            rfqId: rfq_id,
+            techEvalIds: techStuckEvals.map((te) => te.id),
+            userId,
+            editSessionId,
+            previousBidEndDate: bidEndChange.old_value,
+          })
+          : [];
+
         // 7. Record history rows
         if (allHistory.length > 0) {
           await rfqHistoryModel.recordChanges(
@@ -6807,7 +6910,10 @@ const rfqController = {
             edit_session_id: editSessionId,
             material: hasMaterialChange,
             field_count: allHistory.length,
-            reapproval: reapprovalResult || null
+            reapproval: reapprovalResult || null,
+            ...(reopenedTechEvals.length > 0
+              ? { tech_evaluations_reopened: reopenedTechEvals.map((te) => te.id) }
+              : {})
           },
           txContext: t
         });

@@ -21,6 +21,7 @@ import {
 } from './dashboard/dashboardMetrics.js';
 import negotiationModel from './negotiationModel.js';
 import rfqModel from './rfqModel.js';
+import { techStuckSql } from './techEvalStuck.js';
 import { isCompanyAdmin } from '../middleware/companyAdmin.js';
 
 /**
@@ -1853,7 +1854,10 @@ async function getMyRfqsBidClosedNoQuotesData(buyer_company_id, user_id, hotel_i
 //   · bid window closed — before that the quotes are sealed;
 //   · at least one real quote — otherwise there is nothing to evaluate;
 //   · no live PO on the product — it was already awarded;
-//   · not already submitted — no PENDING TECHNICAL approval for the product.
+//   · not already submitted — no PENDING TECHNICAL approval for the product;
+//   · not tech-stuck (techEvalStuck.js) — a deadline extension reopens a stuck
+//     evaluation (is_complete back to false), and if bidding then closes with
+//     nobody new to score there is still nothing here to act on.
 // On prod this cut 212 open rows to the ≤78 that are actually actionable.
 async function getMyTechEvalsPendingData(buyer_company_id, user_id, hotel_ids) {
   if (!hotel_ids || hotel_ids.length === 0) {
@@ -1884,6 +1888,7 @@ async function getMyTechEvalsPendingData(buyer_company_id, user_id, hotel_ids) {
              AND ti.status = 'PENDING'
              AND (ti.metadata->>'rfq_product_id') = te.tbl_rfq_product_id::text
         )
+        AND NOT ${techStuckSql({ te: 'te', rfq: 'r' })}
         AND ${rfqMapped('r', 2)}
         ${sc}
       ORDER BY r.bid_end_date::timestamp ASC, te.id

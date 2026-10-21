@@ -43,7 +43,11 @@ import { directInviteIdsForLine } from '../../services/vendorNetwork/directInvit
  * Three flags unlock step 4 once the window has closed, and they answer three
  * different questions — do not collapse them:
  *   hasDeadEndProduct         all eligible vendors' POs were rejected
- *   hasTechStuckProduct       technical evaluation RAN and every vendor failed
+ *   hasTechStuckProduct       technical evaluation RAN, nobody passed, bidding is
+ *                             closed and nobody is left to evaluate — computed
+ *                             by the caller with techStuckSql (models/
+ *                             techEvalStuck.js), the predicate every screen
+ *                             shares. Extending the deadline reopens it.
  *   hasTechUnstartableProduct technical evaluation never STARTED — clauses exist
  *                             and a quote line exists, but nobody answered, so
  *                             no vendor can be scored and no quote can ever
