@@ -200,10 +200,48 @@ export async function executePoApprovalAtomically(
 }
 
 /**
+ * This approver's own, already-committed rejection of this instance, or null.
+ * What stands is read back from the send-back the rejection wrote (route and
+ * reason), so a retry reports the original outcome, not the retry's request.
+ */
+async function ownRejection(t, { poId, instanceId, userId }) {
+  const row = await t.oneOrNone(
+    `SELECT a.id AS action_id,
+            sb.id AS send_back_id, sb.route, sb.reason_category
+       FROM tbl_approval_actions a
+       LEFT JOIN LATERAL (
+         SELECT s.id, s.route, s.reason_category
+           FROM tbl_po_send_backs s
+          WHERE s.purchase_order_id = $1 AND s.approval_instance_id = $2
+            AND s.requested_by = $3 AND s.route <> 'INFO_REQUEST'
+          ORDER BY s.id DESC LIMIT 1
+       ) sb ON TRUE
+      WHERE a.approval_instance_id = $2 AND a.approver_user_id = $3 AND a.action = 'REJECT'
+      ORDER BY a.id DESC LIMIT 1`,
+    [poId, instanceId, userId]
+  );
+  if (!row) return null;
+  return {
+    send_back_id: row.send_back_id ?? null,
+    route: row.route ?? null,
+    reason_category: row.reason_category ?? null,
+    result: {
+      status: 'REJECTED',
+      instance_status: 'REJECTED',
+      message: 'Already rejected, no action taken',
+      already_completed: true,
+    },
+  };
+}
+
+/**
  * A PO rejection as one unit, on the caller's transaction.
  *
  * In order, all on `t`:
- *   0. lock the PO row (then submitApprovalAction locks the instance)
+ *   0. lock the PO row, then the approval instance; refuse (409) unless the
+ *      instance is the PO's current one (INSTANCE_NOT_CURRENT), still PENDING
+ *      (STEP_NOT_PENDING) and the PO is pending_approval
+ *      (PO_NOT_PENDING_APPROVAL)
  *   1. the decision (REJECT)
  *   2. PO status 'rejected', or 'cancelled' for the CANCEL route
  *   3. the vendor-scoped de-finalization (handlePORejectionByInstance)
@@ -213,9 +251,11 @@ export async function executePoApprovalAtomically(
  * Any failure throws and the caller's transaction rolls ALL of it back.
  * Nothing is sent from here; see rejectPurchaseOrder for the post-commit side.
  *
- * A decision the engine reports as already taken (the instance is no longer
- * PENDING, or this approver already rejected it) changes nothing and comes back
- * with `alreadyCompleted: true`.
+ * The only non-PENDING instance that answers success is this approver's own
+ * earlier rejection of it (a retry): nothing changes, and it comes back with
+ * `alreadyCompleted: true` and `standing` = the route and reason that stand.
+ * Every other concluded instance (approved first by someone else, cancelled)
+ * is a PoDecisionError 409 STEP_NOT_PENDING.
  *
  * @param {Object} args
  * @param {number} args.poId
@@ -227,7 +267,7 @@ export async function executePoApprovalAtomically(
  *   refused unless it is the PO's current one
  * @param {number} [args.approvalInstanceStepId]
  * @param {Object} t - pg-promise transaction
- * @returns {Promise<{po:Object, sendBackId:number|null, result:Object, alreadyCompleted:boolean}>}
+ * @returns {Promise<{po:Object, sendBackId:number|null, result:Object, alreadyCompleted:boolean, standing?:Object}>}
  */
 export async function executePoRejectionAtomically(
   { poId, user, comment = '', reasonCategory, route, approvalInstanceId = null, approvalInstanceStepId = null },
@@ -240,22 +280,53 @@ export async function executePoRejectionAtomically(
   const po = await lockPo(t, poId);
   if (!po) throw new PoDecisionError('Purchase order not found.', { code: 'PO_NOT_FOUND', httpStatus: 404 });
   // The instance acted on: the caller's (generic card) or the PO's current one
-  // (PO page). A caller holding an instance the PO has since moved off (an
-  // edit re-initiated it) is refused rather than allowed to reject the PO
-  // through a superseded approval.
-  if (approvalInstanceId && po.approval_instance_id && Number(approvalInstanceId) !== Number(po.approval_instance_id)) {
+  // (PO page). It must BE the PO's current one: a PO with no approval, or one
+  // that has moved on to another instance (an edit re-initiated it), is not
+  // rejected through a superseded approval.
+  const instanceId = approvalInstanceId == null ? Number(po.approval_instance_id) : Number(approvalInstanceId);
+  if (po.approval_instance_id == null || !Number.isInteger(instanceId) || instanceId !== Number(po.approval_instance_id)) {
     throw new PoDecisionError(
-      'This approval is no longer the one in progress for the purchase order. Refresh and try again.',
+      'This approval is no longer the one in progress for the purchase order. Refresh to see where it stands.',
+      { code: 'INSTANCE_NOT_CURRENT', httpStatus: 409 }
+    );
+  }
+
+  // Lock order: PO (above), then the instance. submitApprovalAction re-takes
+  // the same row lock below, which is a no-op inside one transaction.
+  const instance = await t.oneOrNone(
+    `SELECT id, status FROM tbl_approval_instances WHERE id = $1 AND entity_type = 'PO' FOR UPDATE`,
+    [instanceId]
+  );
+  if (!instance) {
+    throw new PoDecisionError(
+      'This approval is no longer the one in progress for the purchase order. Refresh to see where it stands.',
+      { code: 'INSTANCE_NOT_CURRENT', httpStatus: 409 }
+    );
+  }
+  if (instance.status !== 'PENDING') {
+    // A retry of this approver's own rejection (double-click, refresh) is the
+    // one case that answers success: nothing changes and what stands is
+    // reported back. Anything else (another approver approved first, the
+    // approval was cancelled) is a refusal; answering 200 there told the
+    // approver, and the activity trail, that a PO now approved was rejected.
+    const own = instance.status === 'REJECTED'
+      ? await ownRejection(t, { poId: po.id, instanceId, userId: user.id })
+      : null;
+    if (own) return { po, sendBackId: own.send_back_id, result: own.result, alreadyCompleted: true, standing: own };
+    throw new PoDecisionError(
+      `This purchase order's approval is already ${instance.status.toLowerCase()}, so your rejection was not recorded. Refresh to see where it stands.`,
       { code: 'STEP_NOT_PENDING', httpStatus: 409 }
     );
   }
-  const instanceId = Number(approvalInstanceId || po.approval_instance_id);
-  if (!instanceId) {
-    throw new PoDecisionError('This purchase order has no approval in progress.', { code: 'STEP_NOT_PENDING', httpStatus: 409 });
+  if (po.status !== 'pending_approval') {
+    throw new PoDecisionError(
+      `This purchase order is ${po.status.replace(/_/g, ' ')}, not waiting for approval, so it cannot be rejected. Refresh to see where it stands.`,
+      { code: 'PO_NOT_PENDING_APPROVAL', httpStatus: 409 }
+    );
   }
   const text = comment == null ? '' : String(comment);
 
-  // 1. The decision. Locks the instance (after the PO, above).
+  // 1. The decision, on the instance locked above.
   const result = await submitApprovalAction(
     {
       approval_instance_id: instanceId,
@@ -266,7 +337,15 @@ export async function executePoRejectionAtomically(
     },
     t
   );
-  if (result.already_completed) return { po, sendBackId: null, result, alreadyCompleted: true };
+  // The instance is PENDING and locked, so the engine cannot report it
+  // concluded; its approver-level "already submitted" is the only way here,
+  // and it is not a rejection that happened now.
+  if (result.already_completed) {
+    throw new PoDecisionError(
+      `${result.message || 'This decision was already recorded'}. Refresh to see where it stands.`,
+      { code: 'STEP_NOT_PENDING', httpStatus: 409 }
+    );
+  }
   if (result.instance_status !== 'REJECTED') {
     throw new Error(`PO ${poId}: REJECT left the approval ${result.instance_status}`);
   }
@@ -358,10 +437,15 @@ export async function rejectPurchaseOrder(
     });
   }
 
+  // A retry reports what stands (the first rejection's route and reason), not
+  // what the retry asked for.
+  const route_ = out.alreadyCompleted ? (out.standing?.route || decision.route) : decision.route;
+  const reason_ = out.alreadyCompleted ? (out.standing?.reason_category || decision.reasonCategory) : decision.reasonCategory;
+
   logger.info(
-    { poId, route: decision.route, reasonCategory: decision.reasonCategory, alreadyCompleted: out.alreadyCompleted },
-    'PO rejection committed'
+    { poId, route: route_, reasonCategory: reason_, alreadyCompleted: out.alreadyCompleted },
+    out.alreadyCompleted ? 'PO rejection retry: already rejected by this approver' : 'PO rejection committed'
   );
 
-  return { ...out, route: decision.route, reasonCategory: decision.reasonCategory };
+  return { ...out, route: route_, reasonCategory: reason_ };
 }

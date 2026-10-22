@@ -5325,13 +5325,6 @@ LIMIT 2;
           -- Stage 8b: PO Rejected by Vendor (all POs rejected, none active)
           WHEN pvr.rfq_id IS NOT NULL
             THEN 'PO_VENDOR_REJECTED'
-          -- Stage 8c: PO Rejected by an internal approver, product not yet
-          -- re-awarded. Ordering is deliberate and tested
-          -- (rfq.lifecycle.poRejected): a live sibling PO still in approval
-          -- wins (PO_APPROVAL above), and a vendor rejection is reported first
-          -- because the vendor's refusal is the older, outward-facing fact.
-          WHEN par.rfq_id IS NOT NULL
-            THEN 'PO_REJECTED'
           -- Stage 8: Awaiting PO Initiation (all products have approved quotes AND none pending)
           WHEN nqa.approved_products IS NOT NULL
             AND pc.total_products IS NOT NULL
@@ -5344,6 +5337,17 @@ LIMIT 2;
           -- Stage 6: Negotiation Ongoing
           WHEN an.rfq_id IS NOT NULL
             THEN 'NEGOTIATION_ONGOING'
+          -- Stage 5z: PO Rejected by an internal approver, product not yet
+          -- re-awarded. Ordering is deliberate and tested
+          -- (rfq.lifecycle.poRejected), ruling R23: it ranks BELOW the work a
+          -- re-award is made of, so the stage names whoever owns the next step
+          -- — a sibling PO still in approval (PO_APPROVAL), a vendor's refusal
+          -- (PO_VENDOR_REJECTED, unchanged), the re-award's own award approval
+          -- (QUOTATION_APPROVAL) or negotiation round (NEGOTIATION_ONGOING).
+          -- The list card's "PO rejected" marker is independent of the stage,
+          -- so the rejection stays visible meanwhile.
+          WHEN par.rfq_id IS NOT NULL
+            THEN 'PO_REJECTED'
           -- Stage 5a: Commercial Evaluation (TE flow — all TE-configured products have been evaluated,
           -- whether cleared or stuck. Some products may be stuck but the cleared ones can proceed.)
           WHEN pae.products_evaluated IS NOT NULL AND tepc.te_products IS NOT NULL

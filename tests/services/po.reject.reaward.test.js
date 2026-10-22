@@ -93,6 +93,29 @@ describe("re-award after a PO rejection", () => {
     expect(asVendor.body.detail?.replaces).toBeUndefined();
   });
 
+  it("links a draft the re-award is MERGED into, when it traces nothing yet", async () => {
+    // P1 awarded to A and rejected; P2 awarded to B (a draft tracing nothing);
+    // then P1 re-awarded to B merges into that same draft and links it.
+    const staged = await world.stageRfq({ products: 2, vendors: [W.VENDOR_A, W.VENDOR_B] });
+    const [p1, p2] = staged.products;
+    const poA = (await world.award(staged, p1, [W.VENDOR_A])).pos[0].id;
+    await world.initiate(poA);
+    expect((await world.rejectOnPoPage(poA, { remarks: "late", reason_category: "RENEGOTIATE" })).status).toBe(200);
+
+    const draftB = (await world.award(staged, p2, [W.VENDOR_B])).pos[0].id;
+    expect((await db.one(`SELECT replaces_po_id FROM tbl_rfq_purchase_order WHERE id = $1`, [draftB])).replaces_po_id)
+      .toBeNull();
+
+    const merged = await world.award(staged, p1, [W.VENDOR_B]);
+    expect(merged.pos.map((p) => p.id)).toEqual([draftB]);
+    const lines = await db.any(
+      `SELECT rfq_product_id FROM tbl_purchase_order_product WHERE purchase_order_id = $1 ORDER BY rfq_product_id`,
+      [draftB]);
+    expect(lines.map((l) => Number(l.rfq_product_id))).toEqual([Number(p1.id), Number(p2.id)].sort((x, y) => x - y));
+    expect((await db.one(`SELECT replaces_po_id FROM tbl_rfq_purchase_order WHERE id = $1`, [draftB])).replaces_po_id)
+      .toBe(poA);
+  });
+
   it("never hands a vendor replaces_po_id: accept, PO detail, Order Book, existing drafts", async () => {
     const a = await pendingPoWithAlternative();
     expect((await world.rejectOnPoPage(a.poId, { remarks: "late", reason_category: "RENEGOTIATE" })).status).toBe(200);

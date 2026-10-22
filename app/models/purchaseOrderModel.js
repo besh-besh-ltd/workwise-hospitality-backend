@@ -943,7 +943,9 @@ export const draftPurchaseOrder = async (rfq_id, project_id, quote_item_id, tota
       // Re-award trace: a draft that awards a product again after an approver
       // rejected its PO points at that rejected PO, so the next approver can
       // see why the first one was turned down. Latest rejected PO on this RFQ
-      // sharing the product; a merge keeps whatever the draft already traces.
+      // sharing the product. Set when first linked (create or merge): a line
+      // merged into an existing draft links that draft if it traces nothing
+      // yet; a draft that already traces a rejected PO keeps it.
       await t.none(
         `UPDATE tbl_rfq_purchase_order
             SET replaces_po_id = (

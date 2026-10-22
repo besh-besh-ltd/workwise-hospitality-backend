@@ -97,7 +97,7 @@ import { quoteGateApplies, assertOrgMayQuote, assertOrgMayClarify, memberRfqAssi
 import { lockLiveRfqAssignments, propagateRoutedCopiesLocked } from '../../services/vendorNetwork/subjects/rfqRoutedCopies.js';
 import { directInviteIdsForLine } from '../../services/vendorNetwork/directInvites.js';
 import { NetworkHttpError } from '../../services/vendorNetwork/guards.js';
-import { poFieldsFor } from '../../services/po/buyerOnlyPoFields.js';
+import { poFieldsFor, isVendorOrTokenViewer } from '../../services/po/buyerOnlyPoFields.js';
 
 /** A Vendor Networks quote-gate refusal as its HTTP answer body. */
 const networkRefusalBody = (err) => ({ status: 0, message: err.message, ...(err.reason ? { reason: err.reason } : {}) });
@@ -8810,9 +8810,16 @@ const rfqController = {
       //   joined via the PO's approval_instance_id.
       // Shared with the RFQ listing card (rfqModel.getLivePoRejectionsForRfqs)
       // so the re-award modal and the card cannot disagree about what counts.
-      const rejectionsP = Promise.resolve()
-        .then(() => rfqModel.getLivePoRejectionsForRfqs([rfqData.id]))
-        .catch((err) => { logError('Error fetching PO rejections for RFQ', err); return []; });
+      //
+      // BUYERS ONLY. This route also serves vendors (JWT and emailed-link
+      // token), and the rows name every vendor whose PO was rejected, why,
+      // and by whom. A vendor gets an empty list, and the query is not run.
+      const buyerOnlyHidden = isVendorOrTokenViewer(req.user);
+      const rejectionsP = buyerOnlyHidden
+        ? null
+        : Promise.resolve()
+          .then(() => rfqModel.getLivePoRejectionsForRfqs([rfqData.id]))
+          .catch((err) => { logError('Error fetching PO rejections for RFQ', err); return []; });
 
       // Attach close reason when RFQ is closed
       const closeCommentP = (rfqData && String(rfqData.status) === '2')
@@ -8846,7 +8853,7 @@ const rfqController = {
         rfqData.commercial_evaluators = [];
         rfqData.po_initiators = [];
       }
-      rfqData.vendor_rejections = rejections;
+      rfqData.vendor_rejections = buyerOnlyHidden ? [] : rejections;
       if (closeCommentP) rfqData.close_comment = closeComment;
 
       // Add tender payment status for vendor viewers (sourced from main query)
@@ -9390,12 +9397,17 @@ const rfqController = {
 
       // 8a. Heavy per-card columns (flags, counts, vendors json, can_edit),
       //     for this page only, in the same round trip as the 8b rejections.
+      // The rejection marker names vendors and approvers' reasons: buyers
+      // only. The route admits any signed-in user and a vendor's scope matches
+      // no rows today, but the marker does not rely on that.
       const [cardDetails, pageRejections] = await Promise.all([
         rfqModel.getRfqListViewCardDetails(pageRows.map((r) => r.id), user_id),
-        rfqModel.getLivePoRejectionsForRfqs(pageRows.map((r) => r.id)).catch((rejErr) => {
-          logError('getRfqListView: could not load PO rejections for the page', rejErr);
-          return [];
-        }),
+        isVendorOrTokenViewer(req.user)
+          ? []
+          : rfqModel.getLivePoRejectionsForRfqs(pageRows.map((r) => r.id)).catch((rejErr) => {
+            logError('getRfqListView: could not load PO rejections for the page', rejErr);
+            return [];
+          }),
       ]);
       for (const r of pageRows) Object.assign(r, cardDetails[Number(r.id)] || {});
 

@@ -48,11 +48,13 @@ jest.unstable_mockModule("../../app/models/generalModel.js", () => ({
 // The PO path runs inside a transaction it owns. `conn.tx(fn)` here just runs
 // the body — the real rollback semantics are covered against Postgres in
 // po.approvalDocumentAtomicity.test.js and po.reject.atomic.test.js; this suite
-// is about ordering. The transaction answers the PO-row lock and the two reads
-// the rejection makes with canned rows.
+// is about ordering. The transaction answers the PO-row lock, the instance
+// lock and the reads the rejection makes with canned rows.
 const fakeTx = {
   __tx: true,
-  oneOrNone: async () => ({ id: 483, approval_instance_id: 4218, status: "pending_approval", rfq_id: 7, po_number: "483" }),
+  oneOrNone: async (sql) => (/FROM tbl_approval_instances/.test(sql)
+    ? { id: 4218, status: "PENDING" }
+    : { id: 483, approval_instance_id: 4218, status: "pending_approval", rfq_id: 7, po_number: "483" }),
   one: async (sql) => (/INSERT INTO tbl_po_send_backs/.test(sql) ? { id: 1 } : { approval_instance_step_id: 1, step_order: 1 }),
   none: async () => {},
 };

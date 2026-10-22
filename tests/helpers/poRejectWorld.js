@@ -94,6 +94,7 @@ export function makePoRejectWorld(db) {
       await db.none(`UPDATE tbl_rfq_purchase_order SET replaces_po_id = NULL WHERE id = ANY($1::int[])`, [poIds]);
       await cleanupPurchaseOrders(db, poIds);
     }
+    await db.none(`DELETE FROM tbl_negotiation_rounds WHERE rfq_id = ANY($1::int[])`, [ids]);
     await db.none(`DELETE FROM tbl_lifecycle_history WHERE entity_type IN ('RFQ','TENDER') AND entity_id = ANY($1::int[])`, [ids]);
     await db.none(`DELETE FROM tbl_quote_finalization WHERE rfq_id = ANY($1::int[])`, [ids]);
     await db.none(`DELETE FROM tbl_quote_finalization_history WHERE rfq_id = ANY($1::int[])`, [ids]);
@@ -155,12 +156,11 @@ export function makePoRejectWorld(db) {
   }
 
   /**
-   * Award `product` to `vendors`: COMM_EVAL (or `raisedBy`) raises the award
-   * approval, COMM_APP approves it over HTTP. Whoever raised it becomes the
-   * drafted PO's creator. Returns the PO ids drafted for that product.
+   * Raise the award approval (NEGOTIATION_QUOTE) for `product` to `vendors`
+   * and leave it PENDING: the RFQ is in award approval for that product.
    */
-  async function award(staged, product, vendors, { raisedBy = W.COMM_EVAL } = {}) {
-    const approval = await createApprovalInstance({
+  async function raiseAward(staged, product, vendors, { raisedBy = W.COMM_EVAL } = {}) {
+    return createApprovalInstance({
       entity_type: "NEGOTIATION_QUOTE", entity_id: product.id,
       hospitality_company_id: IDS.hospitality.A, hotel_id: IDS.hotels.A1, department_id: null,
       process_id: IDS.processes.A_P1, initiated_by: raisedBy,
@@ -169,6 +169,15 @@ export function makePoRejectWorld(db) {
         selected_quotes: vendors.map((v) => ({ quote_id: staged.quotes[v], vendor_id: v, quoted_price: 500 })),
       },
     });
+  }
+
+  /**
+   * Award `product` to `vendors`: COMM_EVAL (or `raisedBy`) raises the award
+   * approval, COMM_APP approves it over HTTP. Whoever raised it becomes the
+   * drafted PO's creator. Returns the PO ids drafted for that product.
+   */
+  async function award(staged, product, vendors, { raisedBy = W.COMM_EVAL } = {}) {
+    const approval = await raiseAward(staged, product, vendors, { raisedBy });
     const res = await (await client(W.COMM_APP)).post(`/api/v1/negotiation/quotes/${product.id}/approve`).send({});
     expect(res.status).toBe(200);
     const pos = await db.any(
@@ -235,7 +244,7 @@ export function makePoRejectWorld(db) {
   }
 
   return {
-    setup, teardown, cleanup, client, stageRfq, award, initiate, pendingPo, currentStepId,
+    setup, teardown, cleanup, client, stageRfq, raiseAward, award, initiate, pendingPo, currentStepId,
     rejectOnPoPage, rejectOnApprovalCard, approveOnPoPage,
   };
 }
