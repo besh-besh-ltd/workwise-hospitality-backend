@@ -43,6 +43,7 @@ import {
 import { effectiveApproverStatus } from './poDashboardModel.js';
 import { getRfqPoCoverage, classifyInitiateKind, canInitiateOnRfq } from './po/poInitiateGuide.js';
 import { generateEmailLinkToken } from '../helper/emailLinkToken.js';
+import { instanceNotHeldSql } from '../services/po/poHold.js';
 
 
 // A bare (optionally schema-qualified) SQL identifier. Table names reaching
@@ -5587,6 +5588,8 @@ LIMIT 2;
               AND ai.status = 'PENDING'
               AND metadata->>'rfq_id' IS NOT NULL
               AND (ai.metadata->>'rfq_id')::int = ANY($${paramIdx}::int[])
+              -- A PO on hold waits on the person asked, not on its approvers.
+              AND ${instanceNotHeldSql('ai')}
           `);
           paramIdx++;
         }
@@ -5951,11 +5954,27 @@ LIMIT 2;
               LEFT JOIN tbl_rfq_products rp ON rp.id = pop.rfq_product_id
               LEFT JOIN tbl_product_variant pv ON pv.id = rp.product_variant_id
               WHERE pop.purchase_order_id = po.id
-            ) AS product_names
+            ) AS product_names,
+            -- The PO's hold (an open request for information), joined here for
+            -- the same reason as the columns above: no statement per PO.
+            hold.id AS hold_id, hold.target_role AS hold_target_role,
+            hold.target_user_id AS hold_target_id, hold.target_name AS hold_target_name,
+            hold.reason_category AS hold_reason_category, hold.created_at AS hold_since,
+            hold.requested_by AS hold_requested_by_id, hold.requested_by_name AS hold_requested_by_name
           FROM tbl_rfq_purchase_order po
           LEFT JOIN tbl_users u_vendor ON u_vendor.id = po.finalized_vendor_id
           LEFT JOIN tbl_company u_vendor_c ON u_vendor_c.id = u_vendor.company_id
           LEFT JOIN tbl_users u_initiator ON u_initiator.id = po.initiated_by
+          LEFT JOIN LATERAL (
+            SELECT sb.id, sb.target_role, sb.target_user_id, u_t.name AS target_name, sb.reason_category,
+                   sb.created_at, sb.requested_by, u_r.name AS requested_by_name
+              FROM tbl_po_send_backs sb
+              LEFT JOIN tbl_users u_t ON u_t.id = sb.target_user_id
+              LEFT JOIN tbl_users u_r ON u_r.id = sb.requested_by
+             WHERE sb.purchase_order_id = po.id AND sb.status = 'OPEN' AND sb.route = 'INFO_REQUEST'
+             ORDER BY sb.id DESC
+             LIMIT 1
+          ) hold ON TRUE
           WHERE po.rfq_id = $1
           ORDER BY po.created_at
         `, [rfqId]).catch(e => { logger.warn(e, `Lifecycle[${rfqId}]: PO data query failed`); return []; }),
@@ -6720,8 +6739,20 @@ LIMIT 2;
             // the userId this function was called with — req.user.id, never a
             // client-supplied id — and only for the instance's CURRENT step.
             // Reuse it verbatim instead of re-deriving "is this me" here.
-            awaiting_me: !!(inst && inst.status === 'PENDING' && inst.can_user_approve),
+            // A held PO is waiting on the person asked, not on its approvers.
+            awaiting_me: !!(inst && inst.status === 'PENDING' && inst.can_user_approve && !po.hold_id),
             approval,
+            // The open request for information holding this PO at its step,
+            // or null. Buyer-only: stripped for vendors and token users
+            // (BUYER_ONLY_PO_FIELDS).
+            hold: po.hold_id ? {
+              send_back_id: Number(po.hold_id),
+              target_role: po.hold_target_role,
+              target: { id: Number(po.hold_target_id), name: po.hold_target_name || null },
+              reason_category: po.hold_reason_category,
+              since: po.hold_since ? new Date(po.hold_since).toISOString() : null,
+              requested_by: { id: Number(po.hold_requested_by_id), name: po.hold_requested_by_name || null },
+            } : null,
           };
         });
       };

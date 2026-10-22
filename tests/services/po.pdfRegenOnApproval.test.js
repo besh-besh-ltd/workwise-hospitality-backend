@@ -52,7 +52,9 @@ jest.unstable_mockModule("../../app/models/generalModel.js", () => ({
 // lock and the reads the rejection makes with canned rows.
 const fakeTx = {
   __tx: true,
-  oneOrNone: async (sql) => (/FROM tbl_approval_instances/.test(sql)
+  oneOrNone: async (sql) => (/FROM tbl_po_send_backs/.test(sql)
+    ? null // no open request for information: the PO is not on hold
+    : /FROM tbl_approval_instances/.test(sql)
     ? { id: 4218, status: "PENDING" }
     : { id: 483, approval_instance_id: 4218, status: "pending_approval", rfq_id: 7, po_number: "483" }),
   one: async (sql) => (/INSERT INTO tbl_po_send_backs/.test(sql) ? { id: 1 } : { approval_instance_step_id: 1, step_order: 1 }),

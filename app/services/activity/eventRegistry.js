@@ -277,6 +277,27 @@ export const EVENTS = [
       reasonCategory: c.body?.reason_category,
     })} purchase order ${c.entityLabel}`,
   }),
+  // A PO put on hold to ask someone for information, and how the hold ends.
+  // Answer and withdraw act on a send-back id; the response carries the PO's
+  // id beside the send-back so the event files under the PO.
+  e({
+    method: 'POST', path: '/po/:po_id/send-back', key: 'po_send_back_requested',
+    category: CATEGORIES.APPROVALS, severity: 'notable',
+    entity: { type: 'PO', id: P('po_id') }, scope: SCOPE.entity('PO'),
+    summary: (c) => `${c.actor} put purchase order ${c.entityLabel} on hold to ask for information`,
+  }),
+  e({
+    method: 'POST', path: '/po/send-back/:id/respond', key: 'po_send_back_answered',
+    category: CATEGORIES.APPROVALS, severity: 'notable',
+    entity: { type: 'PO', id: R('data.po_id') }, scope: SCOPE.entity('PO'),
+    summary: (c) => `${c.actor} answered the request for information on purchase order ${c.entityLabel}`,
+  }),
+  e({
+    method: 'POST', path: '/po/send-back/:id/withdraw', key: 'po_send_back_withdrawn',
+    category: CATEGORIES.APPROVALS, severity: 'notable',
+    entity: { type: 'PO', id: R('data.po_id') }, scope: SCOPE.entity('PO'),
+    summary: (c) => `${c.actor} withdrew the request for information on purchase order ${c.entityLabel}`,
+  }),
   e({
     method: 'POST', path: '/po/accept/:po_id', key: 'po_accepted',
     category: CATEGORIES.ORDERS, severity: 'critical',

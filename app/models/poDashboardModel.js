@@ -25,6 +25,7 @@ import { PO_SCOPE_PERMISSIONS, scopedExistsFor, buildScopeClause } from "./scope
 import { canInitiateOnTuple, resolvePoScopeTuple } from "./purchaseOrderModel.js";
 import { cleanRefTitle } from "../helper/poReference.js";
 import { getRfqPoCoverage, classifyInitiateKind, getPoApprovalInitiators } from "./po/poInitiateGuide.js";
+import { poHeldSql } from "../services/po/poHold.js";
 
 // ---------------------------------------------------------------------------
 // Status bucket mapping (UI bucket -> raw po_status enum value[])
@@ -227,6 +228,8 @@ function initiateExistsFor(userId, alias, values, startIndex) {
 //
 // Mutates `values`; returns { clause, nextIndex }.
 function actionRequiredClause(scope, values, startIndex) {
+  // A PO on hold waits on the person asked for information, not on its
+  // approvers: it leaves their list and is in the asked person's instead.
   const approverExists = `(
     po.approval_instance_id IS NOT NULL AND tai.status = 'PENDING' AND EXISTS (
       SELECT 1
@@ -237,7 +240,13 @@ function actionRequiredClause(scope, values, startIndex) {
         AND st.status = 'PENDING'
         AND sa.status = 'PENDING'
         AND sa.approver_user_id = $1
-    )
+    ) AND NOT ${poHeldSql("po.id")}
+  )`;
+  const askedOfMe = `EXISTS (
+    SELECT 1 FROM tbl_po_send_backs sb_me
+     WHERE sb_me.purchase_order_id = po.id
+       AND sb_me.status = 'OPEN'
+       AND sb_me.target_user_id = $1
   )`;
 
   // Only a DRAFT is waiting for someone to initiate it. 'approved' used to be
@@ -251,7 +260,7 @@ function actionRequiredClause(scope, values, startIndex) {
   // for the same reason.
   if (scope.hospitalityCompanyIds === null) {
     return {
-      clause: `(${approverExists} OR ${initiatableStatus})`,
+      clause: `(${approverExists} OR ${askedOfMe} OR ${initiatableStatus})`,
       nextIndex: startIndex,
     };
   }
@@ -261,7 +270,7 @@ function actionRequiredClause(scope, values, startIndex) {
   // company via po.company_id, so the status alone is the honest answer here.
   if (Array.isArray(scope.hospitalityCompanyIds) && scope.hospitalityCompanyIds.length === 0) {
     return {
-      clause: `(${approverExists} OR ${initiatableStatus})`,
+      clause: `(${approverExists} OR ${askedOfMe} OR ${initiatableStatus})`,
       nextIndex: startIndex,
     };
   }
@@ -284,7 +293,7 @@ function actionRequiredClause(scope, values, startIndex) {
     ))
   ))`;
 
-  return { clause: `(${approverExists} OR ${initiatable})`, nextIndex: i };
+  return { clause: `(${approverExists} OR ${askedOfMe} OR ${initiatable})`, nextIndex: i };
 }
 
 // Shared SELECT columns + joins used by list / awaiting / tracking. The query
@@ -342,7 +351,7 @@ function poCoreSelect(userParamIdx) {
             AND st.status = 'PENDING'
             AND sa.status = 'PENDING'
             AND sa.approver_user_id = $${userParamIdx}
-        )
+        ) AND NOT ${poHeldSql("po.id")}
       )
       ELSE FALSE
     END AS awaiting_me,
@@ -654,6 +663,7 @@ export async function getDashboardKpis(scope) {
               AND sa.status = 'PENDING'
               AND sa.approver_user_id = $1
           )
+          AND NOT ${poHeldSql("po.id")}
      ) q`,
     values
   );
@@ -703,7 +713,9 @@ export async function getAwaitingPOs(scope) {
   const values = [scope.userId];
   const scoped = buildScopeClause(scope, values, 2);
 
-  const rows = await db.any(
+  // `data`: POs waiting on this user's approval. A PO on hold is not: it
+  // waits on the person asked (`information_requests`, below).
+  const rowsP = db.any(
     `SELECT ${poCoreSelect(1)}
      ${poCoreJoins()}
      WHERE ${scoped.clause}
@@ -719,11 +731,41 @@ export async function getAwaitingPOs(scope) {
            AND sa.status = 'PENDING'
            AND sa.approver_user_id = $1
        )
+       AND NOT ${poHeldSql("po.id")}
      ORDER BY po.created_at ASC`,
     values
   );
 
+  // `information_requests`: open holds where this user is the person asked,
+  // on POs in their scope. requested_by is a display name (the FE prints it).
+  const asked = [scope.userId];
+  const askedScope = buildScopeClause(scope, asked, 2);
+  const requestsP = db.any(
+    `SELECT sb.id AS send_back_id, po.id AS po_id, po.po_number, rfq.rfq_no,
+            sb.reason_category, REQ.name AS requested_by, sb.created_at AS since
+       FROM tbl_po_send_backs sb
+       JOIN tbl_rfq_purchase_order po ON po.id = sb.purchase_order_id
+       LEFT JOIN tbl_rfq rfq ON rfq.id = po.rfq_id
+       LEFT JOIN tbl_users REQ ON REQ.id = sb.requested_by
+      WHERE sb.status = 'OPEN'
+        AND sb.target_user_id = $1
+        AND ${askedScope.clause}
+      ORDER BY sb.created_at ASC, sb.id ASC`,
+    asked
+  );
+
+  const [rows, requests] = await Promise.all([rowsP, requestsP]);
+
   return {
+    information_requests: requests.map((r) => ({
+      send_back_id: Number(r.send_back_id),
+      po_id: Number(r.po_id),
+      po_number: r.po_number,
+      rfq_no: r.rfq_no != null ? Number(r.rfq_no) : null,
+      reason_category: r.reason_category,
+      requested_by: r.requested_by || "An approver",
+      since: r.since ? new Date(r.since).toISOString() : null,
+    })),
     data: rows.map((r) => {
       const m = mapPoCoreRow(r);
       return {

@@ -4,6 +4,7 @@ import { APPROVAL_DECISIONS, PO_STATUSES, RFQ_STATUSES } from '../util/constants
 import { sendApprovalStepNotification } from '../helper/sendEmailFunctions/approvalEmails.js';
 import { approvalStepEmailContext } from '../helper/approvalEmailContext.js';
 import { approvalActionUrl, entityLabel, stageLabel, buyerHome } from '../services/notificationLinks.js';
+import { assertPoNotOnHold, instanceNotHeldSql } from '../services/po/poHold.js';
 
 // ── Unit vs Group ARC awareness for notification copy ────────────────────────
 // Instances keep the unit entity types (ARC_TECH, ...); a Group ARC is only
@@ -3696,6 +3697,14 @@ export async function submitApprovalAction({
       };
     }
 
+    // 1a. A PO on hold (an OPEN tbl_po_send_backs row) is frozen at its step:
+    // no approver on it may approve or reject until the person asked answers
+    // or the request is withdrawn. poApprovalService checks this under the PO
+    // lock before it gets here; this is the backstop for any other caller.
+    if (instance.entity_type === 'PO') {
+      await assertPoNotOnHold(t, instance.entity_id);
+    }
+
     // 1b. A publish approval stops being decidable once the RFQ has published.
     // Publication does not wait for the approval — when the publish date
     // arrives the RFQ goes out and the instance is simply left PENDING. From
@@ -4173,6 +4182,8 @@ export async function getPendingApprovalsForUser(user_id, { hospitality_company_
     LEFT JOIN tbl_hospitality_company_hotels hh ON i.hotel_id = hh.id
     LEFT JOIN tbl_users initiator ON i.initiated_by = initiator.id
     WHERE ${conditions.join(' AND ')}
+      -- A PO on hold waits on the person asked, not on its approvers.
+      AND ${instanceNotHeldSql('i')}
       -- A publish approval on an already-published RFQ is not actionable: the
       -- RFQ went out without it and submitApprovalAction now refuses the
       -- decision. getPendingApprovalCounts has excluded these for a while, but
@@ -4216,6 +4227,7 @@ export async function getRfqIdsWithPendingApprovals(user_id, entityTypes, rfqIds
       AND i.entity_type IN ($2:csv)
       AND i.metadata->>'rfq_id' IS NOT NULL
       AND (i.metadata->>'rfq_id')::INTEGER IN ($3:csv)
+      AND ${instanceNotHeldSql('i')}
   `, [user_id, entityTypes, intRfqIds]);
 
   return rows.map(r => parseInt(r.rfq_id));
@@ -4251,6 +4263,8 @@ export async function getPendingApprovalCountsByEntityType(user_id, { hospitalit
     JOIN tbl_approval_instance_steps s ON s.approval_instance_id = i.id
     JOIN tbl_approval_step_approvers sa ON sa.approval_instance_step_id = s.id
     WHERE ${conditions.join(' AND ')}
+      -- A PO on hold waits on the person asked, not on its approvers.
+      AND ${instanceNotHeldSql('i')}
       AND NOT (
         i.entity_type IN ('RFQ', 'TENDER')
         AND EXISTS (

@@ -4,6 +4,11 @@ import { logger } from '../util/logger.js';
 import { logError } from '../helper/common.js';
 import { REASON_CODES, CANCEL_REASONS, REJECTION_ROUTES } from './po/poSendBackReasons.js';
 import { notifyPoRejected } from './po/poRejectionNotifier.js';
+import { PoDecisionError } from './po/poDecisionError.js';
+import { assertPoNotOnHold } from './po/poHold.js';
+
+// Re-exported: callers have always imported it from here.
+export { PoDecisionError };
 
 /**
  * LOCK ORDER — every PO decision, on every surface.
@@ -16,7 +21,7 @@ import { notifyPoRejected } from './po/poRejectionNotifier.js';
  * the lock the other needed and Postgres killed one with 40P01. Pinned by
  * tests/services/po.decision.lockOrder.test.js.
  */
-const lockPo = (t, poId) =>
+export const lockPo = (t, poId) =>
   t.oneOrNone(
     `SELECT id, approval_instance_id, status::text AS status, rfq_id, finalized_vendor_id,
             rfq_product_id, po_number, initiated_by
@@ -25,16 +30,6 @@ const lockPo = (t, poId) =>
       FOR UPDATE`,
     [poId]
   );
-
-/** A refused PO decision, carrying the HTTP status and error code to answer with. */
-export class PoDecisionError extends Error {
-  constructor(message, { code, httpStatus = 400 } = {}) {
-    super(message);
-    this.name = 'PoDecisionError';
-    this.code = code;
-    this.httpStatus = httpStatus;
-  }
-}
 
 /**
  * The approval instance a PO decision acts on, locked FOR UPDATE after the PO
@@ -47,7 +42,7 @@ export class PoDecisionError extends Error {
  *
  * @returns {Promise<{id:number, status:string}>}
  */
-async function lockCurrentPoInstance(t, po, approvalInstanceId) {
+export async function lockCurrentPoInstance(t, po, approvalInstanceId) {
   const notCurrent = () => new PoDecisionError(
     'This approval is no longer the one in progress for the purchase order. Refresh to see where it stands.',
     { code: 'INSTANCE_NOT_CURRENT', httpStatus: 409 }
@@ -232,6 +227,11 @@ export async function executePoApprovalAtomically(
     if (po.status !== 'pending_approval') {
       throw poNotPendingApproval(po, normalizedAction === 'APPROVE' ? 'approved' : 'rejected');
     }
+    // A PO on hold (an open request for information) is frozen at its step
+    // for every approver on it, whatever the step's rule: 409 PO_ON_HOLD.
+    // Read under both locks, and every path that opens or closes a hold takes
+    // the PO lock first, so the answer holds until this transaction ends.
+    await assertPoNotOnHold(t, po.id);
 
     // 1. Record the decision on THIS transaction.
     const actionResult = await submitApprovalAction(
@@ -389,6 +389,8 @@ export async function executePoRejectionAtomically(
     throw decisionNotRecorded(instance, 'rejection');
   }
   if (po.status !== 'pending_approval') throw poNotPendingApproval(po, 'rejected');
+  // Frozen while on hold, as for an approval (see executePoApprovalAtomically).
+  await assertPoNotOnHold(t, po.id);
   const text = comment == null ? '' : String(comment);
 
   // 1. The decision, on the instance locked above.
