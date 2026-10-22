@@ -1204,7 +1204,8 @@ export const initiatePurchaseOrder = async (po_id, initiator, t) => {
         JOIN tbl_company TCSUP ON TCSUP.id = SUP.company_id
         JOIN tbl_company TC ON TC.id = PO.company_id 
 
-      WHERE PO.id = $1`,
+      WHERE PO.id = $1
+      FOR UPDATE OF PO`,
       [po_id]
     );
 
@@ -2412,7 +2413,21 @@ export const handleUpdatePO = async (po_id, changes, current_user) => {
     }
   }
 
-  return db.tx(async (t) => {
+  const outcome = await db.tx(async (t) => {
+    // Lock order: PO row first, then the approval instance. Everything below
+    // (status, edits, cancel, re-initiate) is decided against THIS row, so a
+    // concurrent POST /po/initiate (which locks the same row) cannot slip a
+    // second approval instance in between.
+    const lockedPo = await t.one(
+      `SELECT * FROM tbl_rfq_purchase_order WHERE id = $1 FOR UPDATE`,
+      [poId]
+    );
+    if (PO_LOCKED_STATUSES.includes(String(lockedPo.status))) {
+      throw new Error(
+        `Edit failed! This purchase order is ${lockedPo.status} and can no longer be edited.`
+      );
+    }
+
     // --- Buckets for updates ---
     const poUpdates = {}; // root-level PO column => latest value
     const productUpdates = {}; // rfq_item_id => { remove: bool, fields: {}, charges: {} }
@@ -2695,9 +2710,10 @@ export const handleUpdatePO = async (po_id, changes, current_user) => {
 
     // Cancel existing approval instance before re-initiating (PO was edited, needs fresh approval)
     const existingInstance = await t.oneOrNone(
-      `SELECT id, status FROM tbl_approval_instances
+      `SELECT id, status, initiated_by FROM tbl_approval_instances
       WHERE entity_type = 'PO' AND entity_id = $1 AND status = 'PENDING'
-      ORDER BY created_at DESC LIMIT 1`,
+      ORDER BY created_at DESC LIMIT 1
+      FOR UPDATE`,
       [po_id]
     );
 
@@ -2716,7 +2732,7 @@ export const handleUpdatePO = async (po_id, changes, current_user) => {
       await t.none(
         `INSERT INTO tbl_approval_actions (approval_instance_id, approver_user_id, action, comment)
         VALUES ($1, $2, 'CANCELLED', $3)`,
-        [existingInstance.id, current_user.id, '[CANCELLED] PO edited, re-initiating approval']
+        [existingInstance.id, current_user.id, `[CANCELLED] PO edited by ${current_user.name || `user ${current_user.id}`}, re-initiating approval`]
       );
       // Clear the old instance reference from PO
       await t.none(
@@ -2725,33 +2741,60 @@ export const handleUpdatePO = async (po_id, changes, current_user) => {
       );
     }
 
-    // Re-initiate only when (a) this edit just cancelled a PENDING approval, so
-    // the PO must restart approval, or (b) the PO is a draft AND the editor
-    // holds the initiate permission. Editing a draft is not itself a licence to
-    // initiate it.
-    let shouldInitiate = cancelledPendingInstance;
-    if (!shouldInitiate && String(po.status) === PO_STATUSES.DRAFT) {
+    // Re-initiate only when
+    //  (a) this edit just cancelled a PENDING approval: that is a resubmission,
+    //      so it restarts approval attributed to the ORIGINAL initiator (who was
+    //      permitted to initiate), with the editor recorded on the CANCELLED
+    //      action row. If that person is gone or inactive, only an editor who
+    //      can initiate may restart it; otherwise the PO stays a draft.
+    //  (b) the (locked) PO is a draft AND the editor holds the initiate
+    //      permission. Editing a draft is not itself a licence to initiate it.
+    let initiator = null;
+    if (existingInstance) {
+      const original = existingInstance.initiated_by
+        ? await t.oneOrNone(
+            `SELECT id, company_id, name FROM tbl_users
+              WHERE id = $1 AND status = 1 AND is_deleted = 0`,
+            [existingInstance.initiated_by]
+          )
+        : null;
+      if (original) {
+        initiator = { ...current_user, id: original.id, company_id: original.company_id ?? current_user.company_id };
+      } else {
+        const tuple = await resolvePoScopeTuple(poId, t);
+        if (await canInitiateOnTuple(current_user, tuple, t)) initiator = current_user;
+      }
+    } else if (String(lockedPo.status) === PO_STATUSES.DRAFT) {
       const tuple = await resolvePoScopeTuple(poId, t);
-      shouldInitiate = await canInitiateOnTuple(current_user, tuple, t);
+      if (await canInitiateOnTuple(current_user, tuple, t)) initiator = current_user;
     }
 
-    if (shouldInitiate) {
-      const result = await initiatePurchaseOrder(po_id, current_user, t);
-      if (result.approval_required) {
+    let notify = null;
+    if (initiator) {
+      const result = await initiatePurchaseOrder(po_id, initiator, t);
+      if (result.approval_required && result.current_approver_id) {
         const purchaseOrder = await t.oneOrNone(
           `SELECT * FROM tbl_rfq_purchase_order
           WHERE id = $1`,
           [result.po_id]
         );
-
-        if (purchaseOrder && result.current_approver_id) {
-          await sendApprovalNotification(purchaseOrder, result.current_approver_id);
-        }
+        if (purchaseOrder) notify = { purchaseOrder, approverId: result.current_approver_id };
       }
     }
 
-    return { success: true };
+    return { notify };
   });
+
+  // After commit, and never allowed to fail an edit that already succeeded.
+  if (outcome.notify) {
+    try {
+      await sendApprovalNotification(outcome.notify.purchaseOrder, outcome.notify.approverId);
+    } catch (err) {
+      logError('handleUpdatePO: approval notification failed after commit', err);
+    }
+  }
+
+  return { success: true };
 };
 
 // Tenancy for milestones is enforced by assertPoAccess(po_id) in the

@@ -21,6 +21,7 @@ import { ROLE_IDS } from "../fixtures/users.js";
 import { makeRFQ } from "../factories/rfq.js";
 import { httpClient } from "../helpers/http.js";
 import { grantRoleScope, revokeRoleScopes } from "../helpers/roleScope.js";
+import { draftPO } from "../../app/controllers/po/purchaseOrderController.js";
 
 const READ_ONLY = IDS.users.a1_proc_commApp; // awarding.read only
 const CREATOR = IDS.users.a1_proc_buyer;     // rfq.read/boq.read only, PO.initiated_by
@@ -132,9 +133,6 @@ afterEach(async () => {
   }
 });
 
-let PO_NO = 8_500_000;
-const nextPoNo = () => `EDITHARD-PO-${++PO_NO}`;
-
 /** A draft PO at an explicit scope, hanging off a published RFQ. */
 async function makeDraftPo({
   hotel = IDS.hotels.A1,
@@ -175,39 +173,47 @@ async function makeDraftPo({
     [rfq_id, VARIANT_ID, VENDOR]
   );
 
+  // Priced like a real quote: tax on the line plus a document-level global
+  // charge, so edits run against a PO with charges_meta and global_charges.
   const quote = await db.one(
-    `INSERT INTO tbl_quotes (rfq_id, rfq_no, created_by, updated_by)
-     VALUES ($1, $2, $3, $3) RETURNING id`,
-    [rfq_id, rfq_no, VENDOR]
+    `INSERT INTO tbl_quotes (rfq_id, rfq_no, created_by, updated_by, status, is_regret, global_charges)
+     VALUES ($1, $2, $3, $3, 1, 0, $4::jsonb) RETURNING id`,
+    [rfq_id, rfq_no, VENDOR,
+     JSON.stringify([{ name: "Transportation", tax: 5, tax_mode: "percentage", amount: 5, amount_mode: "percentage" }])]
   );
   inserted.quoteIds.push(quote.id);
 
   const quoteItem = await db.one(
     `INSERT INTO tbl_quote_items
        (rfq_id, rfq_no, quote_id, product_variant_id, unit_price, total_price,
-        comment, delivery_period, quantity, variant)
-     VALUES ($1, $2, $3, $4, 100, 1000, '', '7', '1', 0) RETURNING id`,
+        package_price, tax, freight_price, comment, delivery_period, quantity,
+        variant, tax_mode, other_charges)
+     VALUES ($1, $2, $3, $4, 100, 1180, 0, 18, 0, '', '7', '10', 0, 'percentage', '[]'::jsonb)
+     RETURNING id`,
     [rfq_id, rfq_no, quote.id, VARIANT_ID]
   );
 
-  const po = await db.one(
-    `INSERT INTO tbl_rfq_purchase_order
-       (rfq_id, company_id, po_number, status, rfq_product_id, quantity, unit_price,
-        finalized_vendor_id, total_value, quote_id, initiated_by, created_at, updated_at)
-     VALUES ($1, $2, $3, 'draft', $4, 1, 100, $5, 1000, $6, $7,
-             (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Kolkata'),
-             (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Kolkata'))
-     RETURNING id`,
-    [rfq_id, IDS.companies.A, nextPoNo(), [product.id], VENDOR, [quoteItem.id], initiatedBy]
-  );
+  // The production award path (what rfqController.finalize calls per line).
+  const drafted = await db.tx((t) => draftPO({
+    rfq_id,
+    project_id: null,
+    quote_item_id: quoteItem.id,
+    existing_po_id: null,
+    selected_hierarchy: null,
+    product_info: {
+      rfq_product_id: product.id,
+      quantity: 10,
+      unit: "NOS",
+      unit_price: 100,
+      charges_meta: { tax: 18, tax_mode: "percentage", other_charges: [] },
+      finalized_vendor_id: VENDOR,
+    },
+  }, { id: initiatedBy, company_id: IDS.companies.A }, t));
+  const po = { id: drafted.po_id };
   inserted.poIds.push(po.id);
 
   const pop = await db.one(
-    `INSERT INTO tbl_purchase_order_product
-       (purchase_order_id, rfq_product_id, quote_id, quantity, unit, unit_price, total_price)
-     VALUES ($1, $2, $3, 1, 'NOS', 100, 1000) RETURNING id`,
-    [po.id, product.id, quoteItem.id]
-  );
+    `SELECT id FROM tbl_purchase_order_product WHERE purchase_order_id = $1`, [po.id]);
   inserted.poProductIds.push(pop.id);
 
   return { rfq_id, po_id: po.id, rfq_product_id: product.id };
@@ -233,20 +239,26 @@ describe("PUT /po/:po_id refuses fields the edit screen never sends", () => {
   });
 
   it("refuses finalized_vendor_id, company_id, approval_instance_id and an unknown column", async () => {
+    const { po_id, rfq_product_id } = await makeDraftPo();
+    const lineBefore = await db.one(
+      `SELECT * FROM tbl_purchase_order_product WHERE purchase_order_id = $1`, [po_id]);
     for (const [path, newValue] of [
       ["finalized_vendor_id", IDS.users.a1_proc_buyer],
       ["company_id", IDS.companies.B],
       ["approval_instance_id", 1],
       ["no_such_column", "x"],
       ["initiated_by", WRITER],
-      ["product[1].rfq_product_id", 5],
-      ["product[1].charges_meta.evil", 1],
+      [`product[${rfq_product_id}].rfq_product_id`, 5],
+      [`product[${rfq_product_id}].purchase_order_id`, 1],
+      [`product[${rfq_product_id}].charges_meta.evil`, 1],
     ]) {
-      const { po_id } = await makeDraftPo();
       const before = await poRow(po_id);
       const res = await putEdit(creatorClient, po_id, [{ path, newValue }]);
       expect({ path, status: res.status, code: res.body?.code }).toEqual({ path, status: 400, code: "PO_FIELD_NOT_EDITABLE" });
       expect(await poRow(po_id)).toEqual(before);
+      const lineAfter = await db.one(
+        `SELECT * FROM tbl_purchase_order_product WHERE purchase_order_id = $1`, [po_id]);
+      expect(lineAfter).toEqual(lineBefore);
     }
   });
 
@@ -352,6 +364,85 @@ describe("editing a draft initiates it only when the editor can initiate", () =>
     if (firstStep?.s != null) expect(all[1].current_step).toBe(firstStep.s);
     else expect(all[1].current_step).toBe(first.current_step);
     expect((await poRow(po_id)).approval_instance_id).toBe(all[1].id);
+  });
+});
+
+describe("a pending PO that is edited is resubmitted by its original initiator", () => {
+  const initiatedByOf = async (po_id) => (await db.any(
+    `SELECT id, status, initiated_by FROM tbl_approval_instances
+      WHERE entity_type = 'PO' AND entity_id = $1 ORDER BY id`, [po_id]));
+
+  it("attributes the new instance to the original initiator and records the editor on the cancelled action", async () => {
+    // WRITER initiated it; CREATOR (no initiate permission) owns the PO and edits it.
+    const { po_id } = await makeDraftPo({ initiatedBy: CREATOR });
+    const init = await writerClient.post(`/api/v1/po/initiate/${po_id}`).send({});
+    expect(init.status).toBe(200);
+
+    const res = await putEdit(creatorClient, po_id, [{ path: "terms_and_conditions", newValue: "Net 90" }]);
+    expect(res.status).toBe(200);
+
+    const [oldInst, newInst] = await initiatedByOf(po_id);
+    expect(oldInst.status).toBe("CANCELLED");
+    expect(oldInst.initiated_by).toBe(WRITER);
+    expect(newInst.status).toBe("PENDING");
+    expect(newInst.initiated_by).toBe(WRITER); // not the editor
+    expect((await poRow(po_id)).status).toBe("pending_approval");
+
+    const act = await db.one(
+      `SELECT approver_user_id, comment FROM tbl_approval_actions
+        WHERE approval_instance_id = $1 AND action = 'CANCELLED'`, [oldInst.id]);
+    expect(act.approver_user_id).toBe(CREATOR);
+    expect(act.comment).toMatch(/^\[CANCELLED\] PO edited by .+, re-initiating approval$/);
+  });
+
+  it("falls back when the original initiator is inactive: a non-initiator editor leaves the PO a draft", async () => {
+    const { po_id } = await makeDraftPo({ initiatedBy: CREATOR });
+    expect((await writerClient.post(`/api/v1/po/initiate/${po_id}`).send({})).status).toBe(200);
+    await db.none(`UPDATE tbl_users SET status = 0 WHERE id = $1`, [WRITER]);
+    try {
+      const res = await putEdit(creatorClient, po_id, [{ path: "terms_and_conditions", newValue: "Net 91" }]);
+      expect(res.status).toBe(200);
+    } finally {
+      await db.none(`UPDATE tbl_users SET status = 1 WHERE id = $1`, [WRITER]);
+    }
+    const insts = await initiatedByOf(po_id);
+    expect(insts.map((i) => i.status)).toEqual(["CANCELLED"]);
+    const po = await poRow(po_id);
+    expect(po.status).toBe("draft");
+    expect(po.approval_instance_id).toBeNull();
+  });
+
+  it("falls back when the original initiator is inactive: an editor who can initiate restarts it as themselves", async () => {
+    const { po_id } = await makeDraftPo({ initiatedBy: WRITER });
+    // Another permitted person initiated; here we simulate by initiating as WRITER,
+    // then deactivating the instance's initiator to someone else inactive.
+    expect((await writerClient.post(`/api/v1/po/initiate/${po_id}`).send({})).status).toBe(200);
+    await db.none(`UPDATE tbl_approval_instances SET initiated_by = $1
+                    WHERE entity_type = 'PO' AND entity_id = $2`, [IDS.users.inactive, po_id]);
+
+    const res = await putEdit(writerClient, po_id, [{ path: "terms_and_conditions", newValue: "Net 92" }]);
+    expect(res.status).toBe(200);
+    const insts = await initiatedByOf(po_id);
+    expect(insts).toHaveLength(2);
+    expect(insts[1]).toMatchObject({ status: "PENDING", initiated_by: WRITER });
+  });
+});
+
+describe("an edit racing an initiate", () => {
+  it("ends with exactly one PENDING approval instance, referenced by the PO", async () => {
+    const { po_id } = await makeDraftPo({ initiatedBy: WRITER });
+    const [edit, init] = await Promise.all([
+      putEdit(writerClient, po_id, [{ path: "terms_and_conditions", newValue: "race" }]),
+      writerClient.post(`/api/v1/po/initiate/${po_id}`).send({}),
+    ]);
+    expect(edit.status).toBe(200);
+    expect(init.status).toBe(200);
+
+    const pending = (await instancesOf(po_id)).filter((i) => i.status === "PENDING");
+    expect(pending).toHaveLength(1);
+    const po = await poRow(po_id);
+    expect(po.status).toBe("pending_approval");
+    expect(po.approval_instance_id).toBe(pending[0].id);
   });
 });
 
