@@ -244,6 +244,50 @@ export class PoWritePermissionError extends Error {
 }
 
 /**
+ * The PO's own company x hotel x department x process tuple, the thing every
+ * scope predicate below is evaluated against. Throws PoAccessError (404) when
+ * the PO does not exist.
+ */
+export async function resolvePoScopeTuple(poId, dbCtx = db) {
+  const po = await resolvePoTenancy(poId, dbCtx);
+  if (!po) throw new PoAccessError();
+  return {
+    hospitality_company_id: po.hospitality_company_id,
+    hotel_id: po.hotel_id,
+    department_id: po.department_id,
+    process_id: po.process_id,
+  };
+}
+
+/**
+ * THE one "may this user initiate a PO at this scope tuple?" predicate. The
+ * initiate gate (assertPoInitiateAccess), the initiator list's `can_initiate`
+ * flag and the draft-edit path all call this, so they cannot disagree.
+ *
+ * Vendors and GRN token users never; super admins always; everyone else needs
+ * BOTH a read grant (PO_SCOPE_PERMISSIONS) AND a write grant
+ * (PO_INITIATE_PERMISSIONS) covering the tuple. Fail-closed on a tuple with no
+ * hospitality company, like assertPoAccess.
+ */
+export async function canInitiateOnTuple(user, tuple, dbCtx = db) {
+  if (user?.is_token_user || Number(user?.user_type) === 3) return false;
+  if (Number(user?.user_type) === 8) return true;
+
+  const userId = Number(user?.id);
+  if (!Number.isFinite(userId) || userId <= 0) return false;
+  if (!tuple?.hospitality_company_id) return false;
+
+  const scope = {
+    hospitality_company_id: tuple.hospitality_company_id,
+    hotel_id: tuple.hotel_id,
+    department_id: tuple.department_id,
+    process_id: tuple.process_id,
+  };
+  if (!(await hasAnyScopeOf(userId, PO_SCOPE_PERMISSIONS, scope, dbCtx))) return false;
+  return hasAnyScopeOf(userId, PO_INITIATE_PERMISSIONS, scope, dbCtx);
+}
+
+/**
  * THE gate for initiating a purchase order. Additive on top of assertPoAccess:
  * the caller must still be able to SEE the PO (404 when not), and must then
  * ALSO hold a write grant on the PO's own scope tuple (403 when not).
@@ -255,19 +299,9 @@ export const assertPoInitiateAccess = async (user, po_id, dbCtx = db) => {
   // resolves the tuple we are about to evaluate the write grant against.
   const po = await assertPoAccess(user, po_id, dbCtx);
 
-  // Vendors and GRN site-representative token users never initiate. noAcl([3])
-  // already blocks vendors at the route and the GRN token never reaches this
-  // route at all; both are re-asserted here so the model is safe standalone.
-  if (user?.is_token_user || Number(user?.user_type) === 3) {
-    throw new PoWritePermissionError();
-  }
-
-  // Super admin — parity with assertPoAccess, where a null hospitality scope
-  // means "every company". Super admins hold no tbl_user_role_scopes rows, so
-  // any scope-based predicate would refuse them outright.
-  if (Number(user?.user_type) === 8) return po;
-
-  const allowed = await hasAnyScopeOf(Number(user?.id), PO_INITIATE_PERMISSIONS, {
+  // Vendors, token users, super admins and the scope grants are all decided
+  // by the one shared predicate. (noAcl([3]) also blocks vendors at the route.)
+  const allowed = await canInitiateOnTuple(user, {
     hospitality_company_id: po.hospitality_company_id,
     hotel_id: po.hotel_id,
     department_id: po.department_id,
@@ -336,22 +370,16 @@ const TOP_MANAGEMENT_ROLE_TITLE = "Top Management";
  * @returns {Promise<{can_initiate:boolean, initiators:Array, total:number}>}
  */
 export const listPoInitiators = async (po, caller, dbCtx = db) => {
-  // can_initiate reuses the REAL predicate rather than re-deriving it, so the
-  // flag and the button and the write route can never disagree.
-  let can_initiate = false;
-  try {
-    await assertPoInitiateAccess(caller, po.id, dbCtx);
-    can_initiate = true;
-  } catch (err) {
-    if (!(err instanceof PoAccessError) && !(err instanceof PoWritePermissionError)) throw err;
-  }
-
   const tuple = {
     hospitality_company_id: po.hospitality_company_id,
     hotel_id: po.hotel_id,
     department_id: po.department_id,
     process_id: po.process_id,
   };
+
+  // can_initiate is the SAME predicate the gate uses, so the flag, the button
+  // and the write route can never disagree.
+  const can_initiate = await canInitiateOnTuple(caller, tuple, dbCtx);
 
   // The two halves of the gate, then their intersection.
   const [readers, writers] = await Promise.all([
@@ -2276,12 +2304,65 @@ export const getPODetailsById = async (po_id, user_id) => {
   }
 };
 
+// ===========================================================================
+// SECURITY — what PUT /po/:po_id may write.
+// ---------------------------------------------------------------------------
+// handleUpdatePO used to treat every `path` as a column name, so any editor
+// could write `status`, `finalized_vendor_id`, `approval_instance_id`... on the
+// PO row. The allow-lists below are exactly the fields the buyer edit screen
+// (PurchaseOrderEditView.js) emits; anything else is refused 400 BEFORE a
+// transaction is opened. Totals are never client-writable: total_price and
+// total_value are recomputed server-side from the lines.
+//   root  : po_number, gstin, terms_and_conditions
+//   line  : quantity, unit, unit_price, `removed`, charges_meta.<key>
+//   hsn   : hsn_codes[<rfq_item_id>].code
+// ===========================================================================
+export const PO_EDITABLE_ROOT_COLUMNS = Object.freeze(["po_number", "gstin", "terms_and_conditions"]);
+export const PO_EDITABLE_LINE_FIELDS = Object.freeze(["quantity", "unit", "unit_price"]);
+export const PO_EDITABLE_CHARGE_KEYS = Object.freeze([
+  "freight_price", "freight_mode", "package_price", "package_mode", "tax", "tax_mode",
+]);
+
+export class PoFieldNotEditableError extends Error {
+  constructor(field) {
+    super(`The field "${field}" cannot be edited on a purchase order.`);
+    this.name = "PoFieldNotEditableError";
+    this.status = 400;
+    this.code = "PO_FIELD_NOT_EDITABLE";
+    this.field = field;
+  }
+}
+
+/** Throws PoFieldNotEditableError for the first change path outside the allow-lists. */
+const assertPoChangesEditable = (changes) => {
+  for (const change of changes) {
+    const path = change?.path;
+    if (!path) continue; // the apply loop has always skipped path-less entries
+    if (typeof path !== "string") throw new PoFieldNotEditableError(String(path));
+
+    const product = path.match(/^product\[(\d+)\]\.(.+)$/);
+    if (product) {
+      const rest = product[2];
+      if (rest === "removed" || PO_EDITABLE_LINE_FIELDS.includes(rest)) continue;
+      const charge = rest.match(/^charges_meta\.([A-Za-z0-9_]+)$/);
+      if (charge && PO_EDITABLE_CHARGE_KEYS.includes(charge[1])) continue;
+      throw new PoFieldNotEditableError(path);
+    }
+    if (/^hsn_codes\[\d+\]\.code$/.test(path)) continue;
+    if (PO_EDITABLE_ROOT_COLUMNS.includes(path)) continue;
+    throw new PoFieldNotEditableError(path);
+  }
+};
+
 export const handleUpdatePO = async (po_id, changes, current_user) => {
   if (!po_id || !Array.isArray(changes) || changes.length <= 0) {
     throw new Error("PO Id and Changes are required to update the PO!");
   }
 
   const poId = Number(po_id);
+
+  // Refuse any write outside the allow-lists before touching the database.
+  assertPoChangesEditable(changes);
 
   const po = await db.one(
     `SELECT * FROM tbl_rfq_purchase_order
@@ -2620,6 +2701,7 @@ export const handleUpdatePO = async (po_id, changes, current_user) => {
       [po_id]
     );
 
+    const cancelledPendingInstance = !!existingInstance;
     if (existingInstance) {
       await t.none(
         `UPDATE tbl_approval_instances SET status = 'CANCELLED', completed_at = NOW() WHERE id = $1`,
@@ -2643,16 +2725,28 @@ export const handleUpdatePO = async (po_id, changes, current_user) => {
       );
     }
 
-    const result = await initiatePurchaseOrder(po_id, current_user, t);
-    if(result.approval_required) {
-      const purchaseOrder = await t.oneOrNone(
-        `SELECT * FROM tbl_rfq_purchase_order
-        WHERE id = $1`,
-        [result.po_id]
-      );
+    // Re-initiate only when (a) this edit just cancelled a PENDING approval, so
+    // the PO must restart approval, or (b) the PO is a draft AND the editor
+    // holds the initiate permission. Editing a draft is not itself a licence to
+    // initiate it.
+    let shouldInitiate = cancelledPendingInstance;
+    if (!shouldInitiate && String(po.status) === PO_STATUSES.DRAFT) {
+      const tuple = await resolvePoScopeTuple(poId, t);
+      shouldInitiate = await canInitiateOnTuple(current_user, tuple, t);
+    }
 
-      if (purchaseOrder && result.current_approver_id) {
-        await sendApprovalNotification(purchaseOrder, result.current_approver_id);
+    if (shouldInitiate) {
+      const result = await initiatePurchaseOrder(po_id, current_user, t);
+      if (result.approval_required) {
+        const purchaseOrder = await t.oneOrNone(
+          `SELECT * FROM tbl_rfq_purchase_order
+          WHERE id = $1`,
+          [result.po_id]
+        );
+
+        if (purchaseOrder && result.current_approver_id) {
+          await sendApprovalNotification(purchaseOrder, result.current_approver_id);
+        }
       }
     }
 

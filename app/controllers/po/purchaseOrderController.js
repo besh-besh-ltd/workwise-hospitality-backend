@@ -5,7 +5,7 @@ import { removeMilestoneReminder, rescheduleMilestoneReminder, scheduleMilestone
 import { executePoApprovalAtomically } from "../../services/poApprovalService.js";
 import { writePoDocument, PoDocumentError } from "../../services/poDocumentService.js";
 import generalModel, { markPOStatusChange, getApprovalInstanceById, getApprovalInstanceDetails, recordLifecycleEvent, notifyNextApprovalStep } from "../../models/generalModel.js";
-import { createMilestone, createTask, deleteMilestone, deleteTask, getMilestonesByPOId, getPOByRFQId, getPODetailsById, getTasksByPOId, draftPurchaseOrder, updateMilestone, updateTask, initiatePurchaseOrder, updateGSTForPO, updateHSNCode, handleUpdatePO, handleRaiseInvoice, handleMarkDispatched, handleAddSiteRepresentative, handleMarkGRN, regeneratePODocument, mergeDraftPOs, assertPoAccess, assertPoInitiateAccess, assertRfqPoListingAccess, listPoInitiators, isAssignedPoApprover, getMilestoneParentPoId, getTaskParentPoId, PoAccessError, PoWritePermissionError } from "../../models/purchaseOrderModel.js";
+import { createMilestone, createTask, deleteMilestone, deleteTask, getMilestonesByPOId, getPOByRFQId, getPODetailsById, getTasksByPOId, draftPurchaseOrder, updateMilestone, updateTask, initiatePurchaseOrder, updateGSTForPO, updateHSNCode, handleUpdatePO, handleRaiseInvoice, handleMarkDispatched, handleAddSiteRepresentative, handleMarkGRN, regeneratePODocument, mergeDraftPOs, assertPoAccess, assertPoInitiateAccess, assertRfqPoListingAccess, listPoInitiators, isAssignedPoApprover, getMilestoneParentPoId, getTaskParentPoId, PoAccessError, PoWritePermissionError, PoFieldNotEditableError } from "../../models/purchaseOrderModel.js";
 import rfqModel from "../../models/rfqModel.js";
 import userModel from "../../models/userModel.js";
 import hospitalityModel from "../../models/hospitalityModel.js";
@@ -256,6 +256,14 @@ export const updatePO = async (req, res) => {
       updated,
     });
   } catch (error) {
+      if (error instanceof PoFieldNotEditableError) {
+        return res.status(400).json({
+          status: 0,
+          message: error.message,
+          code: error.code,
+          field: error.field,
+        });
+      }
       logError(error);
       return res.status(500).json({
           status: 0,
