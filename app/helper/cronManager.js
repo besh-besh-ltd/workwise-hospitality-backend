@@ -885,11 +885,12 @@ export const startPoDocumentWatchdog = () => {
  */
 export const findPosNeedingVendorReminder = async (now = new Date(), runner = db) => {
   const pendingPOs = await runner.any(`
-    SELECT po.*, r.rfq_no, r.title AS rfq_title, a.arc_number, a.title AS arc_title
+    SELECT po.*, r.rfq_no, r.title AS rfq_title, a.arc_number, a.title AS arc_title, mr.mr_number
     FROM tbl_rfq_purchase_order po
     LEFT JOIN tbl_rfq r ON r.id = po.rfq_id
     LEFT JOIN tbl_arc_contract c ON c.id = po.arc_contract_id AND po.is_call_off
     LEFT JOIN tbl_arc a ON a.id = c.arc_id
+    LEFT JOIN tbl_material_requisition mr ON mr.id = po.source_mr_id AND po.is_call_off
     WHERE po.status = 'acceptance_pending'
       AND (r.id IS NOT NULL OR po.is_call_off)
   `);
@@ -936,7 +937,7 @@ export const startVendorAcceptanceReminderCron = () => {
         try {
           await sendPOAcceptanceReminderToVendor(
             po,
-            { rfq_no: po.rfq_no, title: po.rfq_title, arc_number: po.arc_number },
+            { rfq_no: po.rfq_no, title: po.rfq_title, arc_number: po.arc_number, arc_title: po.arc_title, mr_number: po.mr_number, is_call_off: po.is_call_off },
             reminderToSend
           );
           await db.none(

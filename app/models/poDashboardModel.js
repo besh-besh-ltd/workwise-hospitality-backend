@@ -23,6 +23,7 @@ import { callOffPoTax, callOffLineTax } from "../helper/arc_v2/callOffLineTax.js
 import { buildScopeExistsClause } from "../services/authorizationService.js";
 import { PO_SCOPE_PERMISSIONS, scopedExistsFor, buildScopeClause } from "./scope/poScope.js";
 import { canInitiateOnTuple, resolvePoScopeTuple } from "./purchaseOrderModel.js";
+import { cleanRefTitle } from "../helper/poReference.js";
 import { getRfqPoCoverage, classifyInitiateKind, getPoApprovalInitiators } from "./po/poInitiateGuide.js";
 
 // ---------------------------------------------------------------------------
@@ -1370,6 +1371,17 @@ export async function getPODetailFull(po_id, scope, viewer = null) {
     status_label: humanizeStatus(po.status),
     total_value: po.total_value != null ? Number(po.total_value) : 0,
     is_call_off: !!po.is_call_off,
+    // Vendor view only: the same flat reference fields the vendor Orders list
+    // carries. (The MR title is never selected for a vendor.)
+    ...(scope.vendorId
+      ? {
+          rfq_no: po.rfq_no ?? null,
+          rfq_title: cleanRefTitle(po.rfq_title) || null,
+          arc_number: po.arc_number || null,
+          arc_title: cleanRefTitle(po.arc_title) || null,
+          mr_number: po.source_mr_number || null,
+        }
+      : {}),
     // Who created the draft. NOT the same person as whoever pressed Initiate
     // (that is the approval instance's own initiated_by), and the only person
     // handleUpdatePO authorises to edit it — so this is who a rejected PO has
