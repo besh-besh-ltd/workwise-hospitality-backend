@@ -63,7 +63,10 @@ export function assertEditAllowed(rfq, userId, { hasQuotes = false, hasDeadEndPr
   if (rfq.status === 2) {
     throw httpError(400, 'This RFQ is closed and can no longer be edited.');
   }
-  if (rfq.bid_end_date && new Date(rfq.bid_end_date) <= new Date()) {
+  // bid_end_date is wall-clock IST; `new Date()` would read it in the server's
+  // zone (UTC in production), keeping the window "open" 5h30m too long.
+  const bidEndMs = parseIstWallTimeToEpoch(rfq.bid_end_date);
+  if (bidEndMs !== null && bidEndMs <= Date.now()) {
     // Allow editing when bid window closed but no vendors submitted quotes,
     // so the creator can extend the deadline.
     // Also allow editing when a product is dead-ended (all eligible vendors'
