@@ -167,8 +167,10 @@ describe("request-info hold", () => {
     expect(keysOf(sb.files[0])).toEqual(["id", "name", "side", "url"]);
     expect(sb.files[0]).toMatchObject({ side: "REQUEST", name: PDF.name });
     expect(typeof sb.files[0].id).toBe("number");
-    // A fresh signed link to the stored object, not the bare object URL.
-    expect(sb.files[0].url).toMatch(/^https:\/\/.+\/purchase-order\/send-back\/.+\.pdf\?.*X-Amz-Signature=[0-9a-f]{64}/);
+    // The URL the upload returned, as stored: the same as every other PO document.
+    const stored = await db.one(`SELECT file_url FROM tbl_po_send_back_files WHERE id = $1`, [sb.files[0].id]);
+    expect(sb.files[0].url).toBe(stored.file_url);
+    expect(sb.files[0].url).toMatch(/^https:\/\/.+\/purchase-order\/send-back\/.+\.pdf$/);
 
     // The file went through the stubbed client, never the network.
     expect(stubbedSend.name).toBe("stubbedS3Send");

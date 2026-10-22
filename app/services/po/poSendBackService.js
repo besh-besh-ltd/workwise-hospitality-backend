@@ -38,7 +38,6 @@ import { notifyApprovalChanged } from '../approvalEvents.js';
 import { PoDecisionError } from './poDecisionError.js';
 import { assertPoNotOnHold, findOpenHold, poOnHoldError } from './poHold.js';
 import { REASON_CODES } from './poSendBackReasons.js';
-import { signedFileUrl } from './s3SignedUrl.js';
 import {
   notifySendBackRequested,
   notifySendBackAnswered,
@@ -279,11 +278,13 @@ async function shapeRows(conn, rows) {
        FROM tbl_po_send_back_files WHERE send_back_id = ANY($1::int[]) ORDER BY id`,
     [rows.map((r) => r.id)]
   );
+  // url is the stored file_url (what the upload returned), as on every other
+  // PO document surface (tbl_purchase_order_document.document_url).
   const filesBy = new Map();
   for (const f of files) {
     const k = Number(f.send_back_id);
     if (!filesBy.has(k)) filesBy.set(k, []);
-    filesBy.get(k).push({ id: Number(f.id), side: f.side, name: f.file_name || null, url: signedFileUrl(f.file_url) });
+    filesBy.get(k).push({ id: Number(f.id), side: f.side, name: f.file_name || null, url: f.file_url });
   }
   return rows.map((r) => ({
     id: Number(r.id),
