@@ -315,7 +315,7 @@ async function postVerdict(user, shape, vendor_id, status = 1) {
   const client = await httpClient(user);
   return client.post("/api/v1/rfq/tech-evaluation-cleared-vendors").send({
     rfq_id: shape.rfq_id, vendor_id, rfq_product_tech_evaluation_id: shape.eval_id,
-    status, reject_message: status === 0 ? "no" : null,
+    status, reject_message: Number(status) === 0 ? "no" : null,
   });
 }
 
@@ -418,6 +418,94 @@ describe("POST /rfq/update-buyer-marks", () => {
     const shape = await seedIncidentRfq();
     expect((await postMarks(BUYER, { clause_id: 2147000000, vendor_id: A, buyer_marks: 1 })).status).toBe(404);
     const r = await postMarks(BUYER, { clause_id: shape.sampling_id, vendor_id: D, buyer_marks: 1, buyer_remark: "x" });
+    expect(r.status).toBe(400);
+    expect(r.body.code).toBe("VENDOR_NOT_IN_EVALUATION");
+    expect(await storedMarks(shape.sampling_id, D)).toBeUndefined();
+  });
+});
+
+// ---------------------------------------------------------------------------
+//  Which verdicts lock a vendor's marks: only an APPROVED round's
+// ---------------------------------------------------------------------------
+
+describe("verdict lock on /rfq/update-buyer-marks applies to approved rounds only", () => {
+  it("W1 — Technically Accepted clicked, then a mark corrected before submitting: 200", async () => {
+    const shape = await seedIncidentRfq();
+    await score(shape, A, MARKS_80);
+    expect((await postVerdict(BUYER, shape, A, 1)).status).toBe(200); // addToTA: approval_instance_id NULL
+    const row = await db.one(
+      `SELECT approval_instance_id, is_verified FROM tbl_rfq_product_tech_evaluation_cleared_vendors
+        WHERE tbl_rfq_product_tech_evaluation_id = $1 AND vendor_id = $2`, [shape.eval_id, A]);
+    expect(row.approval_instance_id).toBeNull();
+
+    const r = await postMarks(BUYER, { clause_id: shape.clause_ids[0], vendor_id: A, buyer_marks: 25 });
+    expect(r.status).toBe(200);
+    expect(await storedMarks(shape.clause_ids[0], A)).toBe(25);
+  });
+
+  it("W2 — after a REJECTED round the evaluator can re-score a vendor holding a non-approved verdict", async () => {
+    const shape = await seedIncidentRfq();
+    await score(shape, A, MARKS_80);
+    await score(shape, B, MARKS_72);
+    expect((await postVerdict(BUYER, shape, A, 1)).status).toBe(200);
+    const sub = await submit(shape);
+    expect(sub.status).toBe(200);
+    const rej = await (await httpClient(APPROVER)).post("/api/v1/rfq/tech-eval/approval/action").send({
+      approval_instance_id: sub.body.data.approval_instance_id, action: "REJECT", comment: "redo",
+    });
+    expect(rej.status).toBe(200);
+    expect((await db.one(
+      `SELECT status FROM tbl_tech_evaluation_rounds WHERE tbl_rfq_product_tech_evaluation_id = $1`, [shape.eval_id]
+    )).status).toBe("REJECTED");
+
+    const r = await postMarks(BUYER, { clause_id: shape.clause_ids[0], vendor_id: A, buyer_marks: 25 });
+    expect(r.status).toBe(200);
+    expect(await storedMarks(shape.clause_ids[0], A)).toBe(25);
+  });
+
+  it("W3 — a verdict written by an approved round still locks the vendor (409)", async () => {
+    const shape = await seedIncidentRfq({ bidEnd: ist(3 * DAY) });
+    await score(shape, A, MARKS_80);
+    await score(shape, B, MARKS_72);
+    await runRound(shape);
+    await db.none(`UPDATE tbl_rfq_product_tech_evaluation SET is_complete = FALSE WHERE id = $1`, [shape.eval_id]);
+    const cv = await db.one(
+      `SELECT approval_instance_id FROM tbl_rfq_product_tech_evaluation_cleared_vendors
+        WHERE tbl_rfq_product_tech_evaluation_id = $1 AND vendor_id = $2`, [shape.eval_id, A]);
+    expect(cv.approval_instance_id).not.toBeNull();
+    const r = await postMarks(BUYER, { clause_id: shape.clause_ids[0], vendor_id: A, buyer_marks: 25 });
+    expect(r.status).toBe(409);
+    expect(r.body.code).toBe("TECH_EVAL_VENDOR_ALREADY_DECIDED");
+  });
+});
+
+// ---------------------------------------------------------------------------
+//  Sampling-only evaluations: no response row exists until the first score
+// ---------------------------------------------------------------------------
+
+describe("a sampling-only evaluation (prod evals 488, 491)", () => {
+  async function samplingOnly() {
+    const shape = await seedIncidentRfq({ quoted: [], answeredOnly: [] });
+    await db.none(
+      `DELETE FROM tbl_rfq_product_tech_evaluation_clauses WHERE id = ANY($1::int[])`,
+      [shape.clause_ids.slice(0, 4)]
+    );
+    await invite(shape, A);
+    await quote(shape, A);
+    return shape;
+  }
+
+  it("X1 — a rostered vendor with no response rows can be scored; the row is created", async () => {
+    const shape = await samplingOnly();
+    expect(await storedMarks(shape.sampling_id, A)).toBeUndefined();
+    const r = await postMarks(BUYER, { clause_id: shape.sampling_id, vendor_id: A, buyer_marks: 25, buyer_remark: "ok" });
+    expect(r.status).toBe(200);
+    expect(await storedMarks(shape.sampling_id, A)).toBe(25);
+  });
+
+  it("X2 — a vendor who is not on the line's roster is still refused (400)", async () => {
+    const shape = await samplingOnly();
+    const r = await postMarks(BUYER, { clause_id: shape.sampling_id, vendor_id: D, buyer_marks: 25, buyer_remark: "x" });
     expect(r.status).toBe(400);
     expect(r.body.code).toBe("VENDOR_NOT_IN_EVALUATION");
     expect(await storedMarks(shape.sampling_id, D)).toBeUndefined();
@@ -538,3 +626,24 @@ describe("POST /rfq/tech-evaluation-cleared-vendors", () => {
     expect(await verdictCount(shape, A)).toBe(0);
   });
 });
+
+describe("POST /rfq/tech-evaluation-cleared-vendors status handling", () => {
+  it("V4 — status must be 0 or 1: null / junk is 400 and writes nothing", async () => {
+    const shape = await seedIncidentRfq();
+    for (const bad of [null, "", "yes", 2, true]) {
+      const r = await postVerdict(BUYER, shape, A, bad);
+      expect(r.status).toBe(400);
+    }
+    expect(await verdictCount(shape, A)).toBe(0);
+  });
+
+  it('V5 — status "1" is stored as an accepted, verified vendor', async () => {
+    const shape = await seedIncidentRfq();
+    expect((await postVerdict(BUYER, shape, A, "1")).status).toBe(200);
+    const row = await db.one(
+      `SELECT status, is_verified FROM tbl_rfq_product_tech_evaluation_cleared_vendors
+        WHERE tbl_rfq_product_tech_evaluation_id = $1 AND vendor_id = $2`, [shape.eval_id, A]);
+    expect(row).toMatchObject({ status: 1, is_verified: true });
+  });
+});
+

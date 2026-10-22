@@ -762,6 +762,25 @@ describe("extending the deadline on a line that is not stuck", () => {
     expect(await reopenEvents(shape)).toEqual([]);
   });
 
+  it("blocked, one passed, an eligible vendor waiting, bidding closed: submit is still refused as complete", async () => {
+    // Pins the COALESCE(total_passed_verified,0) = 0 term of techRecoverableSql:
+    // with a passed vendor the lock is NOT lifted, whoever is waiting.
+    const shape = await seedIncidentRfq({ bidEnd: ist(3 * DAY) });
+    await score(shape, A, MARKS_100);
+    await score(shape, B, MARKS_72);
+    await runRound(shape);
+    await quote(shape, C);
+    await closeBidding(shape);
+    const before = await evalRow(shape);
+    expect(before).toMatchObject({ is_complete: true, blocked_insufficient_vendors: true, total_passed_verified: 1 });
+    expect((await status(shape)).eligible_unscored_vendors.map((v) => v.vendor_id)).toEqual([C]);
+
+    const res = await submit(shape);
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe("TECH_EVAL_ALREADY_COMPLETE");
+    expect(await evalRow(shape)).toEqual(before);
+  });
+
   it("not blocked at all: nothing reopens", async () => {
     const shape = await seedIncidentRfq({ bidEnd: ist(3 * DAY) });
     await score(shape, A, MARKS_100);

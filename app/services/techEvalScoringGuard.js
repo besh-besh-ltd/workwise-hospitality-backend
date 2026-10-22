@@ -26,9 +26,16 @@ const refusal = (httpStatus, code, message) => ({ httpStatus, code, message });
  * @param {number} p.vendorId   vendor being scored / given a verdict
  * @param {number} [p.clauseId] locate the evaluation through this clause
  * @param {number} [p.techEvalId] …or directly
+ * @param {'any'|'approved'} [p.verdictLock] which verdicts freeze a vendor.
+ *   'any'      (default, the cleared-vendors endpoint): one verdict per vendor,
+ *              whichever way it was written.
+ *   'approved' (the marks endpoint): only a verdict written by an APPROVED
+ *              round (approval_instance_id set). A legacy "Technically
+ *              Accepted" click (approval_instance_id NULL) or the leftovers of
+ *              a rejected round must not stop the evaluator correcting marks.
  * @returns {Promise<{ok:true, techEval:object, clause:object|null}|{ok:false, httpStatus:number, code:string, message:string}>}
  */
-export async function checkTechEvalWritable({ userId, vendorId, clauseId = null, techEvalId = null }) {
+export async function checkTechEvalWritable({ userId, vendorId, clauseId = null, techEvalId = null, verdictLock = 'any' }) {
   const row = await db.oneOrNone(
     `SELECT te.id, te.rfq_id, te.tbl_rfq_product_id, te.is_complete,
             c.id AS clause_id, c.weightage, c.clause_type,
@@ -41,7 +48,22 @@ export async function checkTechEvalWritable({ userId, vendorId, clauseId = null,
                   ON _vc.id = _vr.tbl_rfq_product_tech_evaluation_clauses_id
                WHERE _vc.tbl_rfq_product_tech_evaluation_id = te.id
                  AND _vr.vendor_id = vv.vendor_id
-            ) AS vendor_in_eval,
+            ) AS vendor_has_response,
+            -- Sampling rows are minted by the buyer's first score, so a vendor
+            -- can be a genuine participant with no response row at all. The
+            -- roster getTechEvalStatusByProductId shows is tbl_rfq_product_vendors
+            -- for this line (active vendor users); mirror it.
+            (c.clause_type = 'sampling' AND EXISTS (
+              SELECT 1
+                FROM tbl_rfq_product_vendors _rpv
+                JOIN tbl_rfq_products _rp ON _rp.id = te.tbl_rfq_product_id
+                JOIN tbl_users _tu ON _tu.id = _rpv.user_id
+               WHERE _rpv.rfq_id = te.rfq_id
+                 AND _rpv.user_id = vv.vendor_id
+                 AND _rpv.product_variant_id = _rp.product_variant_id
+                 AND COALESCE(_rpv.variant, 0) = COALESCE(_rp.variant, 0)
+                 AND _tu.status = 1
+            )) AS vendor_on_roster,
             EXISTS (
               SELECT 1 FROM tbl_tech_evaluation_rounds r
                WHERE r.tbl_rfq_product_tech_evaluation_id = te.id
@@ -51,7 +73,13 @@ export async function checkTechEvalWritable({ userId, vendorId, clauseId = null,
               SELECT 1 FROM tbl_rfq_product_tech_evaluation_cleared_vendors cv
                WHERE cv.tbl_rfq_product_tech_evaluation_id = te.id
                  AND cv.vendor_id = vv.vendor_id
-            ) AS vendor_has_verdict
+            ) AS vendor_has_verdict,
+            EXISTS (
+              SELECT 1 FROM tbl_rfq_product_tech_evaluation_cleared_vendors cv
+               WHERE cv.tbl_rfq_product_tech_evaluation_id = te.id
+                 AND cv.vendor_id = vv.vendor_id
+                 AND cv.approval_instance_id IS NOT NULL
+            ) AS vendor_has_approved_verdict
        FROM (SELECT $3::int AS vendor_id) vv,
             tbl_rfq_product_tech_evaluation te
        LEFT JOIN tbl_rfq_product_tech_evaluation_clauses c
@@ -74,7 +102,7 @@ export async function checkTechEvalWritable({ userId, vendorId, clauseId = null,
   // this RFQ's hotel/department/process — another company's buyer included.
   await assertCanReadParentRfq(userId, row.rfq_id);
 
-  if (!row.vendor_in_eval) {
+  if (!(row.vendor_has_response || row.vendor_on_roster)) {
     return {
       ok: false,
       ...refusal(400, 'VENDOR_NOT_IN_EVALUATION', 'This vendor has not answered this technical evaluation.'),
@@ -96,7 +124,7 @@ export async function checkTechEvalWritable({ userId, vendorId, clauseId = null,
       ...refusal(409, 'TECH_EVAL_ROUND_PENDING', 'A round of this technical evaluation is awaiting approval.'),
     };
   }
-  if (row.vendor_has_verdict) {
+  if (verdictLock === 'approved' ? row.vendor_has_approved_verdict : row.vendor_has_verdict) {
     return {
       ok: false,
       ...refusal(409, 'TECH_EVAL_VENDOR_ALREADY_DECIDED', 'This vendor already has a technical verdict on this evaluation.'),

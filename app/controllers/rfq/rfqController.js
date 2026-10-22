@@ -4384,6 +4384,7 @@ const startApprovalForTechEval = async (rfqProductId, rfqId, userId, txContext =
   // evaluation locked before the keep-open rule in handleTechnicalPostApproval,
   // after which a vendor quoted and bidding closed. Lift the lock here, inside
   // the submit transaction, so a refusal further down rolls it back.
+  let reopenedBySubmit = false;
   if (techEval.is_complete) {
     if (techEval.recoverable !== true) {
       throw techEvalRefusal('TECH_EVAL_ALREADY_COMPLETE', 'Technical evaluation is already complete with required number of passed vendors');
@@ -4393,10 +4394,9 @@ const startApprovalForTechEval = async (rfqProductId, rfqId, userId, txContext =
       [techEval.id]
     );
     techEval.is_complete = false;
-    logger.info(
-      { techEvalId: techEval.id, rfqId, rfqProductId, userId },
-      'Tech evaluation was locked with 0 passed but a vendor is waiting to be evaluated; reopened by submit'
-    );
+    // Logged by the caller once the transaction has COMMITTED: a later refusal
+    // (pending round, nothing scored, no policy) rolls this reopen back.
+    reopenedBySubmit = true;
   }
 
   // Check if there's already a pending/submitted round for this evaluation
@@ -4542,7 +4542,9 @@ const startApprovalForTechEval = async (rfqProductId, rfqId, userId, txContext =
   return {
     ...result,
     round_id: round.id,
-    round_number: currentRound
+    round_number: currentRound,
+    techEvalId: techEval.id,
+    reopenedBySubmit
   };
 };
 
@@ -17315,7 +17317,11 @@ getClauses: async (req, res) => {
             'Invalid input. Please provide vendor ID , rfq_product_tech_evaluation_id and status'
         });
       }
-      if (![0, 1].includes(Number(status))) {
+      // Only 0 / 1 (numbers or the strings "0" / "1"); null, '', booleans,
+      // arrays and the rest are refused. Normalised HERE because the model
+      // compares `status === 1` to set is_verified.
+      const statusNum = (typeof status === 'string' && /^\s*[01]\s*$/.test(status)) ? Number(status) : status;
+      if (statusNum !== 0 && statusNum !== 1) {
         return res.status(400).json({ status: 0, message: 'status must be 0 (reject) or 1 (accept).' });
       }
 
@@ -17334,7 +17340,7 @@ getClauses: async (req, res) => {
       const response = await rfqModel.addtechEvaluationClearedVendors(
         vendor_id,
         rfq_product_tech_evaluation_id,
-        status,
+        statusNum,
         reject_message,
         user_id
       );
@@ -17670,9 +17676,18 @@ getClauses: async (req, res) => {
           total_steps: approvalResult.totalSteps,
           auto_approved: approvalResult.autoApproved || false,
           round_id: approvalResult.round_id,
-          round_number: approvalResult.round_number
+          round_number: approvalResult.round_number,
+          reopened_tech_eval_id: approvalResult.reopenedBySubmit ? approvalResult.techEvalId : null
         };
       });
+
+      // The transaction has committed: the reopen is real now.
+      if (result.reopened_tech_eval_id) {
+        logger.info(
+          { techEvalId: result.reopened_tech_eval_id, rfqId: rfq_id, rfqProductId: rfq_product_id, userId },
+          'Tech evaluation was locked with 0 passed but a vendor is waiting to be evaluated; reopened by submit'
+        );
+      }
 
       if (!result.success) {
         return res.status(400).json({
@@ -18172,7 +18187,9 @@ getClauses: async (req, res) => {
       const gate = await checkTechEvalWritable({
         userId: buyer_id,
         vendorId: Number(vendor_id),
-        clauseId: Number(clause_id)
+        clauseId: Number(clause_id),
+        // Only a verdict an approved round wrote locks a vendor's marks.
+        verdictLock: 'approved'
       });
       if (!gate.ok) {
         return res.status(gate.httpStatus).json({ status: 0, code: gate.code, message: gate.message });
