@@ -50,6 +50,7 @@ const binary = (req) =>
 
 describe("Vendor PO reference (RFQ / contract) on every vendor surface", () => {
   let alpha, beta;
+  const extra = [];
   let arcId, contractId, calloffPoId, mrId, rfqId, rfqPoId, betaPoId, rfqNo, vendorCompanyId;
 
   beforeAll(async () => {
@@ -116,6 +117,10 @@ describe("Vendor PO reference (RFQ / contract) on every vendor surface", () => {
   });
 
   afterAll(async () => {
+    for (const e of extra) {
+      await db.none(`DELETE FROM tbl_rfq_purchase_order WHERE id=$1`, [e.poId]);
+      await db.none(`DELETE FROM tbl_rfq WHERE id=$1`, [e.rfqId]);
+    }
     await db.none(`DELETE FROM tbl_rfq_purchase_order WHERE id = ANY($1::int[])`, [[rfqPoId, betaPoId].filter(Boolean)]);
     if (rfqId) await db.none(`DELETE FROM tbl_rfq WHERE id=$1`, [rfqId]);
     await db.none(`DELETE FROM tbl_notifications WHERE category IN ('CALL_OFF','mr')`);
@@ -247,6 +252,16 @@ describe("Vendor PO reference (RFQ / contract) on every vendor surface", () => {
     expect(buildVendorPoReference({ is_call_off: true, arc_title: "Linen" })).toBe("Linen");
     expect(buildVendorPoReference({ is_call_off: true, arc_number: "ARC-1", mr_number: "MR-0005" })).toBe("ARC-1 · MR-0005");
     expect(buildVendorPoReference({})).toBe("");
+    // Prefix only when it is really a prefix.
+    expect(buildVendorPoReference({ is_call_off: true, arc_number: "ARCADE-1", mr_number: "MRP-5" })).toBe("ARC ARCADE-1 · MR MRP-5");
+    expect(buildVendorPoReference({ is_call_off: true, arc_number: "ARC 7", mr_number: "MR-5" })).toBe("ARC 7 · MR-5");
+    // Plain text titles are kept as typed (no tag stripping).
+    expect(buildVendorPoReference({ rfq_no: 5, rfq_title: "Size <10 and >5" })).toBe("RFQ #5 · Size <10 and >5");
+    // Long titles are capped at 80 chars + ellipsis; numbers stay intact.
+    const long = buildVendorPoReference({ rfq_no: 536894, rfq_title: "word ".repeat(100) });
+    expect(long.startsWith("RFQ #536894 · word")).toBe(true);
+    expect(long.endsWith("…")).toBe(true);
+    expect(long.length).toBeLessThanOrEqual("RFQ #536894 · ".length + 81);
 
     // Reminder subjects (cron data path -> email builder).
     const { findPosNeedingVendorReminder } = await import("../../app/helper/cronManager.js");
@@ -273,7 +288,60 @@ describe("Vendor PO reference (RFQ / contract) on every vendor surface", () => {
     const released = subj.find((s) => /^New released purchase order .* acceptance required$/.test(s));
     expect(released).toBeTruthy();
     expect(released).toContain(`(${ARC_NUMBER} · ${ARC_TITLE} · MR ${MR_NUMBER})`);
+    for (const s of subj) expect(s.length).toBeLessThanOrEqual(255);
     for (const s of subj) expect(s).not.toMatch(/&amp;|&lt;|<[a-z]/i);
     expect(JSON.stringify(sentMails.map((m) => m.subject))).not.toContain(MR_TITLE);
+  });
+
+  it("bounds a 500-char title in the subject and still creates the in-app notice; null title gives a bare RFQ number", async () => {
+    const { findPosNeedingVendorReminder } = await import("../../app/helper/cronManager.js");
+    const { sendPOAcceptanceReminderToVendor } = await import("../../app/controllers/po/purchaseOrderEmails.js");
+    const mk = async (title, poNum) => {
+      const r = await db.one(
+        `INSERT INTO tbl_rfq
+           (comment, company_name, response_email, contact_name, contact_number,
+            bid_end_date, location, created_by, updated_by, status,
+            hospitality_company_id, hotel_id, department_id, process_id, title)
+         VALUES ('ref rfq','Hotel A1','buyer@test.local','A1 Buyer','9999999999',
+                 $1,'A1',$2,$2,1,$3,$4,$5,$6,$7) RETURNING id, rfq_no`,
+        [String(Date.now() + 86400000), BUYER, HC, HOTEL, DEPT, PROC, title]);
+      const po = await db.one(
+        `INSERT INTO tbl_rfq_purchase_order
+           (rfq_id, company_id, po_number, status, rfq_product_id, quantity, unit_price,
+            finalized_vendor_id, total_value, quote_id, is_call_off, updated_at, vendor_reminder_count)
+         VALUES ($1,$2,$3,'acceptance_pending','{1}',10,50,$4,500,'{}',false, NOW() - INTERVAL '2 days', 0) RETURNING id`,
+        [r.id, vendorCompanyId, poNum, VENDOR]);
+      extra.push({ rfqId: r.id, poId: po.id });
+      return { ...r, poId: po.id };
+    };
+    const longTitle = ("Quarterly   housekeeping consumables " .repeat(20)).slice(0, 500);
+    const a = await mk(longTitle, "PO-REF-LONG-1");
+    const b = await mk(null, "PO-REF-NULL-1");
+    const due = await findPosNeedingVendorReminder(new Date());
+    sentMails.length = 0;
+    for (const x of [a, b]) {
+      const po = due.find((p) => Number(p.id) === x.poId);
+      expect(po).toBeTruthy();
+      await sendPOAcceptanceReminderToVendor(
+        po,
+        { rfq_no: po.rfq_no, title: po.rfq_title, arc_number: po.arc_number, arc_title: po.arc_title, mr_number: po.mr_number, is_call_off: po.is_call_off },
+        3
+      );
+    }
+    const longSubj = sentMails.map((m) => m.subject).find((s) => s.includes("PO-REF-LONG-1"));
+    expect(longSubj.length).toBeLessThanOrEqual(255);
+    expect(longSubj).toContain("…");
+    expect(longSubj).toContain(`RFQ #${a.rfq_no} · Quarterly`);
+    const nullSubj = sentMails.map((m) => m.subject).find((s) => s.includes("PO-REF-NULL-1"));
+    expect(nullSubj).toBe(`Final Reminder: PO #PO-REF-NULL-1 (RFQ #${b.rfq_no}) needs your immediate attention`);
+    // The in-app notice was created for both (dispatch is awaited-not; poll briefly).
+    let rows = [];
+    for (let i = 0; i < 20 && rows.length < 2; i++) {
+      rows = await db.any(
+        `SELECT title FROM tbl_notifications WHERE type = 'po_acceptance_reminder_3' AND (title LIKE '%PO-REF-LONG-1%' OR title LIKE '%PO-REF-NULL-1%')`);
+      if (rows.length < 2) await new Promise((r) => setTimeout(r, 100));
+    }
+    expect(rows.length).toBe(2);
+    expect(rows.every((r) => r.title.length <= 255)).toBe(true);
   });
 });

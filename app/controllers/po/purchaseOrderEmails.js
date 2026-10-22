@@ -1,4 +1,4 @@
-import { buildVendorPoReference } from "../../helper/poReference.js";
+import { buildVendorPoReference, clampText } from "../../helper/poReference.js";
 import config from "../../config/app.config.js";
 import db from "../../config/dbConn.js";
 import { sendMail, logError } from "../../helper/common.js";
@@ -537,7 +537,8 @@ export const sendPOAcceptanceReminderToVendor = async (purchaseOrder, rfqDetails
       userIds: [vendor.id],
       category: 'po',
       type: `po_acceptance_reminder_${reminderNumber}`,
-      title: subjects[reminderNumber] || subjects[1],
+      // tbl_notifications.title is varchar(255): clamp so a long reference can never fail the insert.
+      title: clampText(subjects[reminderNumber] || subjects[1], 255),
       body: `PO #${purchaseOrder.po_number} still requires your action.`,
       data: { po_id: purchaseOrder.id, rfq_id: purchaseOrder.rfq_id, reminder: reminderNumber },
       actionUrl: linkPath

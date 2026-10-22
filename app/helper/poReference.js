@@ -17,23 +17,43 @@
 
 const ENTITIES = { "&amp;": "&", "&lt;": "<", "&gt;": ">", "&quot;": '"', "&#39;": "'", "&#x27;": "'", "&nbsp;": " " };
 
-// Titles are stored HTML-entity-encoded in places ("A &amp; B"). A subject line
-// or spreadsheet cell is plain text, so decode (once), drop any tag and
-// collapse whitespace.
+// Titles can arrive HTML-entity-encoded ("A &amp; B"). A subject line or
+// spreadsheet cell is plain text, so decode (once) and collapse whitespace.
+// Tags are NOT stripped: titles are plain text and "Size <10 and >5" is real.
 export function cleanRefTitle(value) {
   if (value == null) return "";
   const decoded = String(value).replace(/&(?:amp|lt|gt|quot|nbsp|#39|#x27);/gi, (m) => ENTITIES[m.toLowerCase()] ?? m);
-  return decoded.replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim();
+  return decoded.replace(/\s+/g, " ").trim();
+}
+
+// Longest title shown in a subject / export cell (before the ellipsis).
+export const REF_TITLE_MAX = 80;
+
+// Cap at `max` characters plus "…", cutting on a word boundary when one falls
+// in the back half of the cap.
+function capTitle(text, max = REF_TITLE_MAX) {
+  if (text.length <= max) return text;
+  const cut = text.slice(0, max);
+  const lastSpace = cut.lastIndexOf(" ");
+  const base = lastSpace > max / 2 ? cut.slice(0, lastSpace) : cut;
+  return `${base.replace(/[\s,;:·-]+$/, "")}…`;
+}
+
+// Hard backstop for text bound for a varchar(255) column (tbl_notifications.title).
+export function clampText(value, max = 255) {
+  const s = String(value ?? "");
+  return s.length <= max ? s : `${s.slice(0, max - 1)}…`;
 }
 
 const clean = (v) => cleanRefTitle(v);
-const withPrefix = (value, prefix) => (new RegExp(`^${prefix}`, "i").test(value) ? value : `${prefix} ${value}`);
+// "ARC-2026-0018" / "ARC 5" already carry the prefix; "ARCADE-1" / "MRP-5" do not.
+const withPrefix = (value, prefix) => (new RegExp(`^${prefix}([-\\s]|$)`, "i").test(value) ? value : `${prefix} ${value}`);
 
 export function buildVendorPoReference(row) {
   if (!row) return "";
   const rfqNo = row.rfq_no != null ? clean(row.rfq_no) : "";
   const arcNumber = clean(row.arc_number);
-  const arcTitle = clean(row.arc_title);
+  const arcTitle = capTitle(clean(row.arc_title));
   const mrNumber = clean(row.mr_number);
   const isCallOff = row.is_call_off === true || (!rfqNo && (arcNumber || arcTitle || mrNumber));
 
@@ -47,11 +67,11 @@ export function buildVendorPoReference(row) {
       .join(" · ");
   }
   if (!rfqNo) return "";
-  const title = clean(row.rfq_title ?? row.title);
+  const title = capTitle(clean(row.rfq_title ?? row.title));
   return title ? `RFQ #${rfqNo} · ${title}` : `RFQ #${rfqNo}`;
 }
 
 // Escape LIKE/ILIKE wildcards in user input (no shared helper exists in app/).
 export const escapeLike = (s) => String(s).replace(/[\\%_]/g, "\\$&");
 
-export default { buildVendorPoReference, cleanRefTitle, escapeLike };
+export default { buildVendorPoReference, cleanRefTitle, escapeLike, clampText, REF_TITLE_MAX };
