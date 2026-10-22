@@ -71,6 +71,7 @@ async function sendToInitiators(po, recipients, { reminder }) {
     actionUrl: linkPath,
   });
 
+  const mails = [];
   for (const r of recipients) {
     if (!r.email) continue;
     try {
@@ -95,13 +96,12 @@ async function sendToInitiators(po, recipients, { reminder }) {
         subject: title,
         html: generateEmailTemplate(headerContent, containerContent),
       });
-      if (sent && typeof sent.catch === "function") {
-        sent.catch((e) => logError("poInitiateNotifier email failed", e));
-      }
+      mails.push(Promise.resolve(sent).catch((e) => logError("poInitiateNotifier email failed", e)));
     } catch (e) {
       logError("poInitiateNotifier email build failed", e);
     }
   }
+  await Promise.all(mails);
 }
 
 /** Active initiators of a PO, uncapped. Empty when the PO is not found. */
@@ -110,13 +110,32 @@ async function recipientsFor(poId) {
   return listPoInitiatorRecipients(tuple);
 }
 
+// Notifications still running, so tests can wait for them deterministically.
+const inFlight = new Set();
+
 /**
  * Tell everyone who can initiate that a freshly created draft is ready.
  * Call after the drafting transaction commits, only for a PO the call created.
  * @param {number} poId
  * @returns {Promise<void>}
  */
-export async function notifyDraftCreated(poId) {
+export function notifyDraftCreated(poId) {
+  const p = notifyDraftCreatedNow(poId);
+  inFlight.add(p);
+  const done = () => inFlight.delete(p);
+  p.then(done, done);
+  return p;
+}
+
+/**
+ * Resolves once every notification started so far has settled. For tests only:
+ * production code never calls it.
+ */
+export async function drainInitiateNotifications() {
+  while (inFlight.size) await Promise.allSettled([...inFlight]);
+}
+
+async function notifyDraftCreatedNow(poId) {
   try {
     const po = await loadDraft(poId);
     // The tx may have rolled back, or the PO may already have moved on.

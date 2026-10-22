@@ -26,7 +26,7 @@ const { grantRoleScope, revokeRoleScopes } = await import("../helpers/roleScope.
 const { makeRfqVisibleToDashboard, addProductToRfq, makePO, cleanupPurchaseOrders, cleanupRfqs } =
   await import("../helpers/dashboardSeed.js");
 const { createApprovalInstance } = await import("../../app/models/generalModel.js");
-const { remindStaleDrafts } = await import("../../app/services/po/poInitiateNotifier.js");
+const { remindStaleDrafts, drainInitiateNotifications } = await import("../../app/services/po/poInitiateNotifier.js");
 
 const CREATOR = IDS.users.a1_proc_buyer;
 const DEPT_USER = IDS.users.a1_proc_poApp;
@@ -111,11 +111,6 @@ afterAll(async () => {
 
 // The award flow sends its own unrelated mails; only look at ours.
 const initiateMails = () => sentMails.filter((m) => /initiate/i.test(m.subject || ""));
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-async function waitFor(fn, ms = 4000) {
-  const end = Date.now() + ms;
-  for (;;) { const v = await fn(); if (v) return v; if (Date.now() > end) return v; await sleep(50); }
-}
 const notesFor = (poId, type) => db.any(
   `SELECT recipient_user_id, action_url, type FROM tbl_notifications
     WHERE (additional_data->>'po_id')::int = $1 AND type = $2`, [poId, type]);
@@ -190,10 +185,8 @@ describe("draft PO ready", () => {
     await award(0);
     const po = await db.one(`SELECT id, po_number FROM tbl_rfq_purchase_order WHERE rfq_id = $1`, [rfq.id]);
 
-    const rows = await waitFor(async () => {
-      const r = await notesFor(po.id, "po_draft_ready");
-      return r.length >= EXPECTED.length ? r : null;
-    });
+    await drainInitiateNotifications();
+    const rows = await notesFor(po.id, "po_draft_ready");
     const ids = rows.map((r) => r.recipient_user_id);
     for (const u of EXPECTED) expect(ids).toContain(u);
     for (const u of NOT_EXPECTED) expect(ids).not.toContain(u);
@@ -203,7 +196,6 @@ describe("draft PO ready", () => {
 
     // one email per recipient that has an address, each with the link and the copy
     const addr = (await emailOf(ids)).filter((u) => u.email);
-    await waitFor(() => initiateMails().length >= addr.length);
     expect(initiateMails().map((m) => m.to).sort()).toEqual(addr.map((u) => u.email).sort());
     for (const m of initiateMails()) {
       expect(m.html).toContain(`/dashboard/buyer/purchase-orders/${po.id}?action=initiate`);
@@ -218,9 +210,8 @@ describe("draft PO ready", () => {
     const { rfq, award } = await stageAward();
     await award(0);
     const po = await db.one(`SELECT id FROM tbl_rfq_purchase_order WHERE rfq_id = $1`, [rfq.id]);
-    await waitFor(async () => (await notesFor(po.id, "po_draft_ready")).length >= EXPECTED.length);
+    await drainInitiateNotifications();
     const before = (await notesFor(po.id, "po_draft_ready")).length;
-    await waitFor(() => initiateMails().length >= EXPECTED.length);
     const mailsBefore = initiateMails().length;
 
     await award(1);   // same vendor, same RFQ: merges into the existing draft
@@ -229,22 +220,69 @@ describe("draft PO ready", () => {
     const lines = await db.one(`SELECT count(*)::int AS n FROM tbl_purchase_order_product WHERE purchase_order_id = $1`, [po.id]);
     expect(lines.n).toBe(2);
 
-    await sleep(600);
+    await drainInitiateNotifications();
     expect((await notesFor(po.id, "po_draft_ready")).length).toBe(before);
     expect(initiateMails().length).toBe(mailsBefore);
+  });
+
+  it("notifies the initiators for BOTH POs when one award creates two drafts (two vendors)", async () => {
+    const VENDOR_B = IDS.users.vendor_beta;
+    const { rfq } = await stageAward();
+    await db.none(`INSERT INTO tbl_rfq_product_vendors (rfq_id, product_variant_id, user_id, variant) VALUES ($1, 1, $2, 0)`, [rfq.id, VENDOR_B]);
+    const prod = await db.one(
+      `INSERT INTO tbl_rfq_products (rfq_id, comment, datasheet, spec_file, qap_file, qap, product_variant_id, variant)
+       VALUES ($1, '', '', '', '', '', 1, 0) RETURNING id`, [rfq.id]);
+    const selected = [];
+    for (const v of [VENDOR_A, VENDOR_B]) {
+      const q = await db.one(
+        `INSERT INTO tbl_quotes (rfq_id, rfq_no, created_by, updated_by, status, "timestamp")
+         VALUES ($1, $2, $3, $3, 1, NOW()) RETURNING id`, [rfq.id, rfq.rfq_no, v]);
+      await db.none(
+        `INSERT INTO tbl_quote_items
+           (rfq_id, rfq_no, quote_id, product_variant_id, unit_price, total_price, package_price, tax,
+            freight_price, variant, comment, delivery_period, quantity, tax_mode, other_charges)
+         VALUES ($1, $2, $3, 1, 500, 25000, 0, 0, 0, 0, '', '15', '50', 'absolute', '[]'::jsonb)`,
+        [rfq.id, rfq.rfq_no, q.id]);
+      selected.push({ quote_id: q.id, vendor_id: v, quoted_price: 500 });
+    }
+    const approval = await createApprovalInstance({
+      entity_type: "NEGOTIATION_QUOTE", entity_id: prod.id,
+      hospitality_company_id: IDS.hospitality.A, hotel_id: IDS.hotels.A1, department_id: null,
+      process_id: IDS.processes.A_P1, initiated_by: CREATOR,
+      metadata: { rfq_id: rfq.id, rfq_number: rfq.rfq_no, rfq_product_id: prod.id, is_tender: 0, selected_quotes: selected },
+    });
+    created.instanceIds.push(approval.instance.id);
+    const res = await approver.post(`/api/v1/negotiation/quotes/${prod.id}/approve`).send({});
+    expect(res.status).toBe(200);
+    await drainInitiateNotifications();
+
+    const pos = await db.any(`SELECT id, po_number, finalized_vendor_id FROM tbl_rfq_purchase_order WHERE rfq_id = $1`, [rfq.id]);
+    expect(pos).toHaveLength(2);
+    expect(new Set(pos.map((p) => p.finalized_vendor_id))).toEqual(new Set([VENDOR_A, VENDOR_B]));
+    for (const po of pos) {
+      const rows = await notesFor(po.id, "po_draft_ready");
+      const ids = rows.map((r) => r.recipient_user_id);
+      for (const u of EXPECTED) expect(ids).toContain(u);
+      expect(new Set(ids).size).toBe(ids.length);
+      const link = `/dashboard/buyer/purchase-orders/${po.id}?action=initiate`;
+      for (const r of rows) expect(r.action_url).toBe(link);
+      const mails = initiateMails().filter((m) => m.html.includes(link));
+      expect(mails.map((m) => m.to).sort()).toEqual((await emailOf(ids)).filter((u) => u.email).map((u) => u.email).sort());
+    }
   });
 
   it("never notifies vendors", async () => {
     const { rfq, award } = await stageAward();
     await award(0);
     const po = await db.one(`SELECT id FROM tbl_rfq_purchase_order WHERE rfq_id = $1`, [rfq.id]);
-    await waitFor(async () => (await notesFor(po.id, "po_draft_ready")).length >= EXPECTED.length);
+    await drainInitiateNotifications();
     const vendor = (await emailOf([VENDOR_A]))[0];
     expect((await notesFor(po.id, "po_draft_ready")).map((r) => r.recipient_user_id)).not.toContain(VENDOR_A);
 
     const now = new Date();
     await ageTo(po.id, now, 49);
     await remindStaleDrafts(now);
+    await drainInitiateNotifications();
     expect((await notesFor(po.id, "po_draft_initiate_reminder")).map((r) => r.recipient_user_id)).not.toContain(VENDOR_A);
     expect(sentMails.map((m) => m.to)).not.toContain(vendor.email);
     expect(vendor.email).toBeTruthy();
@@ -287,6 +325,7 @@ describe("reminder", () => {
     await ageTo(old.po_id, now, 15 * 24);
 
     await remindStaleDrafts(now);
+    await drainInitiateNotifications();
     for (const p of [initiated, closed, old]) {
       expect(await notesFor(p.po_id, "po_draft_initiate_reminder")).toHaveLength(0);
       const r = await db.one(`SELECT initiate_reminded_at FROM tbl_rfq_purchase_order WHERE id = $1`, [p.po_id]);
