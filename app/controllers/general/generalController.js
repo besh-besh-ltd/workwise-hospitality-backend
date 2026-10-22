@@ -32,6 +32,7 @@ import generalModel, {
 } from '../../models/generalModel.js';
 import { resolveHospitalityCompanyScope } from '../../helper/arc_v2/resolveHospitalityCompany.js';
 import { executeApprovalAction } from '../../services/approvalActionService.js';
+import { PoDecisionError } from '../../services/poApprovalService.js';
 import { stageLabel } from '../../services/notificationLinks.js';
 import {
   snapshotPolicySteps,
@@ -1320,7 +1321,7 @@ const hospitalityApprovalController = {
    */
   async submitApprovalAction(req, res) {
     try {
-      const { approval_instance_id, approval_instance_step_id, action, comment } = req.body;
+      const { approval_instance_id, approval_instance_step_id, action, comment, reason_category, route } = req.body;
       const approver_user_id = req.user?.id;
 
       if (!approver_user_id) {
@@ -1344,11 +1345,20 @@ const hospitalityApprovalController = {
         approval_instance_step_id: approval_instance_step_id ? parseInt(approval_instance_step_id) : null,
         approver_user_id,
         action,
-        comment
+        comment,
+        // PO rejections only: why, and whether to re-award or cancel. Ignored
+        // for every other entity type.
+        reason_category,
+        route,
       });
 
       res.json({ status: 1, data: result });
     } catch (e) {
+      // A refused PO rejection (unknown reason, a route that is not available,
+      // a stale approval) answers with its own status and code, like the PO page.
+      if (e instanceof PoDecisionError) {
+        return res.status(e.httpStatus || 400).json({ status: 3, message: e.message, code: e.code });
+      }
       logError(e);
       res.status(400).json({ status: 3, message: e.message });
     }

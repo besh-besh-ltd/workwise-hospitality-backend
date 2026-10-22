@@ -3824,7 +3824,12 @@ export async function submitApprovalAction({
         await recordLifecycleEvent({
           entity_type: instance.entity_type,
           entity_id: instance.entity_id,
-          stage: 'APPROVED', // Stage before rejection
+          // Was 'APPROVED' ("stage before rejection"), which read as an
+          // approval to anyone scanning the history. Nothing reads this
+          // label back: tbl_lifecycle_history.stage consumers are the
+          // activity backfill (copies it into metadata, verb from `action`)
+          // and the RFQ close-comment lookup (filters on action).
+          stage: 'REJECTED',
           action: 'REJECT',
           performed_by: approver_user_id,
           metadata: {

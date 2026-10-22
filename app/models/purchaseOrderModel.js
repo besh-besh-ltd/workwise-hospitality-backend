@@ -939,6 +939,26 @@ export const draftPurchaseOrder = async (rfq_id, project_id, quote_item_id, tota
         )
       }
 
+      // Re-award trace: a draft that awards a product again after an approver
+      // rejected its PO points at that rejected PO, so the next approver can
+      // see why the first one was turned down. Latest rejected PO on this RFQ
+      // sharing the product; a merge keeps whatever the draft already traces.
+      await t.none(
+        `UPDATE tbl_rfq_purchase_order
+            SET replaces_po_id = (
+              SELECT prev.id
+                FROM tbl_rfq_purchase_order prev
+                JOIN tbl_purchase_order_product pp ON pp.purchase_order_id = prev.id
+               WHERE prev.rfq_id = $2
+                 AND pp.rfq_product_id = $3
+                 AND prev.status = 'rejected'
+                 AND prev.id <> $1
+               ORDER BY prev.id DESC
+               LIMIT 1)
+          WHERE id = $1 AND replaces_po_id IS NULL`,
+        [po.id, rfq_id, rfq_product_id]
+      );
+
       // Auto-initiate eligibility probe — runs inside the same tx so the
       // just-inserted line is visible. The result is returned to the
       // caller (rfqController.finalize / negotiationQuotePostApproval),
@@ -1870,11 +1890,14 @@ export const getPOByRFQId = async (rfq_id, user_id, user_type, page = 1, limit =
 
       data = data.map(d => {
         const sealedPdfUrl = resolvePoPdfVisibility(d.status, d.po_pdf_url);
-        return {
+        const row = {
           ...d,
           po_pdf_url: sealedPdfUrl,
           poPdfUrl: sealedPdfUrl,
         };
+        // The re-award trace points at a rejected PO, often another vendor's.
+        if (user_type == 3) delete row.replaces_po_id;
+        return row;
       })
 
       // The scope predicate correlates against the joined RFQ alias, so the

@@ -80,6 +80,10 @@ async function createInstanceCommitted({ entity_type = "RFQ", policy_id }) {
 afterAll(async () => {
   if (insertedInstanceIds.length) {
     await db.none(
+      `DELETE FROM tbl_po_send_backs WHERE approval_instance_id = ANY($1::int[])`,
+      [insertedInstanceIds]
+    );
+    await db.none(
       `DELETE FROM tbl_approval_actions WHERE approval_instance_id = ANY($1::int[])`,
       [insertedInstanceIds]
     );

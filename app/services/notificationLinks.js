@@ -210,6 +210,10 @@ export const buyerMrList = ({ tab } = {}) =>
 export const buyerNegotiationRound = (rfqId) =>
   isPositiveId(rfqId) ? `/dashboard/buyer/negotiation/${enc(rfqId)}` : null;
 
+/** Create Round page for an RFQ (pages/dashboard/buyer/negotiation/[rfqId]/create). */
+export const buyerNegotiationCreateRound = (rfqId) =>
+  isPositiveId(rfqId) ? `/dashboard/buyer/negotiation/${enc(rfqId)}/create` : null;
+
 export const buyerNegotiationApprove = (rfqId) =>
   isPositiveId(rfqId) ? `/dashboard/buyer/negotiation/${enc(rfqId)}/approve` : null;
 
@@ -435,6 +439,7 @@ export default {
   buyerMrDetail,
   buyerMrList,
   buyerNegotiationRound,
+  buyerNegotiationCreateRound,
   buyerNegotiationApprove,
   queryThread,
   buyerClarifications,

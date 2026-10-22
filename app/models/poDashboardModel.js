@@ -742,6 +742,47 @@ export async function getAwaitingPOs(scope) {
   };
 }
 
+/**
+ * The rejected PO a re-awarded PO replaces, with the approver's reason and
+ * comment (from the rejection's closed send-back row; for a rejection recorded
+ * before reasons existed, the REJECT action's comment and a null reason).
+ * Null when the PO replaces nothing or the row is gone.
+ */
+async function loadReplacedPo(replacesPoId) {
+  if (!replacesPoId) return null;
+  const row = await db.oneOrNone(
+    `SELECT prev.id, prev.po_number, sb.reason_category,
+            COALESCE(sb.comment, aa.comment) AS comment
+       FROM tbl_rfq_purchase_order prev
+       LEFT JOIN LATERAL (
+         SELECT s.reason_category, s.comment
+           FROM tbl_po_send_backs s
+          WHERE s.purchase_order_id = prev.id
+            AND s.status = 'CLOSED'
+            AND s.route <> 'INFO_REQUEST'
+          ORDER BY s.id DESC
+          LIMIT 1
+       ) sb ON TRUE
+       LEFT JOIN LATERAL (
+         SELECT a.comment
+           FROM tbl_approval_actions a
+          WHERE a.approval_instance_id = prev.approval_instance_id
+            AND a.action = 'REJECT'
+          ORDER BY a.created_at DESC
+          LIMIT 1
+       ) aa ON TRUE
+      WHERE prev.id = $1`,
+    [replacesPoId]
+  );
+  if (!row) return null;
+  return {
+    po_id: Number(row.id),
+    po_number: row.po_number,
+    reason_category: row.reason_category || null,
+    comment: row.comment || null,
+  };
+}
+
 // ===========================================================================
 // 4) Detail-full augmentation (merged into GET /po/:po_id response)
 // ===========================================================================
@@ -1363,8 +1404,18 @@ export async function getPODetailFull(po_id, scope, viewer = null) {
     }
   }
 
+  // Re-award trace: the rejected PO this one replaces, with the approver's
+  // reason, so whoever approves the re-award sees why the first was turned
+  // down. BUYER viewers only, on the same gate as the initiate guidance: a
+  // vendor must never see why another vendor's PO was rejected.
+  let replacesTrace = {};
+  if (viewer && !(Number(viewer.user_type) === 3 || viewer.is_token_user || scope.vendorId)) {
+    replacesTrace = { replaces: await loadReplacedPo(po.replaces_po_id) };
+  }
+
   return {
     ...initiateGuide,
+    ...replacesTrace,
     id: po.id,
     po_number: po.po_number,
     status: po.status,

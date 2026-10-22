@@ -5026,11 +5026,19 @@ LIMIT 2;
         po.finalized_vendor_id AS vendor_id,
         vu.name AS vendor_name,
         vu.organization_name AS vendor_organization,
+        po.id AS po_id,
         po.po_number,
         CASE
           WHEN po.status = 'rejected_by_vendor' THEN 'vendor'
           ELSE 'approver'
         END AS rejection_type,
+        -- The approver's chosen reason, from the rejection's closed send-back
+        -- row. NULL for vendor rejections and for rejections recorded before
+        -- reasons existed.
+        CASE
+          WHEN po.status = 'rejected_by_vendor' THEN NULL
+          ELSE sb.reason_category
+        END AS reason_category,
         CASE
           WHEN po.status = 'rejected_by_vendor' THEN po.vendor_rejection_reason
           ELSE aa.comment
@@ -5060,6 +5068,15 @@ LIMIT 2;
         LIMIT 1
       ) aa ON TRUE
       LEFT JOIN tbl_users au ON au.id = aa.approver_user_id
+      LEFT JOIN LATERAL (
+        SELECT s.reason_category
+        FROM tbl_po_send_backs s
+        WHERE s.purchase_order_id = po.id
+          AND s.status = 'CLOSED'
+          AND s.route <> 'INFO_REQUEST'
+        ORDER BY s.id DESC
+        LIMIT 1
+      ) sb ON TRUE
       WHERE po.rfq_id = ANY($1::int[])
         AND po.status IN ('rejected_by_vendor', 'rejected')
         AND NOT EXISTS (
@@ -5260,6 +5277,32 @@ LIMIT 2;
           )
         GROUP BY po_rej.rfq_id
       ),
+      -- Same question for a PO an internal approver rejected (status
+      -- 'rejected'): its product is neither awarded again nor on a live
+      -- replacement PO. A CANCEL-route rejection leaves the PO 'cancelled', so
+      -- it never counts here — that product is not waiting for a re-award.
+      po_approver_rejected AS (
+        SELECT po_rej.rfq_id
+        FROM tbl_rfq_purchase_order po_rej
+        JOIN tbl_purchase_order_product pop_rej ON pop_rej.purchase_order_id = po_rej.id
+        JOIN tbl_rfq_products rp_rej ON rp_rej.id = pop_rej.rfq_product_id
+        WHERE po_rej.rfq_id = ANY($1::int[])
+          AND po_rej.status = 'rejected'
+          AND NOT EXISTS (
+            SELECT 1 FROM tbl_quote_finalization qf_rej
+            WHERE qf_rej.rfq_id = po_rej.rfq_id
+              AND qf_rej.product_variant_id = rp_rej.product_variant_id
+              AND qf_rej.variant = rp_rej.variant
+          )
+          AND NOT EXISTS (
+            SELECT 1 FROM tbl_rfq_purchase_order po_repl
+            JOIN tbl_purchase_order_product pop_repl ON pop_repl.purchase_order_id = po_repl.id
+            WHERE po_repl.rfq_id = po_rej.rfq_id
+              AND pop_repl.rfq_product_id = pop_rej.rfq_product_id
+              AND po_repl.status NOT IN ('rejected', 'rejected_by_vendor', 'cancelled')
+          )
+        GROUP BY po_rej.rfq_id
+      ),
       -- Whether the bid submission deadline has passed.
       -- bid_end_date is stored as text in ISO format (e.g. '2026-03-14T11:00'), so cast it.
       bid_status AS (
@@ -5282,6 +5325,13 @@ LIMIT 2;
           -- Stage 8b: PO Rejected by Vendor (all POs rejected, none active)
           WHEN pvr.rfq_id IS NOT NULL
             THEN 'PO_VENDOR_REJECTED'
+          -- Stage 8c: PO Rejected by an internal approver, product not yet
+          -- re-awarded. Ordering is deliberate and tested
+          -- (rfq.lifecycle.poRejected): a live sibling PO still in approval
+          -- wins (PO_APPROVAL above), and a vendor rejection is reported first
+          -- because the vendor's refusal is the older, outward-facing fact.
+          WHEN par.rfq_id IS NOT NULL
+            THEN 'PO_REJECTED'
           -- Stage 8: Awaiting PO Initiation (all products have approved quotes AND none pending)
           WHEN nqa.approved_products IS NOT NULL
             AND pc.total_products IS NOT NULL
@@ -5374,6 +5424,7 @@ LIMIT 2;
       LEFT JOIN tech_eval_product_count tepc ON tepc.rfq_id = rd.id
       LEFT JOIN has_eligible_vendors he ON he.rfq_id = rd.id
       LEFT JOIN po_vendor_rejected pvr ON pvr.rfq_id = rd.id
+      LEFT JOIN po_approver_rejected par ON par.rfq_id = rd.id
       LEFT JOIN bid_status bs ON bs.rfq_id = rd.id
     `;
 
@@ -5420,6 +5471,7 @@ LIMIT 2;
       COMMERCIAL_EVALUATION:     { resource: 'quote-compare', actions: ['read', 'create'], useDepartment: false, label: 'Commercial Evaluators' },
       AWAITING_PO:               { resource: 'awarding',      actions: ['read', 'create'], useDepartment: false, label: 'PO initiator' },
       PO_VENDOR_REJECTED:        { resource: 'awarding',      actions: ['read', 'create'], useDepartment: false, label: 'PO initiator' },
+      PO_REJECTED:               { resource: 'awarding',      actions: ['read', 'create'], useDepartment: false, label: 'PO initiator' },
     };
     const APPROVAL_LABEL = 'Pending Approvers';
 
@@ -5686,6 +5738,7 @@ LIMIT 2;
       QUOTATION_APPROVAL: 'commercial',
       AWAITING_PO: 'purchase_order',
       PO_VENDOR_REJECTED: 'purchase_order',
+      PO_REJECTED: 'purchase_order',
       PO_APPROVAL: 'purchase_order',
       APPROVED_COMPLETED: 'purchase_order',
     };
@@ -6887,6 +6940,7 @@ LIMIT 2;
         let subStatus = null;
         if (currentStage === 'AWAITING_PO') subStatus = 'awaiting_creation';
         else if (currentStage === 'PO_VENDOR_REJECTED') subStatus = 'vendor_rejected';
+        else if (currentStage === 'PO_REJECTED') subStatus = 'approver_rejected';
         else if (currentStage === 'PO_APPROVAL') subStatus = 'approving';
         else if (currentStage === 'APPROVED_COMPLETED') subStatus = 'completed';
 

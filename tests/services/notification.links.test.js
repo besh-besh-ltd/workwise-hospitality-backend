@@ -357,7 +357,7 @@ describeIfFrontend("every emitted link resolves to a real frontend page", () => 
     arcVendorContract(1), arcVendorContractAccept(1), arcVendorQuote(1),
     arcVendorRequests(), arcVendorAmendments(),
     buyerMrDetail(1), buyerMrList(),
-    links.buyerNegotiationRound(1), links.buyerNegotiationApprove(1),
+    links.buyerNegotiationRound(1), links.buyerNegotiationCreateRound(1), links.buyerNegotiationApprove(1),
     queryThread(1, "buyer"), links.buyerClarifications(1),
     links.vendorSubscription(), links.vendorProfile(), links.buyerProfile(),
     approvalActionUrl("ARC_NEGOTIATION", 1, { arc_id: 1, round_id: 2 }),

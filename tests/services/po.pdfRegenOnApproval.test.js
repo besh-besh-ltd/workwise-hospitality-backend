@@ -42,13 +42,22 @@ jest.unstable_mockModule("../../app/models/generalModel.js", () => ({
   submitApprovalAction: async () => actionResult,
   getApprovalInstanceById: async () => instanceRow,
   notifyNextApprovalStep: async () => {},
+  recordLifecycleEvent: async () => ({}),
 }));
 
 // The PO path runs inside a transaction it owns. `conn.tx(fn)` here just runs
 // the body — the real rollback semantics are covered against Postgres in
-// po.approvalDocumentAtomicity.test.js; this suite is about ordering.
+// po.approvalDocumentAtomicity.test.js and po.reject.atomic.test.js; this suite
+// is about ordering. The transaction answers the PO-row lock and the two reads
+// the rejection makes with canned rows.
+const fakeTx = {
+  __tx: true,
+  oneOrNone: async () => ({ id: 483, approval_instance_id: 4218, status: "pending_approval", rfq_id: 7, po_number: "483" }),
+  one: async (sql) => (/INSERT INTO tbl_po_send_backs/.test(sql) ? { id: 1 } : { approval_instance_step_id: 1, step_order: 1 }),
+  none: async () => {},
+};
 jest.unstable_mockModule("../../app/config/dbConn.js", () => ({
-  default: { tx: async (fn) => fn({ __tx: true }) },
+  default: { tx: async (fn) => fn(fakeTx) },
   pgp: {},
 }));
 
@@ -124,19 +133,19 @@ describe("PO document regeneration on approval", () => {
     expect(regenCalls).toEqual([]);
   });
 
-  it("dispatches a REJECT post-commit, not inside a transaction", async () => {
-    // A rejection produces no document, so there is nothing for it to be
-    // atomic with — and handlePORejectionByInstance opens its OWN transaction
-    // and re-reads the instance to confirm it is REJECTED. Called from inside
-    // an uncommitted transaction, that read still sees PENDING on its separate
-    // connection, so it returns early and the vendor de-finalization never
-    // happens. REJECT therefore stays on the post-commit path, where it worked.
+  it("runs a REJECT's de-finalization inside the rejection transaction", async () => {
+    // REVERSED 2026-10-22 (client ticket T3). This used to pin the opposite:
+    // the de-finalization ran post-commit because handlePORejectionByInstance
+    // opened its own transaction. That split is what let a rejection commit
+    // with the vendor still finalized. It now takes the caller's transaction,
+    // and a PO rejection is decision, status, de-finalization, reason and
+    // lifecycle in one commit (po.reject.atomic.test.js proves the rollback).
     actionResult = { status: "REJECTED", instance_status: "REJECTED" };
     await executeApprovalAction({
       approval_instance_id: 4218, approver_user_id: 42, action: "REJECT", comment: "no",
     });
     expect(dispatchCalls).toHaveLength(1);
-    expect(dispatchCalls[0].txContext).toBeUndefined();
+    expect(dispatchCalls[0].txContext).toBe(fakeTx);
   });
 
   it("dispatches a terminal APPROVE inside the approval transaction", async () => {

@@ -9190,7 +9190,7 @@ const rfqController = {
         AWAITING_QUOTES: 'ongoing', TECHNICAL_AWAITING_QUOTES: 'ongoing', TECHNICAL_EVALUATING: 'ongoing',
         TECHNICAL_APPROVING: 'ongoing', TECHNICAL_REJECTED: 'ongoing', RFQ_STUCK_TECHNICAL: 'ongoing',
         RFQ_STUCK_COMMERCIAL: 'ongoing', COMMERCIAL_EVALUATION: 'ongoing', NEGOTIATION_ONGOING: 'ongoing',
-        QUOTATION_APPROVAL: 'ongoing', AWAITING_PO: 'ongoing', PO_APPROVAL: 'ongoing', PO_VENDOR_REJECTED: 'ongoing',
+        QUOTATION_APPROVAL: 'ongoing', AWAITING_PO: 'ongoing', PO_APPROVAL: 'ongoing', PO_VENDOR_REJECTED: 'ongoing', PO_REJECTED: 'ongoing',
         APPROVED_COMPLETED: 'approved',
       };
       const statusKey = (r) => {
@@ -9423,8 +9423,10 @@ const rfqController = {
         if (!entry?.latest) return null;
         const r = entry.latest;
         return {
+          po_id: r.po_id,
           po_number: r.po_number,
           rejection_type: r.rejection_type,
+          reason_category: r.reason_category ?? null,
           rejected_by_name: r.rejected_by_name,
           rejected_at: r.rejected_at,
           rejection_reason: r.rejection_reason,

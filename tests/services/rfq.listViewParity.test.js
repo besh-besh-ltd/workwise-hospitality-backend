@@ -111,10 +111,26 @@ function record(body) {
   }
 }
 
+// Fields the live list view has gained since the oracle was frozen. The oracle
+// is never edited, so they are compared by their own suites and removed from a
+// COPY of the live payload here; everything else must still match exactly.
+//   po_rejection.po_id, po_rejection.reason_category — client ticket T3
+//   (rfq.lifecycle.poRejected.test.js)
+function withoutPostFreezeFields(payload) {
+  const copy = JSON.parse(JSON.stringify(payload));
+  for (const r of copy?.data?.rows || []) {
+    if (r.po_rejection) {
+      delete r.po_rejection.po_id;
+      delete r.po_rejection.reason_category;
+    }
+  }
+  return copy;
+}
+
 async function expectParity(userId, body, label) {
   const [fresh, old] = await Promise.all([viaHttp(userId, body), viaOracle(userId, body)]);
   try {
-    expect(fresh).toEqual(old);
+    expect(withoutPostFreezeFields(fresh)).toEqual(old);
   } catch (e) {
     e.message = `user=${userId} body=${JSON.stringify(body)} ${label || ""}\n${e.message}`;
     throw e;

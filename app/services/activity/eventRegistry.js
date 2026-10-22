@@ -67,10 +67,20 @@ const e = (def) => def;
  * that passes its validation (`rejected`, but also `pending` and `cancelled`)
  * is sent to the engine as REJECT. Anything else is refused with a 400, and a
  * refused request must not be written up as a decision either way.
+ *
+ * A rejection takes one of two routes. CANCEL ("not needed any more") cancels
+ * the PO rather than sending it back for re-award, and the trail says so. The
+ * route the server actually took (response `data.route`) wins; without one the
+ * body is read with the server's own default (NOT_REQUIRED means CANCEL).
  */
-const poDecisionVerb = (decision) => {
+const poDecisionVerb = (decision, { route, reasonCategory } = {}) => {
   if (decision === 'approved') return 'approved';
-  if (['rejected', 'pending', 'cancelled'].includes(decision)) return 'rejected';
+  if (['rejected', 'pending', 'cancelled'].includes(decision)) {
+    const taken = route
+      ? String(route).toUpperCase()
+      : String(reasonCategory || '').toUpperCase() === 'NOT_REQUIRED' ? 'CANCEL' : 'COMMERCIAL';
+    return taken === 'CANCEL' ? 'cancelled' : 'rejected';
+  }
   return 'tried to decide on';
 };
 
@@ -262,7 +272,10 @@ export const EVENTS = [
     method: 'POST', path: '/po/approve/:po_id', key: 'po_approval_decided',
     category: CATEGORIES.APPROVALS, severity: 'critical',
     entity: { type: 'PO', id: P('po_id') }, scope: SCOPE.entity('PO'),
-    summary: (c) => `${c.actor} ${poDecisionVerb(c.body?.decision)} purchase order ${c.entityLabel}`,
+    summary: (c) => `${c.actor} ${poDecisionVerb(c.body?.decision, {
+      route: c.response?.data?.route || c.body?.route,
+      reasonCategory: c.body?.reason_category,
+    })} purchase order ${c.entityLabel}`,
   }),
   e({
     method: 'POST', path: '/po/accept/:po_id', key: 'po_accepted',
