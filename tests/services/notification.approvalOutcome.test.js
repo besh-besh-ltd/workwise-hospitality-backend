@@ -276,6 +276,9 @@ describe("approval tells the initiator too", () => {
       entityId: po.id,
       metadata: { po_number: "PO-9", po_id: po.id, rfq_id: 359 },
     });
+    // The PO points at its approval, as initiation leaves it: an approval
+    // that is not the PO's current one is refused (R25, INSTANCE_NOT_CURRENT).
+    await db.none(`UPDATE tbl_rfq_purchase_order SET approval_instance_id = $2 WHERE id = $1`, [po.id, instanceId]);
 
     const { executeApprovalAction } = await import(
       "../../app/services/approvalActionService.js"

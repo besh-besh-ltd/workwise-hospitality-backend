@@ -736,6 +736,13 @@ export const approvePO = async (req, res) => {
         // problem or a dead connection also lands here, and telling someone to
         // approve again when the real problem is that they cannot would just be
         // a different kind of misleading.
+        // A refused approval (R25): the approval already concluded, is not the
+        // PO's current one, or the PO is no longer pending approval. Nothing
+        // changed; same shape as a refused rejection above.
+        if (err instanceof PoDecisionError) {
+          return res.status(err.httpStatus).json({ status: 0, message: err.message, code: err.code });
+        }
+
         logError(`PO ${po_id} approval rolled back`, err);
 
         if (err instanceof PoDocumentError) {
@@ -753,8 +760,9 @@ export const approvePO = async (req, res) => {
 
       return res.status(200).json({
         status: 1,
-        message:
-          actionResult.instance_status === 'APPROVED'
+        message: actionResult.already_completed
+          ? 'You already approved this purchase order. Nothing changed.'
+          : actionResult.instance_status === 'APPROVED'
             ? 'Purchase order approved and finalized.'
             : 'Approval action recorded, waiting for more approvers.',
         data: {
@@ -762,6 +770,7 @@ export const approvePO = async (req, res) => {
           step_status: actionResult.status,
           next_step: actionResult.next_step,
           approval_type: 'new',
+          already_completed: !!actionResult.already_completed,
         },
       });
     }

@@ -104,15 +104,19 @@ describe("RFQ lifecycle — PO rejected by approver", () => {
     expect((await world.rejectOnPoPage(poA, { remarks: "x", reason_category: "RENEGOTIATE" })).status).toBe(200);
     expect((await lifecycle(staged.rfq.id)).stage).toBe("PO_REJECTED");
 
+    // Re-awarded and approved: the next step is raising the PO (R23 ranks
+    // AWAITING_PO above PO_REJECTED, so this pins the end state, not the
+    // clearing clauses; those are pinned in isolation below).
     await world.award(staged, staged.products[0], [W.VENDOR_B]);
-    expect((await lifecycle(staged.rfq.id)).stage).not.toBe("PO_REJECTED");
+    expect((await lifecycle(staged.rfq.id)).stage).toBe("AWAITING_PO");
     expect((await listRow(staged.rfq.id)).po_rejection).toBeNull();
   });
 
   it("does not call a cancelled PO a rejection waiting for re-award", async () => {
     const a = await world.pendingPo();
     expect((await world.rejectOnPoPage(a.poId, { remarks: "not needed", reason_category: "NOT_REQUIRED" })).status).toBe(200);
-    expect((await lifecycle(a.rfq.id)).stage).not.toBe("PO_REJECTED");
+    // Not waiting for a re-award: the RFQ is back in commercial evaluation.
+    expect((await lifecycle(a.rfq.id)).stage).toBe("COMMERCIAL_EVALUATION");
     expect(await detailRejections(a.rfq.id)).toEqual([]);
   });
 
@@ -176,34 +180,53 @@ describe("RFQ lifecycle — PO rejected by approver", () => {
     expect(row.po_rejection).toEqual(expect.objectContaining({ po_id: poA, reason_category: "RENEGOTIATE" }));
   });
 
-  it("clears PO_REJECTED on re-finalization alone (no replacement PO)", async () => {
+  // The two clearing conditions of po_approver_rejected, one at a time. Each
+  // needs every stage that ranks above PO_REJECTED out of play, or the test
+  // reads that stage whatever the clause does: the re-award's approved award
+  // (AWAITING_PO) is cancelled. What is left below PO_REJECTED for this RFQ
+  // (no tech eval, bidding closed, quotes in) is COMMERCIAL_EVALUATION. The
+  // control shows the same setup reads PO_REJECTED when neither condition
+  // holds, so each clearing test fails if its NOT EXISTS clause is removed.
+  async function reawardedWithoutAwaitingPo() {
     const staged = await world.stageRfq({ products: 1, vendors: [W.VENDOR_A, W.VENDOR_B] });
     const product = staged.products[0];
     const poA = (await world.award(staged, product, [W.VENDOR_A])).pos[0].id;
     await world.initiate(poA);
     expect((await world.rejectOnPoPage(poA, { remarks: "x", reason_category: "RENEGOTIATE" })).status).toBe(200);
-    const { pos } = await world.award(staged, product, [W.VENDOR_B]);
-    // Keep the finalization, take the replacement PO out of play.
-    await db.none(`UPDATE tbl_rfq_purchase_order SET status = 'cancelled' WHERE id = $1`, [pos[0].id]);
+    const { pos, approvalInstanceId } = await world.award(staged, product, [W.VENDOR_B]);
+    expect(pos).toHaveLength(1);
+    await db.none(`UPDATE tbl_approval_instances SET status = 'CANCELLED' WHERE id = $1`, [approvalInstanceId]);
+    return { staged, replacementPoId: pos[0].id };
+  }
+  const dropReplacementPo = (poId) =>
+    db.none(`UPDATE tbl_rfq_purchase_order SET status = 'cancelled' WHERE id = $1`, [poId]);
+  const dropFinalization = (rfqId) => db.none(`DELETE FROM tbl_quote_finalization WHERE rfq_id = $1`, [rfqId]);
+
+  it("control: with neither a re-finalization nor a live replacement PO, the same setup reads PO_REJECTED", async () => {
+    const { staged, replacementPoId } = await reawardedWithoutAwaitingPo();
+    await dropReplacementPo(replacementPoId);
+    await dropFinalization(staged.rfq.id);
+
+    expect((await lifecycle(staged.rfq.id)).stage).toBe("PO_REJECTED");
+  });
+
+  it("clears PO_REJECTED on re-finalization alone (no replacement PO)", async () => {
+    const { staged, replacementPoId } = await reawardedWithoutAwaitingPo();
+    await dropReplacementPo(replacementPoId);
     const finalized = await db.any(`SELECT 1 FROM tbl_quote_finalization WHERE rfq_id = $1 AND vendor_id = $2`,
       [staged.rfq.id, W.VENDOR_B]);
     expect(finalized).toHaveLength(1);
 
-    expect((await lifecycle(staged.rfq.id)).stage).not.toBe("PO_REJECTED");
+    expect((await lifecycle(staged.rfq.id)).stage).toBe("COMMERCIAL_EVALUATION");
   });
 
   it("clears PO_REJECTED on a live replacement PO alone (no finalization)", async () => {
-    const staged = await world.stageRfq({ products: 1, vendors: [W.VENDOR_A, W.VENDOR_B] });
-    const product = staged.products[0];
-    const poA = (await world.award(staged, product, [W.VENDOR_A])).pos[0].id;
-    await world.initiate(poA);
-    expect((await world.rejectOnPoPage(poA, { remarks: "x", reason_category: "RENEGOTIATE" })).status).toBe(200);
-    const { pos } = await world.award(staged, product, [W.VENDOR_B]);
-    expect(pos).toHaveLength(1);
-    // Keep the replacement draft, drop the finalization behind it.
-    await db.none(`DELETE FROM tbl_quote_finalization WHERE rfq_id = $1`, [staged.rfq.id]);
+    const { staged, replacementPoId } = await reawardedWithoutAwaitingPo();
+    await dropFinalization(staged.rfq.id);
+    expect((await db.one(`SELECT status::text AS s FROM tbl_rfq_purchase_order WHERE id = $1`, [replacementPoId])).s)
+      .toBe("draft");
 
-    expect((await lifecycle(staged.rfq.id)).stage).not.toBe("PO_REJECTED");
+    expect((await lifecycle(staged.rfq.id)).stage).toBe("COMMERCIAL_EVALUATION");
   });
 
   it("gives a rejection recorded before reasons existed a null reason_category", async () => {
