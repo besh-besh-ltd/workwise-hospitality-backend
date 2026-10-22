@@ -65,7 +65,7 @@ import { deleteSchedule } from '../../helper/createSchedule.js';
 import { scheduleRfqPublish } from '../../helper/cronManager.js';
 import { notifyDraftCreated } from '../../services/po/poInitiateNotifier.js';
 import { draftPO, buildAuthoritativePOPayload } from '../po/purchaseOrderController.js';
-import { autoInitiateRFQPOs } from '../../models/purchaseOrderModel.js';
+import { autoInitiateRFQPOs, assertRfqPoListingAccess, PoAccessError } from '../../models/purchaseOrderModel.js';
 import { sendApprovalNotification } from '../po/purchaseOrderEmails.js';
 import UsersController from '../users/usersController.js';
 import { summaries } from '../../util/constants.js';
@@ -11775,13 +11775,33 @@ const rfqController = {
     }
   },
 
+  /**
+   * GET /rfq/get-existing-po?rfq_id=&vendor_id= — a vendor's draft POs on one RFQ.
+   *
+   * No frontend calls this (2026-10-22). It used to admit any signed-in user and
+   * return raw draft rows for whatever rfq_id and vendor_id the query named: a
+   * cross-tenant read. Now buyer-only (acl([2, 8]) on the route) and gated on
+   * the RFQ with the same fail-closed check GET /po/rfq/:rfq_id uses, so an
+   * RFQ outside the caller's scope (or no RFQ at all) is a 404 that does not
+   * reveal whether it exists. vendor_id only narrows the rows of an RFQ the
+   * caller can already read.
+   */
   getExistingPO: async (req, res) => {
     try {
       const { vendor_id, rfq_id } = req.query;
       const user = req.user;
 
-      // Raw draft PO rows (SELECT PO.*); the route admits any signed-in user,
-      // so a vendor caller gets them without buyer-only fields.
+      try {
+        await assertRfqPoListingAccess(user, rfq_id);
+      } catch (gateErr) {
+        if (gateErr instanceof PoAccessError) {
+          return res.status(gateErr.status).json({ status: 2, message: gateErr.message, code: gateErr.code });
+        }
+        throw gateErr;
+      }
+
+      // Raw draft PO rows (SELECT PO.*). Buyers only reach here; the strip is
+      // a no-op for them and stays as a second line of defence.
       const existingPOS = poFieldsFor(user, await rfqModel.getDraftPOByVendor(vendor_id, rfq_id, user));
 
       return res.json({

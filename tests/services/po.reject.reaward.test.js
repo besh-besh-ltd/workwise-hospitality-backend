@@ -104,14 +104,14 @@ describe("re-award after a PO rejection", () => {
     const buyer = await world.client(W.INITIATOR);
 
     // Draft stage: the existing-drafts lookup returns raw rows. A buyer keeps
-    // the field (it is theirs); a vendor never gets it.
+    // the field (it is theirs); a vendor is refused outright (ruling R22,
+    // tests/services/security.getExistingPo.test.js).
     const draftsQuery = `/api/v1/rfq/get-existing-po?vendor_id=${W.VENDOR_B}&rfq_id=${a.rfq.id}`;
     const asBuyer = await buyer.get(draftsQuery);
     expect(asBuyer.status).toBe(200);
     expect(asBuyer.body.existingPOS.find((p) => p.id === newPoId)).toHaveProperty("replaces_po_id", a.poId);
     const asVendorDrafts = await vendor.get(draftsQuery);
-    expect(asVendorDrafts.status).toBe(200);
-    expect(asVendorDrafts.body.existingPOS.length).toBeGreaterThan(0);
+    expect(asVendorDrafts.status).toBe(403);
     expect(JSON.stringify(asVendorDrafts.body)).not.toContain("replaces_po_id");
 
     // Awaiting the vendor: Order Book, PO detail and the accept response.
