@@ -719,6 +719,7 @@ RfqRoutes.post('/add-vendor-response',
 
 RfqRoutes.post('/tech-evaluation-cleared-vendors',
   passportSignIn,
+  acl([2, 8]),
   // validateBody(rfqSchemas.addtechEvaluationClearedVendors),
   rfqController.addtechEvaluationClearedVendors
 )
@@ -896,6 +897,7 @@ RfqRoutes.post(
 RfqRoutes.post(
   '/update-buyer-marks',
   passportSignIn,
+  acl([2, 8]),
   validateBody(rfqSchemas.updateBuyerMarks),
   rfqController.updateBuyerMarks
 );

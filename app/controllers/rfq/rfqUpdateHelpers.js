@@ -43,7 +43,11 @@ import { directInviteIdsForLine } from '../../services/vendorNetwork/directInvit
  * Three flags unlock step 4 once the window has closed, and they answer three
  * different questions — do not collapse them:
  *   hasDeadEndProduct         all eligible vendors' POs were rejected
- *   hasTechStuckProduct       technical evaluation RAN and every vendor failed
+ *   hasTechStuckProduct       technical evaluation RAN, nobody passed, bidding is
+ *                             closed and nobody is left to evaluate — computed
+ *                             by the caller with techStuckSql (models/
+ *                             techEvalStuck.js), the predicate every screen
+ *                             shares. Extending the deadline reopens it.
  *   hasTechUnstartableProduct technical evaluation never STARTED — clauses exist
  *                             and a quote line exists, but nobody answered, so
  *                             no vendor can be scored and no quote can ever
@@ -59,7 +63,10 @@ export function assertEditAllowed(rfq, userId, { hasQuotes = false, hasDeadEndPr
   if (rfq.status === 2) {
     throw httpError(400, 'This RFQ is closed and can no longer be edited.');
   }
-  if (rfq.bid_end_date && new Date(rfq.bid_end_date) <= new Date()) {
+  // bid_end_date is wall-clock IST; `new Date()` would read it in the server's
+  // zone (UTC in production), keeping the window "open" 5h30m too long.
+  const bidEndMs = parseIstWallTimeToEpoch(rfq.bid_end_date);
+  if (bidEndMs !== null && bidEndMs <= Date.now()) {
     // Allow editing when bid window closed but no vendors submitted quotes,
     // so the creator can extend the deadline.
     // Also allow editing when a product is dead-ended (all eligible vendors'
