@@ -212,6 +212,87 @@ describe("an approval on an APPROVED approval", () => {
   });
 });
 
+// Positive controls: the guard refuses only concluded or stale approvals. A
+// PENDING approval that needs more than one decision still completes normally.
+describe("an approval that needs more than one decision (positive controls)", () => {
+  const stepApprovers = async (stepId) =>
+    (await db.any(
+      `SELECT approver_user_id FROM tbl_approval_step_approvers WHERE approval_instance_step_id = $1 ORDER BY approver_user_id`,
+      [stepId]
+    )).map((r) => r.approver_user_id);
+  const instanceRow = (id) => db.one(`SELECT status, current_step FROM tbl_approval_instances WHERE id = $1`, [id]);
+
+  it("an ALL step with two approvers completes on the second approval, and the post-action runs once", async () => {
+    const a = await world.pendingPo();
+    const stepId = await world.currentStepId(a.instanceId);
+    await db.none(`UPDATE tbl_approval_instance_steps SET decision_rule = 'ALL' WHERE id = $1`, [stepId]);
+    await db.none(
+      `INSERT INTO tbl_approval_step_approvers (approval_instance_step_id, approver_user_id, status)
+       VALUES ($1, $2, 'PENDING')`,
+      [stepId, W.COMM_APP]
+    );
+    expect(await stepApprovers(stepId)).toEqual([W.PO_APPROVER, W.COMM_APP].sort((x, y) => x - y));
+
+    const first = await pageApprove(W.PO_APPROVER, a.poId);
+    expect(first.status).toBe(200);
+    expect(first.body.data).toMatchObject({ instance_status: "PENDING", already_completed: false });
+    expect(await instanceStatus(a.instanceId)).toBe("PENDING");
+    expect((await po(a.poId)).status).toBe("pending_approval");
+    expect(await postActionRuns(a.poId)).toBe(0);
+
+    const second = await pageApprove(W.COMM_APP, a.poId);
+    expect(second.status).toBe(200);
+    expect(second.body.data).toMatchObject({ instance_status: "APPROVED", already_completed: false });
+    await settle();
+
+    const after = await po(a.poId);
+    expect(await instanceStatus(a.instanceId)).toBe("APPROVED");
+    expect(after.status).toBe("acceptance_pending");
+    expect(await postActionRuns(a.poId)).toBe(1);
+    expect(vendorAcceptanceEmails(after.po_number)).toHaveLength(1);
+    expect((await approveActions(a.instanceId)).map((r) => r.approver_user_id).sort((x, y) => x - y))
+      .toEqual([W.PO_APPROVER, W.COMM_APP].sort((x, y) => x - y));
+  });
+
+  it("a two-step approval moves to step 2 on the first approval and completes on the second", async () => {
+    const a = await world.pendingPo();
+    const step1 = await world.currentStepId(a.instanceId);
+    const { step_order: lastOrder } = await db.one(
+      `SELECT MAX(step_order)::int AS step_order FROM tbl_approval_instance_steps WHERE approval_instance_id = $1`,
+      [a.instanceId]
+    );
+    const { step_order: firstOrder } = await db.one(`SELECT step_order FROM tbl_approval_instance_steps WHERE id = $1`, [step1]);
+    expect(lastOrder).toBe(firstOrder); // one step today; this test adds the second
+    const step2 = await db.one(
+      `INSERT INTO tbl_approval_instance_steps (approval_instance_id, step_order, decision_rule, status)
+       VALUES ($1, $2, 'ANY', 'PENDING') RETURNING id`,
+      [a.instanceId, firstOrder + 1]
+    );
+    await db.none(
+      `INSERT INTO tbl_approval_step_approvers (approval_instance_step_id, approver_user_id, status)
+       VALUES ($1, $2, 'PENDING')`,
+      [step2.id, W.COMM_APP]
+    );
+
+    const first = await pageApprove(W.PO_APPROVER, a.poId);
+    expect(first.status).toBe(200);
+    expect(first.body.data).toMatchObject({ instance_status: "PENDING", already_completed: false });
+    expect(await instanceRow(a.instanceId)).toEqual({ status: "PENDING", current_step: firstOrder + 1 });
+    expect(await postActionRuns(a.poId)).toBe(0);
+
+    const second = await pageApprove(W.COMM_APP, a.poId);
+    expect(second.status).toBe(200);
+    expect(second.body.data).toMatchObject({ instance_status: "APPROVED", already_completed: false });
+    await settle();
+
+    expect((await instanceRow(a.instanceId)).status).toBe("APPROVED");
+    const after = await po(a.poId);
+    expect(after.status).toBe("acceptance_pending");
+    expect(await postActionRuns(a.poId)).toBe(1);
+    expect(vendorAcceptanceEmails(after.po_number)).toHaveLength(1);
+  });
+});
+
 describe("an approval on an approval that is not current, or a PO not pending", () => {
   it("refuses INSTANCE_NOT_CURRENT on the card when the PO has no approval linked", async () => {
     const a = await world.pendingPo();

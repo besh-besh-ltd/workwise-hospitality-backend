@@ -236,10 +236,15 @@ export async function executePoApprovalAtomically(
       t
     );
 
-    // The instance is PENDING and locked, so `already_completed` here is the
-    // engine's approver-level idempotency: this approver already approved the
-    // current step and it waits for others (an ALL step). Nothing new was
-    // decided, so neither the document nor the post-action runs.
+    // The instance is PENDING and locked, so the engine's instance-level
+    // `already_completed` cannot happen here. Its approver-level repeat check
+    // compares the approver row's status ('APPROVED') with the action
+    // ('APPROVE') and never matches, so a same-user repeat on a still-PENDING
+    // ALL step is refused by the engine ("User has already acted on this step
+    // with status: APPROVED"), the transaction rolls back, and nothing runs
+    // twice. Kept as a guard: if the engine ever does answer
+    // `already_completed` here, nothing new was decided, so neither the
+    // document nor the post-action runs.
     if (actionResult.already_completed) return actionResult;
 
     // 2. Rewrite the document.
