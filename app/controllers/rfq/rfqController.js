@@ -52,6 +52,7 @@ import {
 import { cancelAndReissueApproval } from '../general/reapprovalService.js';
 import { v4 as uuidv4 } from 'uuid';
 import { executeApprovalAction } from '../../services/approvalActionService.js';
+import { checkTechEvalWritable } from '../../services/techEvalScoringGuard.js';
 import {
   assertUserHasScope,
   assertCanReadParentRfq,
@@ -17314,6 +17315,21 @@ getClauses: async (req, res) => {
             'Invalid input. Please provide vendor ID , rfq_product_tech_evaluation_id and status'
         });
       }
+      if (![0, 1].includes(Number(status))) {
+        return res.status(400).json({ status: 0, message: 'status must be 0 (reject) or 1 (accept).' });
+      }
+
+      // This endpoint writes a verdict straight to the cleared-vendors table,
+      // outside the approval flow. It is only for the buyers of the RFQ, only
+      // while the evaluation is open, and only once per vendor.
+      const gate = await checkTechEvalWritable({
+        userId: user_id,
+        vendorId: Number(vendor_id),
+        techEvalId: Number(rfq_product_tech_evaluation_id)
+      });
+      if (!gate.ok) {
+        return res.status(gate.httpStatus).json({ status: 0, code: gate.code, message: gate.message });
+      }
 
       const response = await rfqModel.addtechEvaluationClearedVendors(
         vendor_id,
@@ -17324,7 +17340,7 @@ getClauses: async (req, res) => {
       );
 
       await sendTechEvalAccepOrRejectMailToVendor(
-        rfq_id,
+        gate.techEval.rfq_id,
         product,
         vendor_id,
         user_id,
@@ -17332,6 +17348,7 @@ getClauses: async (req, res) => {
 
       res.status(200).json(response).end();
     } catch (error) {
+      if (error instanceof AuthorizationError) return sendScopeError(res, error);
       logError('Error in addVendorResponse API:', error);
       res.status(500).json({
         status: 0,
@@ -17607,6 +17624,10 @@ getClauses: async (req, res) => {
       const { rfq_id, rfq_product_id } = req.body;
       const userId = req.user.id;
 
+      // The caller must be able to read the RFQ they are submitting for — the
+      // acl() gate only says "a buyer", not "a buyer of THIS RFQ".
+      await assertCanReadParentRfq(userId, rfq_id);
+
       // Wrap in transaction for atomicity
       const result = await db.tx(async (t) => {
         // Start approval for the technical evaluation (creates round record)
@@ -17683,6 +17704,7 @@ getClauses: async (req, res) => {
         }
       });
     } catch (error) {
+      if (error instanceof AuthorizationError) return sendScopeError(res, error);
       logError(error);
 
       // Every refusal this endpoint can raise carries its own status and a
@@ -18131,7 +18153,11 @@ getClauses: async (req, res) => {
 
   updateBuyerMarks: async (req, res) => {
     try {
-      const { clause_id, vendor_id, buyer_marks, buyer_remark } = req.body;
+      const { clause_id, vendor_id, buyer_remark } = req.body;
+      // Joi accepts numeric strings; normalise so the range check sees a number.
+      const buyer_marks = (typeof req.body.buyer_marks === 'string' && req.body.buyer_marks.trim() !== '')
+        ? Number(req.body.buyer_marks)
+        : req.body.buyer_marks;
       const buyer_id = req.user.id;
 
       if (!clause_id || !vendor_id) {
@@ -18139,6 +18165,30 @@ getClauses: async (req, res) => {
           status: 0,
           message: 'Invalid input. Ensure clause_id and vendor_id are provided.'
         });
+      }
+
+      // Who may score what, and when: scope from req.user, lock state from
+      // the database (see techEvalScoringGuard).
+      const gate = await checkTechEvalWritable({
+        userId: buyer_id,
+        vendorId: Number(vendor_id),
+        clauseId: Number(clause_id)
+      });
+      if (!gate.ok) {
+        return res.status(gate.httpStatus).json({ status: 0, code: gate.code, message: gate.message });
+      }
+      if (!gate.clause) {
+        return res.status(404).json({ status: 0, code: 'CLAUSE_NOT_FOUND', message: 'Clause not found.' });
+      }
+      if (buyer_marks !== null && buyer_marks !== undefined) {
+        const max = Number(gate.clause.weightage);
+        if (!Number.isInteger(buyer_marks) || buyer_marks < 0 || (Number.isFinite(max) && buyer_marks > max)) {
+          return res.status(400).json({
+            status: 0,
+            code: 'MARKS_OUT_OF_RANGE',
+            message: `Marks must be a whole number between 0 and ${Number.isFinite(max) ? max : 'the clause weightage'}.`
+          });
+        }
       }
 
       // Check clause type - remarks only allowed for sampling
@@ -18163,6 +18213,7 @@ getClauses: async (req, res) => {
 
       res.status(200).json(result).end();
     } catch (error) {
+      if (error instanceof AuthorizationError) return sendScopeError(res, error);
       logError(error);
       res.status(500).json({
         status: 0,

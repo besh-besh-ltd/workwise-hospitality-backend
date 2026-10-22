@@ -453,8 +453,10 @@ describe("submitTechEvalForApproval — a policy resolving to nobody", () => {
       [POLICY_ID, IDS.users.vendor_alpha]  // a vendor: holds no te permissions
     );
 
+    // The RFQ sits at hotel A-3, outside the procurement buyer's scope, and
+    // submitting is scoped to the caller — so the company admin submits it.
     const m = mockExpress({
-      user: { id: IDS.users.a1_proc_buyer },
+      user: { id: IDS.users.companyA_admin },
       body: { rfq_id, rfq_product_id },
     });
     await rfqController.submitTechEvalForApproval(m.req, m.res);
