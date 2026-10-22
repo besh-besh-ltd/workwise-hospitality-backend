@@ -4848,10 +4848,20 @@ const handleTechnicalPostApproval = async (approval_instance_id, approver_user_i
         // waiting to be scored; yet every submit refused as already complete).
         // Keep it open and blocked: the same state a deadline extension
         // produces (reopenStuckTechEvals), handled by the same screens.
-        const { window_open: windowOpen } = await t.one(
-          `SELECT ${bidWindowOpenSql({ rfq: 'r' })} AS window_open FROM tbl_rfq r WHERE r.id = $1`,
-          [techEval.rfq_id]
-        );
+        // Read in a SAVEPOINT: a stored value that passes the date regex but is
+        // not a real date ('2026-02-30 10:00') makes the CAST raise, and an
+        // error inside the approval transaction would abort it even though we
+        // catch it here. A failed read counts as "window closed".
+        let windowOpen = false;
+        try {
+          ({ window_open: windowOpen } = await t.tx((sp) => sp.one(
+            `SELECT ${bidWindowOpenSql({ rfq: 'r' })} AS window_open FROM tbl_rfq r WHERE r.id = $1`,
+            [techEval.rfq_id]
+          )));
+        } catch (windowErr) {
+          logger.warn(`Could not read the bid window for rfq ${techEval.rfq_id} (tech eval ${techEval.id}); treating it as closed: ${windowErr.code || windowErr.message}`);
+          windowOpen = false;
+        }
         const keepOpen = windowOpen === true && totalPassedVerified === 0;
         await rfqModel.updateTechEvalStatus(techEval.id, {
           is_complete: !keepOpen,
@@ -17335,6 +17345,23 @@ getClauses: async (req, res) => {
       });
       if (!gate.ok) {
         return res.status(gate.httpStatus).json({ status: 0, code: gate.code, message: gate.message });
+      }
+
+      // A blocked evaluation with nobody passed (reopened, recoverable or
+      // stuck) moves only through rounds: a direct verdict here would skip the
+      // recompute and make the eligible vendor read as decided while the line
+      // still reads "No vendor passed".
+      const blockedNoPass = await db.one(
+        `SELECT ${techBlockedNoPassSql({ te: 'te' })} AS blocked
+           FROM tbl_rfq_product_tech_evaluation te WHERE te.id = $1`,
+        [Number(rfq_product_tech_evaluation_id)]
+      );
+      if (blockedNoPass.blocked) {
+        return res.status(409).json({
+          status: 0,
+          code: 'TECH_EVAL_USE_ROUND',
+          message: 'Score this vendor and submit the round for approval.'
+        });
       }
 
       const response = await rfqModel.addtechEvaluationClearedVendors(

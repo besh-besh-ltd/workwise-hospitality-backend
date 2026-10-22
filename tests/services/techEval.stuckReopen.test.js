@@ -862,3 +862,74 @@ describe("bid_end_date stored empty or in ISO form", () => {
     }
   });
 });
+
+// ===========================================================================
+//  Final fix wave
+// ===========================================================================
+
+async function postLegacyVerdict(shape, vendor_id, status = 1) {
+  const client = await httpClient(BUYER);
+  return client.post("/api/v1/rfq/tech-evaluation-cleared-vendors").send({
+    rfq_id: shape.rfq_id, vendor_id, rfq_product_tech_evaluation_id: shape.eval_id,
+    status, reject_message: status === 0 ? "no" : null,
+  });
+}
+const legacyVerdictCount = (shape, vendor_id) =>
+  db.one(
+    `SELECT COUNT(*)::int AS n FROM tbl_rfq_product_tech_evaluation_cleared_vendors
+      WHERE tbl_rfq_product_tech_evaluation_id = $1 AND vendor_id = $2`,
+    [shape.eval_id, vendor_id]
+  ).then((r) => r.n);
+
+describe("a direct verdict (Technically Accepted / Not Accepted) on a blocked evaluation with nobody passed", () => {
+  it("F1 — a reopened evaluation refuses it (409 TECH_EVAL_USE_ROUND) and writes nothing", async () => {
+    const shape = await reachIncidentState();
+    expect((await edit(shape, { bid_end_date: istIsoLocal(5 * DAY) })).status).toBe(200);
+    await quote(shape, C);
+    expect((await status(shape)).reopened).toBe(true);
+
+    const r = await postLegacyVerdict(shape, C, 1);
+    expect(r.status).toBe(409);
+    expect(r.body.code).toBe("TECH_EVAL_USE_ROUND");
+    expect(r.body.message).toBe("Score this vendor and submit the round for approval.");
+    expect(await legacyVerdictCount(shape, C)).toBe(0);
+    expect((await status(shape)).eligible_unscored_vendors.map((v) => v.vendor_id)).toEqual([C]);
+  });
+
+  it("F2 — a recoverable (locked complete) evaluation refuses it too (409)", async () => {
+    const shape = await seedIncidentRfq({ bidEnd: ist(3 * DAY) });
+    await score(shape, A, MARKS_80);
+    await score(shape, B, MARKS_72);
+    expect(await runRound(shape)).toBe(1);
+    await lockAsComplete(shape);
+    await quote(shape, C);
+    await closeBidding(shape);
+
+    const r = await postLegacyVerdict(shape, C, 1);
+    expect(r.status).toBe(409);
+    expect(await legacyVerdictCount(shape, C)).toBe(0);
+  });
+
+  it("F3 — an ordinary open evaluation keeps today's behaviour (200, row written)", async () => {
+    const shape = await seedIncidentRfq();
+    const r = await postLegacyVerdict(shape, A, 1);
+    expect(r.status).toBe(200);
+    expect(await legacyVerdictCount(shape, A)).toBe(1);
+  });
+});
+
+describe("a malformed bid_end_date cannot fail a technical approval", () => {
+  it("F4 — '2026-02-30 10:00' counts as a closed window: the approval commits, evaluation complete + blocked", async () => {
+    const shape = await seedIncidentRfq({ bidEnd: ist(3 * DAY) });
+    await score(shape, A, MARKS_80);
+    await score(shape, B, MARKS_72);
+    const sub = await submit(shape);
+    expect(sub.status).toBe(200);
+    await db.none(`UPDATE tbl_rfq SET bid_end_date = '2026-02-30 10:00' WHERE id = $1`, [shape.rfq_id]);
+
+    await approve(sub.body.data.approval_instance_id);
+    expect(await evalRow(shape)).toMatchObject({
+      is_complete: true, blocked_insufficient_vendors: true, total_passed_verified: 0,
+    });
+  });
+});
