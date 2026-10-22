@@ -22,6 +22,8 @@ import { supplierDetailsFor, stateCodeForHotel, taxSplitFor } from "../helper/gs
 import { callOffPoTax, callOffLineTax } from "../helper/arc_v2/callOffLineTax.js";
 import { buildScopeExistsClause } from "../services/authorizationService.js";
 import { PO_SCOPE_PERMISSIONS, scopedExistsFor, buildScopeClause } from "./scope/poScope.js";
+import { canInitiateOnTuple, resolvePoScopeTuple } from "./purchaseOrderModel.js";
+import { getRfqPoCoverage, classifyInitiateKind, getPoApprovalInitiators } from "./po/poInitiateGuide.js";
 
 // ---------------------------------------------------------------------------
 // Status bucket mapping (UI bucket -> raw po_status enum value[])
@@ -237,7 +239,10 @@ function actionRequiredClause(scope, values, startIndex) {
     )
   )`;
 
-  const initiatableStatus = `po.status IN ('draft', 'approved')`;
+  // Only a DRAFT is waiting for someone to initiate it. 'approved' used to be
+  // listed too, which kept every vendor-accepted PO in "Pending for me" for
+  // every initiator long after there was anything left for them to do.
+  const initiatableStatus = `po.status = 'draft'`;
 
   // Super admin (hospitalityCompanyIds === null) holds no tbl_user_role_scopes
   // rows at all, exactly as in buildScopeClause above, so any scope-correlated
@@ -742,7 +747,7 @@ export async function getAwaitingPOs(scope) {
 // Loads the structured contract-shaped detail object for the PO Detail page.
 // Returns null if the PO is out of scope (caller maps to 404 to avoid leaking
 // existence). Reuses tbl_approval_instances for the workflow timeline.
-export async function getPODetailFull(po_id, scope) {
+export async function getPODetailFull(po_id, scope, viewer = null) {
   const poId = parseInt(po_id, 10);
   if (!poId) return null;
 
@@ -1298,7 +1303,50 @@ export async function getPODetailFull(po_id, scope) {
     };
   }
 
+  // Initiate guidance. BUYER viewers only: the vendor-scoped read passes no
+  // `viewer` (and carries scope.vendorId), so a vendor never receives these.
+  // `viewer` is req.user — never a client-supplied id.
+  let initiateGuide = {};
+  if (viewer && !scope.vendorId) {
+    const isDraft = po.status === "draft";
+    const approvalInitiator = (await getPoApprovalInitiators([poId])).get(poId) || null;
+    const canInitiate = await canInitiateOnTuple(viewer, await resolvePoScopeTuple(poId));
+    let initiateKind = null;
+    let siblingDrafts = [];
+    if (!po.is_call_off && po.rfq_id) {
+      if (isDraft) initiateKind = classifyInitiateKind((await getRfqPoCoverage(po.rfq_id)).get(poId));
+      if (canInitiate) {
+        // Drafts of the SAME RFQ, oldest first: the initiator sees what else is
+        // waiting before choosing between initiating now and merging first.
+        siblingDrafts = (await db.any(
+          `SELECT sib.id, sib.po_number, sib.total_value, sib.created_at,
+                  COALESCE(VC.company_name, VU.organization_name, VU.name) AS vendor_name
+             FROM tbl_rfq_purchase_order sib
+             JOIN tbl_users VU ON VU.id = sib.finalized_vendor_id
+             LEFT JOIN tbl_company VC ON VC.id = VU.company_id
+            WHERE sib.rfq_id = $1 AND sib.status = 'draft' AND sib.id <> $2
+            ORDER BY sib.created_at ASC, sib.id ASC`,
+          [po.rfq_id, poId]
+        )).map((r) => ({
+          id: r.id,
+          po_number: r.po_number,
+          vendor_name: r.vendor_name || null,
+          total_value: r.total_value != null ? Number(r.total_value) : 0,
+          created_at: r.created_at,
+        }));
+      }
+    }
+    initiateGuide = {
+      can_initiate: canInitiate,
+      initiate_kind: initiateKind,
+      raised_by: po.initiated_by != null ? { id: Number(po.initiated_by), name: po.initiator_name || null } : null,
+      approval_initiated_by: approvalInitiator,
+      sibling_drafts: siblingDrafts,
+    };
+  }
+
   return {
+    ...initiateGuide,
     id: po.id,
     po_number: po.po_number,
     status: po.status,

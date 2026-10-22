@@ -43,6 +43,7 @@ const formatRoundDeadlineIst = (endDate) => {
   })} IST`;
 };
 import { draftPO, buildAuthoritativePOPayload } from '../po/purchaseOrderController.js';
+import { buildDraftedPos } from '../../models/po/poInitiateGuide.js';
 import { initiatePurchaseOrder } from '../../models/purchaseOrderModel.js';
 import {
   buildQuoteVisibilityMeta,
@@ -2913,6 +2914,10 @@ const NegotiationController = {
       const rfq_product_id = parseInt(req.params.rfq_product_id);
       const user_id = req.user.id;
       const { remarks, existing_po_id } = req.body;
+      // Ids of the draft POs this approval created or merged into, for the
+      // `drafted_pos` guidance in the response.
+      const draftedPoIds = [];
+      let draftedRfqId = null;
 
       if (!rfq_product_id) {
         return res.status(400).json({
@@ -3007,6 +3012,7 @@ const NegotiationController = {
           await db.tx(async (t) => {
             const authPayload = await buildAuthoritativePOPayload(poPayload, t);
             const poResult = await draftPO(authPayload, metadata.po_user, t);
+            if (poResult?.po_id) { draftedPoIds.push(poResult.po_id); draftedRfqId = metadata.rfq_id; }
 
             await recordLifecycleEvent({
               entity_type: metadata.is_tender === 1 ? 'TENDER' : 'RFQ',
@@ -3227,6 +3233,7 @@ const NegotiationController = {
                           finalized_vendor_id: selectedQuote.vendor_id
                         }
                       }, { id: instance.initiated_by || user_id, company_id: req.user.company_id }, t);
+                      if (poResult?.po_id) { draftedPoIds.push(poResult.po_id); draftedRfqId = metadata.rfq_id; }
                     }
                   } catch (poError) {
                     logError(`Error creating PO for vendor ${selectedQuote.vendor_id}`, poError);
@@ -3238,6 +3245,12 @@ const NegotiationController = {
         }
       }
 
+      // Who may initiate what was just drafted, so the approver is guided to it
+      // straight away. Read after commit; a failure here must not turn a
+      // finished approval into an error response.
+      const drafted_pos = await buildDraftedPos(req.user, draftedRfqId, draftedPoIds)
+        .catch((e) => { logError('approveQuotes drafted_pos failed', e); return []; });
+
       return res.status(200).json({
         status: 1,
         data: {
@@ -3246,7 +3259,8 @@ const NegotiationController = {
           finalized: isFullyApproved,
           instance_status: result.instance_status,
           next_step: result.next_step || null,
-          arc_approval_created: arcApprovalCreated
+          arc_approval_created: arcApprovalCreated,
+          drafted_pos
         },
         message: isFullyApproved
           ? (arcApprovalCreated

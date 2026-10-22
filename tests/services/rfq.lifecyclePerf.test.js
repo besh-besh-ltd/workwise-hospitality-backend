@@ -32,7 +32,12 @@ const BUYER = IDS.users.a1_proc_buyer;
 //   after : 32 statements,  4-7  waves, critical-path depth 8-9
 // What is left is mostly resolveApprovers (the approval engine's own resolver,
 // reused verbatim for "who acts next" — 3 reads + delegation per USER step).
-const BUDGET = { statements: 32, waves: 8, depth: 10 };
+//
+// 32 -> 35 (T1 initiate guidance): +1 for the per-PO product coverage read and
+// +2 for can_initiate (one read-grant statement, one write-grant statement,
+// both single-statement, both in the existing parallel group, so waves and
+// depth are unchanged).
+const BUDGET = { statements: 35, waves: 8, depth: 10 };
 
 describe("GET /rfq/:rfqId/lifecycle — equivalence + query budget", () => {
   let made;

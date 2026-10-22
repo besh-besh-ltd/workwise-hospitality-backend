@@ -3,7 +3,7 @@
 // rfq_approval/technical/commercial/purchase_order, each status ∈
 // upcoming|current|completed|skipped|expired) → the ARC-style lifecycle
 // contract the RFQ lifecycle page consumes (4 stages with state ∈
-// locked|active|complete|skipped|ended + default_stage). No DB access.
+// locked|active|open|complete|skipped|ended + default_stage). No DB access.
 
 const PHASE_TO_STAGE = {
   rfq_approval:   { key: "overview",          label: "Overview" },
@@ -88,6 +88,7 @@ function redactUnreadableStages(stages, permissions) {
     }
     stage.can_read = false;
     stage.action = null;
+    delete stage.draft_count;
     // The summary is not safe either — it carries counts and values
     // ("2 POs · ₹4,20,000", "1 product finalized").
     stage.summary = null;
@@ -120,7 +121,18 @@ export function shapeRfqLifecycle(summary, { permissions = {} } = {}) {
   const stages = PHASE_ORDER.map((phaseKey) => {
     const meta = PHASE_TO_STAGE[phaseKey];
     const phase = byPhaseKey[phaseKey] || { status: "upcoming" };
-    const { state, reason } = mapState(phase.status);
+    let { state, reason } = mapState(phase.status);
+    // A partial award: the RFQ is still in Negotiation & Award (so the PO phase
+    // is upcoming) yet a draft PO already exists and needs an initiator. Open
+    // the stage so it is reachable. 'open' is neither active nor locked, so it
+    // never wins default_stage (which picks the first 'active' stage).
+    const poCount = Array.isArray(phase.purchase_orders) ? phase.purchase_orders.length : 0;
+    let draft_count;
+    if (phaseKey === "purchase_order" && phase.status === "upcoming" && poCount > 0) {
+      state = "open";
+      reason = "partial_award";
+      draft_count = phase.purchase_orders.filter((p) => p.status === "draft").length;
+    }
     // Only a genuinely current phase carries the user action. An expired phase
     // used to be counted as current too, which hung the shared action object on
     // Overview and made it render "Action needed" for work owned by a later
@@ -131,6 +143,7 @@ export function shapeRfqLifecycle(summary, { permissions = {} } = {}) {
       label: meta.label,
       state,
       reason,
+      ...(draft_count !== undefined ? { draft_count } : {}),
       summary: phase.summary || null,
       phase,                                   // full per-phase payload for the stage panels
       action: isCurrent ? action : null,       // attach the user action to the current stage

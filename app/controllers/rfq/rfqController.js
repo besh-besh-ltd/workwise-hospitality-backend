@@ -8625,7 +8625,7 @@ const rfqController = {
       // sends the buyer to the edit/create flow instead of the stage page.
       const summaryP = (Number(rfq.status) === 0)
         ? Promise.resolve(null)
-        : rfqModel.getLifecycleSummary(rfqId, userId, { rfqRow });
+        : rfqModel.getLifecycleSummary(rfqId, userId, { rfqRow, user: req.user });
 
       // RFQ-scoped permissions (mirror ARC getLifecycle: rbac returns rows).
       const [permissions, summary] = await Promise.all([permissionsP, summaryP]);

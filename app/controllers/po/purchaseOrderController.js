@@ -164,7 +164,7 @@ export const getPODetails = async (req, res) => {
           try {
             const scope = await deriveScope(req);
             if (scope.hospitalityCompanyIds === null || (Array.isArray(scope.hospitalityCompanyIds) && scope.hospitalityCompanyIds.length > 0) || scope.companyId) {
-              detail = await getPODetailFull(po_id, scope);
+              detail = await getPODetailFull(po_id, scope, req.user);
             }
           } catch (augErr) {
             // Never fail the legacy response because of the augmentation.

@@ -41,6 +41,7 @@ import {
 // The PO-detail page's rule for "is this approver actually waiting on us", used
 // by the lifecycle PO tiles so both surfaces answer that question identically.
 import { effectiveApproverStatus } from './poDashboardModel.js';
+import { getRfqPoCoverage, classifyInitiateKind, canInitiateOnRfq } from './po/poInitiateGuide.js';
 import { generateEmailLinkToken } from '../helper/emailLinkToken.js';
 
 
@@ -5417,8 +5418,8 @@ LIMIT 2;
       TECHNICAL_EVALUATING:      { resource: 'te',            actions: ['read', 'create'], useDepartment: true,  label: 'Technical Evaluators' },
       TECHNICAL_REJECTED:        { resource: 'te',            actions: ['read', 'create'], useDepartment: true,  label: 'Technical Evaluators' },
       COMMERCIAL_EVALUATION:     { resource: 'quote-compare', actions: ['read', 'create'], useDepartment: false, label: 'Commercial Evaluators' },
-      AWAITING_PO:               { resource: 'awarding',      actions: ['read', 'create'], useDepartment: false, label: 'PO Initiators' },
-      PO_VENDOR_REJECTED:        { resource: 'awarding',      actions: ['read', 'create'], useDepartment: false, label: 'PO Initiators' },
+      AWAITING_PO:               { resource: 'awarding',      actions: ['read', 'create'], useDepartment: false, label: 'PO initiator' },
+      PO_VENDOR_REJECTED:        { resource: 'awarding',      actions: ['read', 'create'], useDepartment: false, label: 'PO initiator' },
     };
     const APPROVAL_LABEL = 'Pending Approvers';
 
@@ -5669,7 +5670,7 @@ LIMIT 2;
   // opts.rfqRow — the caller's own `SELECT … FROM tbl_rfq WHERE id = rfqId`
   // row, when it already has one (GET /rfq/:id/lifecycle, the QC view). It must
   // carry every LIFECYCLE_RFQ_COLUMNS column; it saves re-reading tbl_rfq.
-  getLifecycleSummary: async (rfqId, userId, { rfqRow = null } = {}) => {
+  getLifecycleSummary: async (rfqId, userId, { rfqRow = null, user = null } = {}) => {
     // Phase mapping from raw lifecycle stages
     const PHASE_MAP = {
       RFQ_APPROVAL: 'rfq_approval',
@@ -5778,6 +5779,8 @@ LIMIT 2;
         poData,
         awaitingQuoteStats,
         evaluators,
+        poCoverage,
+        canInitiatePo,
       ] = await Promise.all([
         rfqModel.computeLifecycleStages([rfqId]),
         loadInstanceRows(),
@@ -6053,6 +6056,10 @@ LIMIT 2;
           GROUP BY u.id, u.name
           HAVING COUNT(DISTINCT p.action) = 2
         `, [rfqId]).catch(e => { logger.warn(e, `Lifecycle[${rfqId}]: evaluators query failed`); return []; }),
+
+        // Initiate guidance (opt-in, see withInitiateGuide below).
+        user ? getRfqPoCoverage(rfqId).catch(e => { logger.warn(e, `Lifecycle[${rfqId}]: PO coverage query failed`); return new Map(); }) : null,
+        user ? canInitiateOnRfq(user, rfqId, undefined, rfqRow).catch(e => { logger.warn(e, `Lifecycle[${rfqId}]: can_initiate failed`); return false; }) : false,
       ]);
 
       const currentStage = lifecycleMap[rfqId] || null;
@@ -6522,10 +6529,37 @@ LIMIT 2;
         return steps[steps.length - 1];
       };
 
+      // Initiate guidance (no PII: names of who raised / initiated only). It is
+      // OPT-IN: only the lifecycle endpoint passes the caller (`user` = req.user);
+      // the other consumers of this summary (quote-comparison stage actors, ...)
+      // pay no extra statements and receive none of these keys. The reads
+      // themselves ride the parallel group above. Who initiated a PO comes from
+      // the PO approval instances already loaded: the newest by id wins, so a
+      // PO sent back and re-initiated names whoever pressed Initiate last.
+      const withInitiateGuide = !!user;
+      const poApprovalInitiators = new Map();
+      for (const d of poApprovalDetails) {
+        const poId = Number(d.entity_id);
+        const seen = poApprovalInitiators.get(poId);
+        if (seen && Number(seen.instance_id) > Number(d.id)) continue;
+        poApprovalInitiators.set(poId, {
+          instance_id: d.id,
+          id: d.initiated_by?.user_id != null ? Number(d.initiated_by.user_id) : null,
+          name: d.initiated_by?.name || null,
+          at: d.created_at,
+        });
+      }
+      const approvalInitiatedBy = (poId) => {
+        const x = poApprovalInitiators.get(Number(poId));
+        return x && x.id != null ? { id: x.id, name: x.name, at: x.at } : null;
+      };
+
       const buildPODetail = () => {
         if (!poData.length) return null;
         return poData.map(po => {
           const inst = approvalInstanceForPO(po);
+          const cov = poCoverage?.get(Number(po.id)) || null;
+          const isDraft = po.status === 'draft';
           const reportedStep = inst ? resolveReportedStep(inst) : null;
           // REMOVED approvers are tombstones, not participants: they are excluded
           // from every count here and from current_actors. The unfiltered list
@@ -6607,6 +6641,22 @@ LIMIT 2;
             initiated_by: po.initiated_by_id
               ? { user_id: po.initiated_by_id, name: po.initiated_by_name || null }
               : null,
+            ...(withInitiateGuide ? {
+              // `initiated_by` above is the DRAFT's creator (kept for existing
+              // readers); these two say it unambiguously. approval_initiated_by
+              // is whoever pressed Initiate on the latest approval instance,
+              // null while the PO is still an un-initiated draft.
+              raised_by: po.initiated_by_id
+                ? { id: po.initiated_by_id, name: po.initiated_by_name || null }
+                : null,
+              approval_initiated_by: approvalInitiatedBy(po.id),
+              rfq_product_count: cov?.rfq_product_count ?? 0,
+              po_product_count: cov?.po_product_count ?? 0,
+              products_on_other_pos: cov?.products_on_other_pos ?? 0,
+              products_unawarded: cov?.products_unawarded ?? 0,
+              initiate_kind: isDraft ? classifyInitiateKind(cov) : null,
+              initiate_awaiting_me: isDraft && !!canInitiatePo,
+            } : {}),
             stage_label: stageLabel,
             current_actors: currentActors,
             // can_user_approve is computed by getApprovalInstanceDetails against
@@ -6846,6 +6896,7 @@ LIMIT 2;
           key: 'purchase_order', label: 'Purchase Order', status, summary, sub_status: subStatus,
           is_cancelled: latestPOInstance?.status === 'CANCELLED',
           purchase_orders: purchaseOrders,
+          ...(withInitiateGuide ? { can_initiate: canInitiatePo } : {}),
           approval_instances: poApprovalDetails.length > 0 ? formatApprovalInstances(poApprovalDetails) : null,
           action_holders: status === 'current' ? currentActionHolders : null,
         });
@@ -6910,7 +6961,9 @@ LIMIT 2;
         if (isCurrentUserActionHolder) {
           userActionRequired = true;
           userActionType = currentActionHolders.type === 'permission' ? 'evaluation' : 'approval';
-          userActionLabel = `You are a ${currentActionHolders.label?.toLowerCase() || 'action holder'} for this ${rfqBasic.is_tender === 1 ? 'Tender' : 'RFQ'}`;
+          // 'PO initiator' keeps its capitals: lower-casing an acronym gave "a po initiators".
+          const holderLabel = currentActionHolders.label || 'action holder';
+          userActionLabel = `You are a ${/^PO\b/.test(holderLabel) ? holderLabel : holderLabel.toLowerCase()} for this ${rfqBasic.is_tender === 1 ? 'Tender' : 'RFQ'}`;
           userActionPhase = currentPhase;
         }
       }

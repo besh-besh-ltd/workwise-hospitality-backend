@@ -10,10 +10,9 @@ import pricingEngine from "../services/pricingEngine.js";
 import { dispatch as dispatchNotification } from "../services/notificationService.js";
 import { buyerPoList } from "../services/notificationLinks.js";
 import {
-  assertUserHasScope,
-  AuthorizationError,
   buildScopeExistsClause,
   listUsersWithAnyScope,
+  userHasAnyScope,
 } from "../services/authorizationService.js";
 import fs from 'fs';
 import { writePoDocument } from "../services/poDocumentService.js";
@@ -92,17 +91,8 @@ export function buildPoScopeExists(userId, alias, values, startIndex) {
 // True when the user's grant on ANY of `permissions` covers the tuple. One
 // helper for every PO predicate so the scope evaluation (and its NULL
 // semantics) is written once — only the permission list varies.
-const hasAnyScopeOf = async (userId, permissions, tuple, dbCtx = db) => {
-  for (const perm of permissions) {
-    try {
-      await assertUserHasScope(userId, perm, tuple, dbCtx);
-      return true;
-    } catch (err) {
-      if (!(err instanceof AuthorizationError)) throw err;
-    }
-  }
-  return false;
-};
+const hasAnyScopeOf = (userId, permissions, tuple, dbCtx = db) =>
+  userHasAnyScope(userId, permissions, tuple, dbCtx);
 
 // True when the user's grant on ANY of PO_SCOPE_PERMISSIONS covers the tuple.
 const hasAnyPoScope = (userId, tuple, dbCtx = db) =>
@@ -392,8 +382,22 @@ export const listPoInitiators = async (po, caller, dbCtx = db) => {
   // the power to initiate, which is the one worth naming. listUsersWithAnyScope
   // already picked the lowest qualifying role_id per user.
   const roleTitleById = new Map();
+  // scope_breadth: how widely the person's INITIATING grant reaches.
+  // 0 = department-scoped, 1 = hotel-scoped, 2 = company-wide.
+  // It is the breadth of the WRITE grant (awarding.create/update) alone: read
+  // grants are incidental (a company-wide initiator may also hold a narrow
+  // department read role) and must not make them look "local". Where a person
+  // has several qualifying write grants, the narrowest wins. The list is
+  // ordered by it ascending: the person at this hotel/department comes before
+  // a group-wide approver the client would have to chase.
+  const SCOPE_COMPANY_WIDE = 2;
+  const breadthById = new Map();
   for (const w of writers) {
-    if (readerIds.has(Number(w.user_id))) roleTitleById.set(Number(w.user_id), w.role_title || null);
+    const wid = Number(w.user_id);
+    if (readerIds.has(wid)) {
+      roleTitleById.set(wid, w.role_title || null);
+      breadthById.set(wid, Number(w.scope_breadth ?? SCOPE_COMPANY_WIDE));
+    }
   }
 
   // Super admins of this PO's own buyer company.
@@ -410,6 +414,7 @@ export const listPoInitiators = async (po, caller, dbCtx = db) => {
     for (const a of admins) {
       if (!roleTitleById.has(Number(a.user_id))) {
         roleTitleById.set(Number(a.user_id), TOP_MANAGEMENT_ROLE_TITLE);
+        breadthById.set(Number(a.user_id), SCOPE_COMPANY_WIDE);
       }
     }
   }
@@ -418,8 +423,9 @@ export const listPoInitiators = async (po, caller, dbCtx = db) => {
   const candidateIds = [...roleTitleById.keys()].filter((id) => id !== callerId);
   if (!candidateIds.length) return { can_initiate, initiators: [], total: 0 };
 
-  // Hydrate + apply the active-user filter in SQL, ordered by name so the cap
-  // below always takes the same 25 people.
+  // Hydrate + apply the active-user filter in SQL. Ordered by name here; the
+  // breadth ordering is applied below, BEFORE the cap, so the cap keeps the
+  // nearest people rather than the alphabetically first.
   const rows = await dbCtx.any(
     `SELECT u.id AS user_id, u.name, u.employee_code, u.email, u.mobile
        FROM tbl_users u
@@ -431,6 +437,11 @@ export const listPoInitiators = async (po, caller, dbCtx = db) => {
     [candidateIds]
   );
 
+  const breadthOf = (r) => breadthById.get(Number(r.user_id)) ?? SCOPE_COMPANY_WIDE;
+  // rows are already name-ordered and Array#sort is stable, so ties on breadth
+  // keep name order.
+  rows.sort((a, b) => breadthOf(a) - breadthOf(b));
+
   const initiators = rows.slice(0, PO_INITIATORS_LIMIT).map((r) => ({
     user_id: Number(r.user_id),
     name: r.name || null,
@@ -438,6 +449,7 @@ export const listPoInitiators = async (po, caller, dbCtx = db) => {
     email: r.email || null,
     mobile: r.mobile || null,
     role_title: roleTitleById.get(Number(r.user_id)) || null,
+    scope_breadth: breadthOf(r),
   }));
 
   // `total` is the TRUE uncapped count, so the UI can say "and N others".
