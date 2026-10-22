@@ -17,6 +17,7 @@ import {
 import fs from 'fs';
 import { writePoDocument } from "../services/poDocumentService.js";
 import { notifyApprovalChanged } from '../services/approvalEvents.js';
+import { stripBuyerOnlyPoFields } from '../services/po/buyerOnlyPoFields.js';
 
 // ===========================================================================
 // SECURITY — legacy Purchase Order authorization gate
@@ -1896,8 +1897,7 @@ export const getPOByRFQId = async (rfq_id, user_id, user_type, page = 1, limit =
           poPdfUrl: sealedPdfUrl,
         };
         // The re-award trace points at a rejected PO, often another vendor's.
-        if (user_type == 3) delete row.replaces_po_id;
-        return row;
+        return user_type == 3 ? stripBuyerOnlyPoFields(row) : row;
       })
 
       // The scope predicate correlates against the joined RFQ alias, so the

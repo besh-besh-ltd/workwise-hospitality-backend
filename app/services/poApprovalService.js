@@ -1,5 +1,5 @@
 import db from '../config/dbConn.js';
-import { submitApprovalAction, recordLifecycleEvent } from '../models/generalModel.js';
+import { submitApprovalAction } from '../models/generalModel.js';
 import { logger } from '../util/logger.js';
 import { logError } from '../helper/common.js';
 import { REASON_CODES, CANCEL_REASONS, REJECTION_ROUTES } from './po/poSendBackReasons.js';
@@ -208,7 +208,7 @@ export async function executePoApprovalAtomically(
  *   2. PO status 'rejected', or 'cancelled' for the CANCEL route
  *   3. the vendor-scoped de-finalization (handlePORejectionByInstance)
  *   4. a CLOSED tbl_po_send_backs row recording route, reason and comment
- *   5. the PO lifecycle row
+ *      (with the REJECT lifecycle row from step 1, the whole record)
  *
  * Any failure throws and the caller's transaction rolls ALL of it back.
  * Nothing is sent from here; see rejectPurchaseOrder for the post-commit side.
@@ -302,24 +302,11 @@ export async function executePoRejectionAtomically(
     )).id;
   }
 
-  // 5. The PO's own lifecycle row (submitApprovalAction wrote the generic one).
-  await recordLifecycleEvent({
-    entity_type: 'PO',
-    entity_id: po.id,
-    stage: route === 'CANCEL' ? 'PO_CANCELLED' : 'PO_REJECTED',
-    action: 'REJECT',
-    performed_by: user.id,
-    metadata: {
-      rfq_id: po.rfq_id,
-      po_number: po.po_number,
-      approval_instance_id: instanceId,
-      route,
-      reason_category: reasonCategory,
-      send_back_id: sendBackId,
-    },
-    remarks: text || null,
-    txContext: t,
-  });
+  // No second lifecycle row (ruling R21): submitApprovalAction already wrote
+  // the REJECT row (stage 'REJECTED') on this transaction, and the send-back
+  // above holds route, reason and comment. A PO-specific row as well would be
+  // counted twice by the activity backfill, which maps every lifecycle row to
+  // an event.
 
   return { po: { ...po, status: poStatus }, sendBackId, result, alreadyCompleted: false };
 }

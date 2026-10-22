@@ -19,6 +19,8 @@
 //                         RFQ was closed. Until the fix shipped alongside this
 //                         report, the platform logged these as REJECT actions
 //                         and left the PO showing "pending approval" forever.
+//                         Also an approver rejecting a PO as not needed (the
+//                         CANCEL route): "Cancelled By" is that approver.
 //   Rejected by vendor    the supplier refused an approved order.
 //
 // Counting the first two together is the mistake to avoid: on prod it turns

@@ -1048,7 +1048,10 @@ export const isCancellationAction = (a) =>
  *                    permanently; a reissue gets a NEW PO number, which is why
  *                    "re-raised as" can be shown at all.
  *   CANCELLED        the approval was cancelled, almost always because the RFQ
- *                    was closed. Before the platform fix these POs were left at
+ *                    was closed, or an approver rejected the PO as not needed
+ *                    (the CANCEL route: a REJECT action plus a CANCEL
+ *                    tbl_po_send_backs row; actor and reason come from that
+ *                    REJECT, exactly as for a rejection). Before the platform fix these POs were left at
  *                    'pending_approval' with nothing pending behind them, so
  *                    both that orphan shape and the fixed 'cancelled' status
  *                    are read — the report is correct before and after the
@@ -1128,8 +1131,19 @@ export async function rejectedPoLog(scope, { from, to }) {
              FROM tbl_approval_actions a
              JOIN tbl_approval_instances ai ON ai.id = a.approval_instance_id
             WHERE ai.entity_type = 'PO' AND ai.entity_id = sc.id
-              AND ai.status = 'CANCELLED'
-              AND ${isCancellationAction("a")}
+              AND (
+                (ai.status = 'CANCELLED' AND ${isCancellationAction("a")})
+                -- An approver who rejected the PO as not needed (the CANCEL
+                -- route): the PO is 'cancelled', the decision is that
+                -- approver's REJECT, identified by its CANCEL send-back. Same
+                -- actor and reason as an ordinary rejection.
+                OR (a.action = 'REJECT'
+                    AND NOT ${isCancellationAction("a")}
+                    AND EXISTS (SELECT 1 FROM tbl_po_send_backs sb
+                                 WHERE sb.purchase_order_id = sc.id
+                                   AND sb.approval_instance_id = ai.id
+                                   AND sb.route = 'CANCEL'))
+              )
             ORDER BY a.created_at DESC
             LIMIT 1
          ) c ON TRUE

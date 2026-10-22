@@ -49,8 +49,7 @@ async function snapshot(staged, since) {
     `SELECT vendor_id, created_by, changed_by FROM tbl_quote_finalization_history WHERE rfq_id = $1 ORDER BY id`,
     [staged.rfq.id]);
   const lifecycle = await db.any(
-    `SELECT stage, action, metadata->>'route' AS route, metadata->>'reason_category' AS reason_category
-       FROM tbl_lifecycle_history WHERE entity_type = 'PO' AND entity_id = $1 ORDER BY id`,
+    `SELECT stage, action FROM tbl_lifecycle_history WHERE entity_type = 'PO' AND entity_id = $1 ORDER BY id`,
     [staged.poId]);
   await drainPoRejectedNotifications();
   // Every notice a rejection has ever produced (the current ones and the two
@@ -135,9 +134,12 @@ describe("PO rejection is one atomic decision", () => {
       requested_by: W.PO_APPROVER, status: "CLOSED", resolution: "REJECTED",
       target_role: null, target_user_id: null, closed: true,
     }]);
-    expect(left.lifecycle).toEqual(expect.arrayContaining([
-      expect.objectContaining({ stage: "PO_REJECTED", action: "REJECT", route: "COMMERCIAL", reason_category: "PRICE_TAX_QUERY" }),
-    ]));
+    // ONE lifecycle row per rejection (ruling R21): the engine's REJECT row.
+    // Route, reason and comment live on the send-back above; a second row
+    // would be counted twice by the activity backfill.
+    expect(left.lifecycle.filter((r) => r.action === "REJECT" || /REJECT|CANCEL/.test(r.stage))).toEqual([
+      { stage: "REJECTED", action: "REJECT" },
+    ]);
   });
 
   it("an old client without reason_category is stored as OTHER/COMMERCIAL", async () => {

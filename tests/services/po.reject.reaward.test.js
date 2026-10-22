@@ -1,8 +1,9 @@
 // Re-awarding after a PO rejection (client ticket T3).
 // ----------------------------------------------------------------------------
 // A rejection sends the product back to commercial evaluation. The people who
-// can act are told — the RFQ creator, the PO creator and the commercial
-// evaluators, once each, never the vendor — and the PO that re-awards the
+// can act are told — the RFQ creator, the PO creator, whoever initiated the
+// PO's approval and the commercial evaluators, once each, never the vendor —
+// and the PO that re-awards the
 // product carries a pointer to the rejected one, so its approver can see why
 // the first was turned down.
 //
@@ -36,10 +37,10 @@ afterAll(async () => {
 });
 
 /** A PO for vendor A, initiated and pending, on an RFQ both vendors quoted. */
-async function pendingPoWithAlternative() {
+async function pendingPoWithAlternative({ raisedBy } = {}) {
   const staged = await world.stageRfq({ products: 1, vendors: [W.VENDOR_A, W.VENDOR_B] });
   const product = staged.products[0];
-  const { pos } = await world.award(staged, product, [W.VENDOR_A]);
+  const { pos } = await world.award(staged, product, [W.VENDOR_A], { raisedBy });
   const poId = pos[0].id;
   const instanceId = await world.initiate(poId);
   return { ...staged, product, poId, instanceId };
@@ -92,11 +93,53 @@ describe("re-award after a PO rejection", () => {
     expect(asVendor.body.detail?.replaces).toBeUndefined();
   });
 
-  it("notifies RFQ creator, PO creator and commercial evaluators once each, never the vendor", async () => {
+  it("never hands a vendor replaces_po_id: accept, PO detail, Order Book, existing drafts", async () => {
+    const a = await pendingPoWithAlternative();
+    expect((await world.rejectOnPoPage(a.poId, { remarks: "late", reason_category: "RENEGOTIATE" })).status).toBe(200);
+    const { pos } = await world.award(a, a.product, [W.VENDOR_B]);
+    const newPoId = pos[0].id;
+    expect((await db.one(`SELECT replaces_po_id FROM tbl_rfq_purchase_order WHERE id = $1`, [newPoId])).replaces_po_id)
+      .toBe(a.poId);
+    const vendor = await world.client(W.VENDOR_B);
+    const buyer = await world.client(W.INITIATOR);
+
+    // Draft stage: the existing-drafts lookup returns raw rows. A buyer keeps
+    // the field (it is theirs); a vendor never gets it.
+    const draftsQuery = `/api/v1/rfq/get-existing-po?vendor_id=${W.VENDOR_B}&rfq_id=${a.rfq.id}`;
+    const asBuyer = await buyer.get(draftsQuery);
+    expect(asBuyer.status).toBe(200);
+    expect(asBuyer.body.existingPOS.find((p) => p.id === newPoId)).toHaveProperty("replaces_po_id", a.poId);
+    const asVendorDrafts = await vendor.get(draftsQuery);
+    expect(asVendorDrafts.status).toBe(200);
+    expect(asVendorDrafts.body.existingPOS.length).toBeGreaterThan(0);
+    expect(JSON.stringify(asVendorDrafts.body)).not.toContain("replaces_po_id");
+
+    // Awaiting the vendor: Order Book, PO detail and the accept response.
+    await db.none(`UPDATE tbl_rfq_purchase_order SET status = 'acceptance_pending' WHERE id = $1`, [newPoId]);
+    const book = await vendor.get(`/api/v1/po/rfq/${a.rfq.id}`);
+    expect(book.status).toBe(200);
+    expect(book.body.data.map((p) => p.id)).toContain(newPoId);
+    expect(JSON.stringify(book.body)).not.toContain("replaces_po_id");
+
+    const detail = await vendor.get(`/api/v1/po/${newPoId}`);
+    expect(detail.status).toBe(200);
+    expect(JSON.stringify(detail.body)).not.toContain("replaces_po_id");
+
+    const accepted = await vendor.post(`/api/v1/po/accept/${newPoId}`).send({});
+    expect(accepted.status).toBe(200);
+    expect(accepted.body.status).toBe(1);
+    expect(JSON.stringify(accepted.body)).not.toContain("replaces_po_id");
+    expect((await db.one(`SELECT status::text AS s FROM tbl_rfq_purchase_order WHERE id = $1`, [newPoId])).s)
+      .toBe("approved");
+  });
+
+  it("notifies RFQ creator, PO creator, approval initiator and commercial evaluators once each, never the vendor", async () => {
     const a = await pendingPoWithAlternative();
     const po = await db.one(`SELECT po_number, initiated_by FROM tbl_rfq_purchase_order WHERE id = $1`, [a.poId]);
-    // The world's PO creator is the person who raised the award approval.
+    // The world's PO creator is the person who raised the award approval ...
     expect(po.initiated_by).toBe(W.COMM_EVAL);
+    // ... and someone else pressed Initiate on the PO's approval.
+    expect(await approvalInitiatorOf(a.poId)).toBe(W.INITIATOR);
     sentMails.length = 0;
 
     const res = await world.rejectOnPoPage(a.poId, { remarks: "GST shown twice", reason_category: "PRICE_TAX_QUERY" });
@@ -107,10 +150,10 @@ describe("re-award after a PO rejection", () => {
       `SELECT recipient_user_id, title, message, action_url FROM tbl_notifications
         WHERE (additional_data->>'po_id')::int = $1 AND type = 'po_rejected'
         ORDER BY recipient_user_id`, [a.poId]);
-    // RFQ creator, PO creator (= award approval raiser), and the commercial
-    // approver who finalized the award. Once each. Not the rejecting approver,
-    // not the vendors.
-    const expected = [W.CREATOR, W.COMM_EVAL, W.COMM_APP].sort((x, y) => x - y);
+    // RFQ creator, PO creator (= award approval raiser), whoever initiated the
+    // PO's approval, and the commercial approver who finalized the award. Once
+    // each. Not the rejecting approver, not the vendors.
+    const expected = [W.CREATOR, W.COMM_EVAL, W.INITIATOR, W.COMM_APP].sort((x, y) => x - y);
     expect(rows.map((r) => r.recipient_user_id)).toEqual(expected);
 
     const approverName = (await db.one(`SELECT name FROM tbl_users WHERE id = $1`, [W.PO_APPROVER])).name;
@@ -139,5 +182,43 @@ describe("re-award after a PO rejection", () => {
       expected.map((id) => emailOf.get(id)).filter(Boolean).sort());
     const vendorAddresses = [W.VENDOR_A, W.VENDOR_B].map((id) => emailOf.get(id)).filter(Boolean);
     for (const m of sentMails) expect(vendorAddresses).not.toContain(m.to);
+
+    // The approval initiator specifically: exactly one in-app row, one email.
+    expect(rows.filter((r) => r.recipient_user_id === W.INITIATOR)).toHaveLength(1);
+    expect(emailOf.get(W.INITIATOR)).toBeTruthy();
+    expect(rejectionMails.filter((m) => m.to === emailOf.get(W.INITIATOR))).toHaveLength(1);
+  });
+
+  it("tells an approval initiator who also created the PO once, not twice", async () => {
+    // INITIATOR raises the award approval, so they create the PO, and then
+    // presses Initiate on it too.
+    const a = await pendingPoWithAlternative({ raisedBy: W.INITIATOR });
+    const po = await db.one(`SELECT initiated_by FROM tbl_rfq_purchase_order WHERE id = $1`, [a.poId]);
+    expect(po.initiated_by).toBe(W.INITIATOR);
+    expect(await approvalInitiatorOf(a.poId)).toBe(W.INITIATOR);
+    sentMails.length = 0;
+
+    const res = await world.rejectOnPoPage(a.poId, { remarks: "wrong site", reason_category: "INFO_MISSING" });
+    expect(res.status).toBe(200);
+    await drainPoRejectedNotifications();
+
+    const rows = await db.any(
+      `SELECT recipient_user_id FROM tbl_notifications
+        WHERE (additional_data->>'po_id')::int = $1 AND type = 'po_rejected'
+        ORDER BY recipient_user_id`, [a.poId]);
+    expect(rows.map((r) => r.recipient_user_id)).toEqual(
+      [W.CREATOR, W.INITIATOR, W.COMM_APP].sort((x, y) => x - y));
+
+    const email = (await db.one(`SELECT email FROM tbl_users WHERE id = $1`, [W.INITIATOR])).email;
+    const mailsToInitiator = sentMails.filter((m) => /rejected by/i.test(m.subject || "") && m.to === email);
+    expect(mailsToInitiator).toHaveLength(1);
   });
 });
+
+/** Who pressed Initiate on the PO's latest approval. */
+async function approvalInitiatorOf(poId) {
+  const row = await db.one(
+    `SELECT initiated_by FROM tbl_approval_instances
+      WHERE entity_type = 'PO' AND entity_id = $1 ORDER BY id DESC LIMIT 1`, [poId]);
+  return row.initiated_by;
+}

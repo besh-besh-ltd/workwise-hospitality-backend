@@ -62,6 +62,11 @@ describe("rejecting a PO as not needed", () => {
       route: "CANCEL", reason_category: "NOT_REQUIRED", comment: "Outlet refurbishment dropped",
       status: "CLOSED", resolution: "CANCELLED", requested_by: W.PO_APPROVER,
     })]);
+    // One lifecycle row for the decision (ruling R21); the send-back carries the rest.
+    const lifecycle = await db.any(
+      `SELECT stage, action FROM tbl_lifecycle_history
+        WHERE entity_type = 'PO' AND entity_id = $1 AND (action = 'REJECT' OR stage ~ 'REJECT|CANCEL')`, [a.poId]);
+    expect(lifecycle).toEqual([{ stage: "REJECTED", action: "REJECT" }]);
 
     // No re-award chip: not on the RFQ detail, not on the list card, and the
     // lifecycle does not call it a rejection waiting for re-award.

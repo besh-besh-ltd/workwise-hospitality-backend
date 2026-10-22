@@ -22,6 +22,7 @@ import { getPODetailFull } from "../../models/poDashboardModel.js";
 import { deriveScope } from "./poDashboardController.js";
 import { handleCallOffRejection, notifyCallOffRejected } from "../../services/callOffPoService.js";
 import { deferJson, isDeferred, sendDeferred } from "../../helper/deferredResponse.js";
+import { poFieldsFor } from "../../services/po/buyerOnlyPoFields.js";
 
 // Tiny tagged-error class for controllers that need to map a thrown
 // failure mode to a specific HTTP status code (instead of the historic
@@ -124,6 +125,8 @@ export const getPOByRFQ = async (req, res) => {
         }
 
         const result = await getPOByRFQId(rfq_id, id, user_type, page, limit, filters);
+        // Raw PO rows: a vendor's Order Book must not carry buyer-only fields.
+        if (result && Array.isArray(result.data)) result.data = poFieldsFor(req.user, result.data);
 
         return res.json(result);
 
@@ -150,12 +153,10 @@ export const getPODetails = async (req, res) => {
         // token and vendor paths working.
         if (!(await guardPo(req, res, po_id))) return;
 
-        const result = await getPODetailsById(po_id, id);
-        // replaces_po_id points at the rejected PO this one re-awards — often
-        // another vendor's. Buyers only.
-        if (result && typeof result === 'object' && (Number(req.user.user_type) === 3 || req.user.is_token_user)) {
-          delete result.replaces_po_id;
-        }
+        // Vendors and GRN token users get the row without buyer-only fields
+        // (replaces_po_id: the rejected PO this one re-awards, often another
+        // vendor's).
+        const result = poFieldsFor(req.user, await getPODetailsById(po_id, id));
 
         // Additively merge the new contract-shaped detail-full object under a
         // `detail` key so the new PO Detail page can consume the structured

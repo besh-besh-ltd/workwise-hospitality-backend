@@ -155,14 +155,15 @@ export function makePoRejectWorld(db) {
   }
 
   /**
-   * Award `product` to `vendors`: COMM_EVAL raises the award approval, COMM_APP
-   * approves it over HTTP. Returns the PO ids drafted for that product.
+   * Award `product` to `vendors`: COMM_EVAL (or `raisedBy`) raises the award
+   * approval, COMM_APP approves it over HTTP. Whoever raised it becomes the
+   * drafted PO's creator. Returns the PO ids drafted for that product.
    */
-  async function award(staged, product, vendors) {
+  async function award(staged, product, vendors, { raisedBy = W.COMM_EVAL } = {}) {
     const approval = await createApprovalInstance({
       entity_type: "NEGOTIATION_QUOTE", entity_id: product.id,
       hospitality_company_id: IDS.hospitality.A, hotel_id: IDS.hotels.A1, department_id: null,
-      process_id: IDS.processes.A_P1, initiated_by: W.COMM_EVAL,
+      process_id: IDS.processes.A_P1, initiated_by: raisedBy,
       metadata: {
         rfq_id: staged.rfq.id, rfq_number: staged.rfq.rfq_no, rfq_product_id: product.id, is_tender: 0,
         selected_quotes: vendors.map((v) => ({ quote_id: staged.quotes[v], vendor_id: v, quoted_price: 500 })),

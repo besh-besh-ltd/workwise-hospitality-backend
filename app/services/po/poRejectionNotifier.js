@@ -4,6 +4,7 @@
 // WHO (deduplicated, never the approver who rejected, active buyers only):
 //   - the RFQ creator
 //   - the PO creator (tbl_rfq_purchase_order.initiated_by)
+//   - whoever initiated the PO's latest approval instance (ruling R20)
 //   - the commercial evaluators: whoever raised the latest award approval
 //     (NEGOTIATION_QUOTE instance) for each product on the PO, and whoever
 //     finalized the award the rejection just archived
@@ -54,6 +55,15 @@ async function loadRecipients(poId, actorId) {
        SELECT r.created_by AS user_id FROM tbl_rfq r JOIN po ON po.rfq_id = r.id
        UNION
        SELECT initiated_by FROM po
+       UNION
+       -- Whoever pressed Initiate on the PO's latest approval (often the
+       -- commercial approver who raised it). Same choice as
+       -- poInitiateGuide.getPoApprovalInitiators: latest instance, any status.
+       (SELECT ai.initiated_by
+          FROM tbl_approval_instances ai
+         WHERE ai.entity_type = 'PO' AND ai.entity_id = $1
+         ORDER BY ai.id DESC
+         LIMIT 1)
        UNION
        SELECT nq.initiated_by
          FROM lines l
@@ -127,8 +137,8 @@ export function buildRejectionCopy({ po, actorName, route, reasonCategory, comme
 const inFlight = new Set();
 
 /**
- * Tell the RFQ creator, PO creator and commercial evaluators that a PO was
- * rejected. Call after the rejecting transaction commits.
+ * Tell the RFQ creator, PO creator, approval initiator and commercial
+ * evaluators that a PO was rejected. Call after the rejecting transaction commits.
  * @param {{poId:number, actorId:number, route:'COMMERCIAL'|'CANCEL', reasonCategory:string, comment?:string}} args
  * @returns {Promise<void>}
  */

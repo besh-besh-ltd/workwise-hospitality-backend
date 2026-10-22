@@ -97,6 +97,7 @@ import { quoteGateApplies, assertOrgMayQuote, assertOrgMayClarify, memberRfqAssi
 import { lockLiveRfqAssignments, propagateRoutedCopiesLocked } from '../../services/vendorNetwork/subjects/rfqRoutedCopies.js';
 import { directInviteIdsForLine } from '../../services/vendorNetwork/directInvites.js';
 import { NetworkHttpError } from '../../services/vendorNetwork/guards.js';
+import { poFieldsFor } from '../../services/po/buyerOnlyPoFields.js';
 
 /** A Vendor Networks quote-gate refusal as its HTTP answer body. */
 const networkRefusalBody = (err) => ({ status: 0, message: err.message, ...(err.reason ? { reason: err.reason } : {}) });
@@ -11779,7 +11780,9 @@ const rfqController = {
       const { vendor_id, rfq_id } = req.query;
       const user = req.user;
 
-      const existingPOS = await rfqModel.getDraftPOByVendor(vendor_id, rfq_id, user);
+      // Raw draft PO rows (SELECT PO.*); the route admits any signed-in user,
+      // so a vendor caller gets them without buyer-only fields.
+      const existingPOS = poFieldsFor(user, await rfqModel.getDraftPOByVendor(vendor_id, rfq_id, user));
 
       return res.json({
         status: 1, 

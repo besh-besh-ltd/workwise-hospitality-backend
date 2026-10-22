@@ -18,13 +18,23 @@
 // Access is the other half: the log names approvers and quotes them, so it is
 // admin-only, and the 183-user Report Download role must not reach it.
 
-import { describe, it, expect, afterAll, beforeAll, beforeEach, afterEach } from "@jest/globals";
-import excelJS from "exceljs";
-import { db, closeDb } from "../setup/db.js";
-import { IDS } from "../fixtures/ids.js";
-import { makeRFQ } from "../factories/rfq.js";
-import { httpClient } from "../helpers/http.js";
-import { grantRoleScope, revokeRoleScopes } from "../helpers/roleScope.js";
+import { describe, it, expect, afterAll, beforeAll, beforeEach, afterEach, jest } from "@jest/globals";
+
+// One case below rejects a PO through the real endpoint, which mails the
+// people who can act. No mail leaves the machine.
+const fakeTransport = { sendMail: (opts, cb) => cb(null, { messageId: "<captured>" }) };
+jest.unstable_mockModule("nodemailer", () => {
+  const api = { createTransport: () => fakeTransport };
+  return { default: api, ...api };
+});
+
+const { default: excelJS } = await import("exceljs");
+const { db, closeDb } = await import("../setup/db.js");
+const { IDS } = await import("../fixtures/ids.js");
+const { makeRFQ } = await import("../factories/rfq.js");
+const { httpClient } = await import("../helpers/http.js");
+const { grantRoleScope, revokeRoleScopes } = await import("../helpers/roleScope.js");
+const { drainPoRejectedNotifications } = await import("../../app/services/po/poRejectionNotifier.js");
 
 const BUYER = IDS.users.a1_proc_buyer;
 const APPROVER = IDS.users.a1_proc_poApp;
@@ -87,10 +97,17 @@ const made = {
 beforeEach(() => { for (const k of Object.keys(made)) made[k] = []; });
 
 afterEach(async () => {
+  await drainPoRejectedNotifications();
   await revokeRoleScopes(db, made.scopeIds);
+  if (made.poIds.length) {
+    await db.none(`DELETE FROM tbl_notifications WHERE (additional_data->>'po_id')::int = ANY($1::int[])`, [made.poIds]);
+    await db.none(`DELETE FROM tbl_po_send_backs WHERE purchase_order_id = ANY($1::int[])`, [made.poIds]);
+  }
   await db.none(`DELETE FROM tbl_report_exports WHERE requested_by = ANY($1::int[])`,
     [[BUYER, IDS.users.companyB_admin]]);
   if (made.instanceIds.length) {
+    await db.none(`UPDATE tbl_rfq_purchase_order SET approval_instance_id = NULL WHERE approval_instance_id = ANY($1::int[])`,
+      [made.instanceIds]);
     await db.none(
       `DELETE FROM tbl_approval_step_approvers WHERE approval_instance_step_id IN (
          SELECT id FROM tbl_approval_instance_steps WHERE approval_instance_id = ANY($1::int[]))`,
@@ -315,6 +332,50 @@ describe("Report 3.3 — Rejected PO Log", () => {
 
     const { wb } = await download("po_rejections");
     expect(column(wb.getWorksheet("Cancelled"), "PO Number")).toEqual([po.po_number]);
+    expect(column(wb.getWorksheet("Rejected by Approver"), "PO Number")).toEqual([]);
+  });
+
+  it("names the approver who rejected a PO as not needed under Cancelled, never 'Not recorded'", async () => {
+    // The CANCEL route, through the real endpoint: the approval is REJECTED,
+    // the PO becomes 'cancelled', and a CANCEL send-back records the reason.
+    const rfq = await rfqWithItems(1);
+    const po = await makePo(rfq, { status: "pending_approval", itemIds: rfq.items, value: 7000 });
+    const inst = await db.one(
+      `INSERT INTO tbl_approval_instances
+         (entity_type, entity_id, approval_policy_id, status, current_step,
+          hospitality_company_id, hotel_id, department_id, initiated_by)
+       VALUES ('PO', $1, $2, 'PENDING', 1, $3, $4, $5, $6) RETURNING id`,
+      [po.id, POLICY_ID, IDS.hospitality.A, IDS.hotels.A1, IDS.departments.proc, BUYER]
+    );
+    made.instanceIds.push(Number(inst.id));
+    const step = await db.one(
+      `INSERT INTO tbl_approval_instance_steps
+         (approval_instance_id, policy_step_id, step_order, decision_rule, status)
+       VALUES ($1, $2, 1, 'ANY', 'PENDING') RETURNING id`,
+      [inst.id, POLICY_STEP_ID]
+    );
+    await db.none(
+      `INSERT INTO tbl_approval_step_approvers (approval_instance_step_id, approver_user_id, status)
+       VALUES ($1, $2, 'PENDING')`,
+      [step.id, APPROVER]
+    );
+    await db.none(`UPDATE tbl_rfq_purchase_order SET approval_instance_id = $1 WHERE id = $2`, [inst.id, po.id]);
+
+    const res = await (await httpClient(APPROVER)).post(`/api/v1/po/approve/${po.id}`)
+      .send({ decision: "rejected", reason_category: "NOT_REQUIRED", remarks: "outlet refurbishment dropped" });
+    expect(res.status).toBe(200);
+    expect(res.body.data.route).toBe("CANCEL");
+    expect((await db.one(`SELECT status::text AS s FROM tbl_rfq_purchase_order WHERE id = $1`, [po.id])).s)
+      .toBe("cancelled");
+
+    const { wb } = await download("po_rejections");
+    const ws = wb.getWorksheet("Cancelled");
+    expect(column(ws, "PO Number")).toEqual([po.po_number]);
+    const who = await db.one(`SELECT name FROM tbl_users WHERE id = $1`, [APPROVER]);
+    expect(column(ws, "Cancelled By")).toEqual([who.name]);
+    expect(column(ws, "Reason")).toEqual(["outlet refurbishment dropped"]);
+    expect(column(ws, "Cancelled On (IST)")[0]).toBeInstanceOf(Date);
+    // A cancellation, not a rejection: it is not counted twice.
     expect(column(wb.getWorksheet("Rejected by Approver"), "PO Number")).toEqual([]);
   });
 
