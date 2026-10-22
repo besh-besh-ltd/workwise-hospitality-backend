@@ -72,8 +72,8 @@ export async function getRfqPoCoverage(rfqId, dbCtx = db) {
  * Meaningful for drafts only — callers pass null for anything else.
  */
 export function classifyInitiateKind(cov) {
-  if (!cov) return null;
-  if (cov.rfq_product_count > 0 && cov.po_product_count === cov.rfq_product_count) return "complete";
+  if (!cov || !(cov.rfq_product_count > 0)) return null;
+  if (cov.po_product_count === cov.rfq_product_count) return "complete";
   if (cov.products_unawarded === 0) return "split";
   return "partial";
 }
@@ -99,6 +99,8 @@ export async function getPoApprovalInitiators(poIds, dbCtx = db) {
     [ids]
   );
   for (const r of rows) {
+    // Same null semantics as the lifecycle: no initiator on the instance means null.
+    if (r.user_id == null) continue;
     out.set(Number(r.po_id), { id: Number(r.user_id), name: r.name || null, at: r.created_at });
   }
   return out;

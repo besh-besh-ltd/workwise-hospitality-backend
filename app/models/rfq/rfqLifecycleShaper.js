@@ -12,6 +12,9 @@ const PHASE_TO_STAGE = {
   purchase_order: { key: "purchase-order",    label: "Purchase Order" },
 };
 
+// A PO in one of these states holds no products (mirrors poInitiateGuide).
+const DEAD_PO_STATUSES = ["rejected", "cancelled", "rejected_by_vendor"];
+
 const PHASE_ORDER = ["rfq_approval", "technical", "commercial", "purchase_order"];
 
 export const STAGE_ORDER = ["overview", "technical", "negotiation-award", "purchase-order"];
@@ -88,6 +91,9 @@ function redactUnreadableStages(stages, permissions) {
     }
     stage.can_read = false;
     stage.action = null;
+    // Whether a PO exists is not for this caller to learn: show the state the
+    // phase would have without the partial-award opening.
+    if (stage.reason === "partial_award") Object.assign(stage, mapState(stage.phase?.status));
     delete stage.draft_count;
     // The summary is not safe either — it carries counts and values
     // ("2 POs · ₹4,20,000", "1 product finalized").
@@ -123,12 +129,16 @@ export function shapeRfqLifecycle(summary, { permissions = {} } = {}) {
     const phase = byPhaseKey[phaseKey] || { status: "upcoming" };
     let { state, reason } = mapState(phase.status);
     // A partial award: the RFQ is still in Negotiation & Award (so the PO phase
-    // is upcoming) yet a draft PO already exists and needs an initiator. Open
-    // the stage so it is reachable. 'open' is neither active nor locked, so it
-    // never wins default_stage (which picks the first 'active' stage).
-    const poCount = Array.isArray(phase.purchase_orders) ? phase.purchase_orders.length : 0;
+    // is upcoming) yet a LIVE PO already exists. Open the stage so it is
+    // reachable. A PO that was rejected or cancelled holds nothing, so an RFQ
+    // whose only POs are dead stays locked. 'open' is neither active nor locked,
+    // so it never wins default_stage (which picks the first 'active' stage).
+    // redactUnreadableStages undoes this for a caller who may not read the stage.
+    const livePoCount = Array.isArray(phase.purchase_orders)
+      ? phase.purchase_orders.filter((p) => !DEAD_PO_STATUSES.includes(p.status)).length
+      : 0;
     let draft_count;
-    if (phaseKey === "purchase_order" && phase.status === "upcoming" && poCount > 0) {
+    if (phaseKey === "purchase_order" && phase.status === "upcoming" && livePoCount > 0) {
       state = "open";
       reason = "partial_award";
       draft_count = phase.purchase_orders.filter((p) => p.status === "draft").length;

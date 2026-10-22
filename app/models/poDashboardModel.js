@@ -800,6 +800,7 @@ export async function getPODetailFull(po_id, scope, viewer = null) {
             COALESCE(rfq.hospitality_company_id, arc.hospitality_company_id) AS hospitality_company_id,
             COALESCE(rfq.hotel_id, mr.hotel_id, arc.hotel_id) AS hotel_id,
             COALESCE(rfq.department_id, arc.department_id) AS department_id,
+            COALESCE(rfq.process_id, arc.process_id) AS process_id,
             COALESCE(THC.name, ATHC.name, TC.company_name) AS company_name,
             COALESCE(THCH.name, ATHCH.name) AS business_unit,
             COALESCE(DEPT.title, ADEPT.title) AS department_name,
@@ -1303,26 +1304,42 @@ export async function getPODetailFull(po_id, scope, viewer = null) {
     };
   }
 
-  // Initiate guidance. BUYER viewers only: the vendor-scoped read passes no
-  // `viewer` (and carries scope.vendorId), so a vendor never receives these.
-  // `viewer` is req.user — never a client-supplied id.
+  // Initiate guidance. BUYER viewers only. `viewer` is req.user (never a
+  // client-supplied id); the vendor-scoped route passes none, and a vendor
+  // reaching a buyer route (user_type 3) is refused here too, since deriveScope
+  // never sets scope.vendorId.
   let initiateGuide = {};
-  if (viewer && !scope.vendorId) {
-    const isDraft = po.status === "draft";
-    const approvalInitiator = (await getPoApprovalInitiators([poId])).get(poId) || null;
-    const canInitiate = await canInitiateOnTuple(viewer, await resolvePoScopeTuple(poId));
-    let initiateKind = null;
-    let siblingDrafts = [];
-    if (!po.is_call_off && po.rfq_id) {
-      if (isDraft) initiateKind = classifyInitiateKind((await getRfqPoCoverage(po.rfq_id)).get(poId));
-      if (canInitiate) {
+  if (viewer) {
+    if (Number(viewer.user_type) === 3 || viewer.is_token_user || scope.vendorId) {
+      initiateGuide = { can_initiate: false, initiate_kind: null, sibling_drafts: [] };
+    } else {
+      const isDraft = po.status === "draft";
+      const isRfqPo = !po.is_call_off && !!po.rfq_id;
+      // The tuple the gate evaluates; reuse the row's own keys, re-read only
+      // when it could not resolve a company (the gate then falls back to the hotel).
+      const tuple = po.hospitality_company_id
+        ? {
+            hospitality_company_id: po.hospitality_company_id,
+            hotel_id: po.hotel_id,
+            department_id: po.department_id,
+            process_id: po.process_id,
+          }
+        : await resolvePoScopeTuple(poId);
+      const [approvalInitiators, canInitiate, coverage] = await Promise.all([
+        getPoApprovalInitiators([poId]),
+        canInitiateOnTuple(viewer, tuple),
+        isRfqPo && isDraft ? getRfqPoCoverage(po.rfq_id) : null,
+      ]);
+      let siblingDrafts = [];
+      if (isRfqPo && canInitiate) {
         // Drafts of the SAME RFQ, oldest first: the initiator sees what else is
         // waiting before choosing between initiating now and merging first.
+        // LEFT JOINs: a draft whose vendor row is gone is still listed.
         siblingDrafts = (await db.any(
           `SELECT sib.id, sib.po_number, sib.total_value, sib.created_at,
                   COALESCE(VC.company_name, VU.organization_name, VU.name) AS vendor_name
              FROM tbl_rfq_purchase_order sib
-             JOIN tbl_users VU ON VU.id = sib.finalized_vendor_id
+             LEFT JOIN tbl_users VU ON VU.id = sib.finalized_vendor_id
              LEFT JOIN tbl_company VC ON VC.id = VU.company_id
             WHERE sib.rfq_id = $1 AND sib.status = 'draft' AND sib.id <> $2
             ORDER BY sib.created_at ASC, sib.id ASC`,
@@ -1335,14 +1352,14 @@ export async function getPODetailFull(po_id, scope, viewer = null) {
           created_at: r.created_at,
         }));
       }
+      initiateGuide = {
+        can_initiate: canInitiate,
+        initiate_kind: coverage ? classifyInitiateKind(coverage.get(poId)) : null,
+        raised_by: po.initiated_by != null ? { id: Number(po.initiated_by), name: po.initiator_name || null } : null,
+        approval_initiated_by: approvalInitiators.get(poId) || null,
+        sibling_drafts: siblingDrafts,
+      };
     }
-    initiateGuide = {
-      can_initiate: canInitiate,
-      initiate_kind: initiateKind,
-      raised_by: po.initiated_by != null ? { id: Number(po.initiated_by), name: po.initiator_name || null } : null,
-      approval_initiated_by: approvalInitiator,
-      sibling_drafts: siblingDrafts,
-    };
   }
 
   return {

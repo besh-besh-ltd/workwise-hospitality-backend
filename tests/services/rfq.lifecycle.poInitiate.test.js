@@ -24,21 +24,25 @@ import {
 const BUYER = IDS.users.a1_proc_buyer;        // RFQ creator: rfq.read only, cannot initiate
 const INITIATOR = IDS.users.a1_proc_poApp;    // FINAL_AWARDING_P1 at (A, A1, proc): can initiate
 const READER = IDS.users.a1_proc_commApp;    // awarding.read, no awarding.create: sees the PO stage, cannot initiate
+const HOTEL_USER = IDS.users.a1_proc_finance;     // + FINAL_AWARDING_P1 at (A, A1)
+const COMPANY_USER = IDS.users.a1_proc_techApp;   // + FINAL_AWARDING_P1 at (A)
+const WRONG_PROCESS = IDS.users.a1_proc_commEval; // + FINAL_AWARDING_P1 for process A_P2 only
 const VENDOR_A = IDS.users.vendor_alpha;
 const VENDOR_B = IDS.users.vendor_beta;
 
 const rfqIds = [];
 const poIds = [];
+const extra = {};
 let readerClient, initiatorClient, vendorClient;
-const userTypeBackup = new Map();
+const userTypeBackup = new Map();   // id -> {user_type, status}
 const grantIds = [];
 
 beforeAll(async () => {
   // acl([2, 8]) on the lifecycle route branches on user_type; fixtures leave it NULL.
-  for (const u of [BUYER, INITIATOR, READER, VENDOR_A]) {
-    userTypeBackup.set(u, (await db.one(`SELECT user_type FROM tbl_users WHERE id = $1`, [u])).user_type);
+  for (const u of [BUYER, INITIATOR, READER, HOTEL_USER, COMPANY_USER, WRONG_PROCESS, VENDOR_A]) {
+    userTypeBackup.set(u, await db.one(`SELECT user_type, status FROM tbl_users WHERE id = $1`, [u]));
   }
-  await db.none(`UPDATE tbl_users SET user_type = 2 WHERE id = ANY($1::int[])`, [[BUYER, INITIATOR, READER]]);
+  await db.none(`UPDATE tbl_users SET user_type = 2 WHERE id = ANY($1::int[])`, [[BUYER, INITIATOR, READER, HOTEL_USER, COMPANY_USER, WRONG_PROCESS]]);
   await db.none(`UPDATE tbl_users SET user_type = 3, status = 1 WHERE id = $1`, [VENDOR_A]);
   // The lifecycle itself is gated on rfq.read; the fixture's awarding role has
   // none, so add the RFQ-reading role a real initiator also holds.
@@ -46,6 +50,14 @@ beforeAll(async () => {
     userId: INITIATOR, roleId: ROLE_IDS.TENDER_CREATOR,
     companyId: IDS.hospitality.A, hotelId: IDS.hotels.A1, departmentId: IDS.departments.proc,
   }));
+  const award = (userId, scope) => grantRoleScope(db, { userId, roleId: ROLE_IDS.FINAL_AWARDING_P1, companyId: IDS.hospitality.A, ...scope });
+  grantIds.push(await award(HOTEL_USER, { hotelId: IDS.hotels.A1 }));
+  grantIds.push(await award(COMPANY_USER, {}));
+  grantIds.push(await award(WRONG_PROCESS, { hotelId: IDS.hotels.A1, departmentId: IDS.departments.proc, processId: IDS.processes.A_P2 }));
+  for (const u of [HOTEL_USER, COMPANY_USER, WRONG_PROCESS]) {
+    grantIds.push(await grantRoleScope(db, { userId: u, roleId: ROLE_IDS.TENDER_CREATOR, companyId: IDS.hospitality.A }));
+    extra[u] = await httpClient(u);
+  }
   readerClient = await httpClient(READER);
   initiatorClient = await httpClient(INITIATOR);
   vendorClient = await httpClient(VENDOR_A);
@@ -57,7 +69,7 @@ afterAll(async () => {
   await cleanupPurchaseOrders(db, poIds);
   await db.none(`DELETE FROM tbl_rfq_products WHERE rfq_id = ANY($1)`, [rfqIds]);
   await cleanupRfqs(db, rfqIds);
-  for (const [u, t] of userTypeBackup) await db.none(`UPDATE tbl_users SET user_type = $2 WHERE id = $1`, [u, t]);
+  for (const [u, b] of userTypeBackup) await db.none(`UPDATE tbl_users SET user_type = $2, status = $3 WHERE id = $1`, [u, b.user_type, b.status]);
   await closeDb();
 });
 
@@ -79,7 +91,7 @@ async function seed({ productCount, pos }) {
       const first = products[po.products[0]];
       const { po_id } = await makePO(t, {
         rfq_id, rfq_product_id: first, status: po.status ?? "draft",
-        company_id: IDS.hospitality.A, vendor_user_id: po.vendor, initiated_by: BUYER,
+        company_id: IDS.companies.A, vendor_user_id: po.vendor, initiated_by: BUYER,
       });
       for (const idx of po.products.slice(1)) {
         await t.none(
@@ -215,6 +227,52 @@ describe("RFQ lifecycle — PO initiate guidance", () => {
     expect(live?.key).toBeDefined();
     expect(data.default_stage).toBe(live.key);
     expect(data.default_stage).not.toBe("purchase-order");
+  });
+
+  it("reports can_initiate for company-wide, hotel-scoped and department-scoped holders, and not for a wrong-process one", async () => {
+    // makeRFQ defaults to a real process (A_P1), so the wrong-process user fails
+    // on a genuine mismatch (A_P2 vs A_P1), not on a NULL.
+    const { rfq_id } = await seed({ productCount: 1, pos: [{ vendor: VENDOR_A, products: [0] }] });
+    expect((await db.one(`SELECT process_id FROM tbl_rfq WHERE id = $1`, [rfq_id])).process_id).toBe(IDS.processes.A_P1);
+
+    expect((await lifecycle(extra[COMPANY_USER], rfq_id)).phase.can_initiate).toBe(true);
+    expect((await lifecycle(extra[HOTEL_USER], rfq_id)).phase.can_initiate).toBe(true);
+    expect((await lifecycle(initiatorClient, rfq_id)).phase.can_initiate).toBe(true);   // department-scoped
+    const wrong = await lifecycle(extra[WRONG_PROCESS], rfq_id);
+    expect(wrong.phase.can_initiate).toBe(false);
+    expect(wrong.pos[0].initiate_awaiting_me).toBe(false);
+  });
+
+  it("keeps the PO stage locked when the only POs are rejected or cancelled", async () => {
+    const { rfq_id } = await seed({ productCount: 2, pos: [{ vendor: VENDOR_A, products: [0], status: "cancelled" }] });
+    const { stage, phase } = await lifecycle(initiatorClient, rfq_id);
+    expect(phase.status).toBe("upcoming");
+    expect(stage.state).toBe("locked");
+    expect(stage.reason).toBe("not_started");
+    expect(stage.draft_count).toBeUndefined();
+  });
+
+  it("opens the PO stage for one dead PO plus one live draft", async () => {
+    const { rfq_id } = await seed({
+      productCount: 3,
+      pos: [{ vendor: VENDOR_A, products: [0], status: "cancelled" }, { vendor: VENDOR_B, products: [1] }],
+    });
+    const { stage } = await lifecycle(initiatorClient, rfq_id);
+    expect(stage.state).toBe("open");
+    expect(stage.reason).toBe("partial_award");
+    expect(stage.draft_count).toBe(1);
+  });
+
+  it("does not tell a caller who cannot read the PO stage that a PO exists", async () => {
+    const { rfq_id } = await seed({ productCount: 3, pos: [{ vendor: VENDOR_A, products: [0] }] });
+    // The RFQ creator holds rfq.read only: the stage is redacted for them.
+    const res = await (await httpClient(BUYER)).get(`/api/v1/rfq/${rfq_id}/lifecycle`);
+    const stage = res.body.data.stages.find((s) => s.key === "purchase-order");
+    expect(stage.can_read).toBe(false);
+    expect(stage.state).toBe("locked");
+    expect(stage.reason).toBe("not_started");
+    expect(stage.draft_count).toBeUndefined();
+    expect(stage.phase.purchase_orders).toBeUndefined();
   });
 
   it("leaves the PO stage locked while no PO exists", async () => {

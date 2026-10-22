@@ -44,12 +44,12 @@ const ALL_BUYERS = [CREATOR, DEPT_USER, HOTEL_USER, COMPANY_USER, WRONG_PROCESS,
 
 const c = {};            // user id -> client
 const grantIds = [];
-const userTypeBackup = new Map();
+const userTypeBackup = new Map();   // id -> {user_type, status}
 const created = { rfqIds: [], poIds: [], instanceIds: [] };
 
 beforeAll(async () => {
   for (const u of [...ALL_BUYERS, VENDOR_A]) {
-    userTypeBackup.set(u, (await db.one(`SELECT user_type FROM tbl_users WHERE id = $1`, [u])).user_type);
+    userTypeBackup.set(u, await db.one(`SELECT user_type, status FROM tbl_users WHERE id = $1`, [u]));
   }
   await db.none(`UPDATE tbl_users SET user_type = 2 WHERE id = ANY($1::int[])`, [ALL_BUYERS]);
   await db.none(`UPDATE tbl_users SET user_type = 3, status = 1 WHERE id = $1`, [VENDOR_A]);
@@ -107,7 +107,7 @@ afterEach(async () => {
 
 afterAll(async () => {
   await revokeRoleScopes(db, grantIds);
-  for (const [u, t] of userTypeBackup) await db.none(`UPDATE tbl_users SET user_type = $2 WHERE id = $1`, [u, t]);
+  for (const [u, b] of userTypeBackup) await db.none(`UPDATE tbl_users SET user_type = $2, status = $3 WHERE id = $1`, [u, b.user_type, b.status]);
   await closeDb();
 });
 
@@ -176,6 +176,43 @@ describe("PO detail — can_initiate", () => {
     expect(res.body.data).not.toHaveProperty("can_initiate");
     expect(res.body.data).not.toHaveProperty("sibling_drafts");
     expect(res.body.data).not.toHaveProperty("initiate_kind");
+  });
+});
+
+describe("PO detail — a vendor never gets initiate data", () => {
+  it("GET /po/:po_id (the buyer route) leaks none of the new fields to a vendor", async () => {
+    const { po_ids: [po_id] } = await seed();
+    const res = await c[VENDOR_A].get(`/api/v1/po/${po_id}`);
+    const raw = JSON.stringify(res.body);
+    for (const k of ["can_initiate", "initiate_kind", "sibling_drafts", "raised_by", "approval_initiated_by"]) {
+      expect(raw).not.toContain(`"${k}"`);
+    }
+    // Same through the model, whatever the route does with a vendor.
+    const { getPODetailFull } = await import("../../app/models/poDashboardModel.js");
+    const d = await getPODetailFull(po_id, { userId: VENDOR_A, hospitalityCompanyIds: null }, { id: VENDOR_A, user_type: 3 });
+    expect(d).toMatchObject({ can_initiate: false, initiate_kind: null, sibling_drafts: [] });
+    expect(d).not.toHaveProperty("raised_by");
+    expect(d).not.toHaveProperty("approval_initiated_by");
+  });
+});
+
+describe("PO detail — edge cases", () => {
+  it("gives a draft on an RFQ with no products no initiate_kind", async () => {
+    const { po_ids: [po_id], rfq_id } = await seed();
+    await db.none(`DELETE FROM tbl_rfq_products WHERE rfq_id = $1 AND id NOT IN (SELECT rfq_product_id FROM tbl_purchase_order_product WHERE purchase_order_id = $2)`, [rfq_id, po_id]);
+    await db.none(`UPDATE tbl_purchase_order_product SET rfq_product_id = NULL WHERE purchase_order_id = $1`, [po_id]);
+    await db.none(`DELETE FROM tbl_rfq_products WHERE rfq_id = $1`, [rfq_id]);
+    expect((await detail(DEPT_USER, po_id)).initiate_kind).toBeNull();
+  });
+
+  it("still lists a sibling draft whose vendor user is gone, with a null vendor_name", async () => {
+    const { po_ids: [target, orphan] } = await seed({
+      productCount: 2, pos: [{ vendor: VENDOR_A, products: [0] }, { vendor: VENDOR_B, products: [1] }],
+    });
+    // finalized_vendor_id has no FK, so a vendor row can vanish under a draft.
+    await db.none(`UPDATE tbl_rfq_purchase_order SET finalized_vendor_id = 999999999 WHERE id = $1`, [orphan]);
+    const d = await detail(DEPT_USER, target);
+    expect(d.sibling_drafts).toEqual([expect.objectContaining({ id: orphan, vendor_name: null })]);
   });
 });
 
@@ -362,5 +399,50 @@ describe("POST /negotiation/quotes/:rfq_product_id/approve", () => {
       id: po.id, po_number: po.po_number, initiate_kind: "partial", can_initiate: false,
     });
     expect(po.status).toBe("draft");
+  });
+
+  it("approveQuotes returns the drafted PO when the award is built from selected_quotes (no stored payload)", async () => {
+    const oneDayAgo = new Date(Date.now() - 86400_000).toISOString().replace("T", " ").slice(0, 19);
+    const rfq = await db.one(
+      `INSERT INTO tbl_rfq
+         (rfq_no, comment, company_name, response_email, contact_name, contact_number,
+          bid_end_date, location, is_published, status, created_by, updated_by, "timestamp",
+          hospitality_company_id, hotel_id, department_id, process_id, is_tender, title)
+       VALUES ((SELECT COALESCE(MAX(rfq_no), 8000000) + 1 FROM tbl_rfq), '<p>e2e</p>', '', 'b@a', 'A1', '+91', $1,
+               'Mumbai', 1, 1, $2, $2, NOW(), $3, $4, $5, $6, 0, 'approveQuotes path B')
+       RETURNING id, rfq_no`,
+      [oneDayAgo, CREATOR, IDS.hospitality.A, IDS.hotels.A1, IDS.departments.proc, IDS.processes.A_P1]);
+    created.rfqIds.push(rfq.id);
+    const prod = await db.one(
+      `INSERT INTO tbl_rfq_products (rfq_id, comment, datasheet, spec_file, qap_file, qap, product_variant_id, variant)
+       VALUES ($1, '', '', '', '', '', 1, 0) RETURNING id`, [rfq.id]);
+    await db.none(`INSERT INTO tbl_rfq_product_vendors (rfq_id, product_variant_id, user_id, variant) VALUES ($1, 1, $2, 0)`, [rfq.id, VENDOR_A]);
+    const quote = await db.one(
+      `INSERT INTO tbl_quotes (rfq_id, rfq_no, created_by, updated_by, status, "timestamp")
+       VALUES ($1, $2, $3, $3, 1, NOW()) RETURNING id`, [rfq.id, rfq.rfq_no, VENDOR_A]);
+    await db.none(
+      `INSERT INTO tbl_quote_items
+         (rfq_id, rfq_no, quote_id, product_variant_id, unit_price, total_price, package_price, tax,
+          freight_price, variant, comment, delivery_period, quantity, tax_mode, other_charges)
+       VALUES ($1, $2, $3, 1, 500, 25000, 0, 0, 0, 0, '', '15', '50', 'absolute', '[]'::jsonb)`,
+      [rfq.id, rfq.rfq_no, quote.id]);
+
+    const approval = await createApprovalInstance({
+      entity_type: "NEGOTIATION_QUOTE", entity_id: prod.id,
+      hospitality_company_id: IDS.hospitality.A, hotel_id: IDS.hotels.A1, department_id: null,
+      process_id: IDS.processes.A_P1, initiated_by: CREATOR,
+      metadata: {
+        rfq_id: rfq.id, rfq_number: rfq.rfq_no, rfq_product_id: prod.id, is_tender: 0,
+        selected_quotes: [{ quote_id: quote.id, vendor_id: VENDOR_A, quoted_price: 500 }],
+      },
+    });
+    created.instanceIds.push(approval.instance.id);
+
+    const res = await c[READER].post(`/api/v1/negotiation/quotes/${prod.id}/approve`).send({});
+    expect(res.status).toBe(200);
+    const po = await db.one(`SELECT id, po_number FROM tbl_rfq_purchase_order WHERE rfq_id = $1`, [rfq.id]);
+    expect(res.body.data.drafted_pos).toEqual([
+      { id: po.id, po_number: po.po_number, initiate_kind: "complete", can_initiate: false },
+    ]);
   });
 });
