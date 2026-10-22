@@ -320,9 +320,34 @@ export async function loadSendBack(sendBackId) {
   return (await shapeRows(db, rows))[0] || null;
 }
 
+/**
+ * After COMMIT: run the side effects, then read the send-back back. Never
+ * throws. The transition is already durable, so a failure here must not turn
+ * into an error answer, and above all must not make the caller discard the
+ * uploaded files the committed rows point to. A failed read answers null;
+ * the client refetches the thread anyway.
+ */
+async function afterCommit(sendBackId, sideEffects) {
+  try {
+    sideEffects();
+  } catch (err) {
+    logError('poSendBack: a post-commit side effect failed', err);
+  }
+  try {
+    return await loadSendBack(sendBackId);
+  } catch (err) {
+    logError('poSendBack: committed, but could not read the send-back back', err);
+    return null;
+  }
+}
+
 // ── Writes ────────────────────────────────────────────────────────────────
 
-/** Uploaded files (multer-s3) for a send-back that was never written. Never throws. */
+/**
+ * Uploaded files (multer-s3) for a send-back that was never written. Never
+ * throws. Only for a transition that did NOT commit: the write functions
+ * below throw only before or during their transaction, never after COMMIT.
+ */
 export async function discardUploads(files) {
   for (const f of files || []) {
     if (!f?.key || !f?.bucket) continue;
@@ -429,11 +454,12 @@ export async function createInfoRequest({ user, poId, targetRole, reasonCategory
     throw err;
   }
 
-  // COMMIT has happened.
-  notifyApprovalChanged({ instanceIds: [created.instanceId], extraUserIds: [created.targetUserId] });
-  void notifySendBackRequested({ sendBackId: created.id, actorId: user.id });
-  logger.info({ poId, sendBackId: created.id, targetRole }, 'PO put on hold for information');
-  return loadSendBack(created.id);
+  // COMMIT has happened: nothing below throws (see afterCommit).
+  return afterCommit(created.id, () => {
+    notifyApprovalChanged({ instanceIds: [created.instanceId], extraUserIds: [created.targetUserId] });
+    void notifySendBackRequested({ sendBackId: created.id, actorId: user.id });
+    logger.info({ poId, sendBackId: created.id, targetRole }, 'PO put on hold for information');
+  });
 }
 
 /**
@@ -476,10 +502,13 @@ export async function respondToInfoRequest({ user, sendBackId, responseText, fil
     return { poId: Number(sb.purchase_order_id), instanceId: Number(sb.approval_instance_id) };
   });
 
-  notifyApprovalChanged({ instanceIds: [out.instanceId], extraUserIds: [user.id] });
-  void notifySendBackAnswered({ sendBackId: Number(sendBackId), actorId: user.id });
-  logger.info({ poId: out.poId, sendBackId }, 'PO hold answered');
-  return { poId: out.poId, sendBack: await loadSendBack(sendBackId) };
+  // COMMIT has happened: nothing below throws (see afterCommit).
+  const sendBack = await afterCommit(sendBackId, () => {
+    notifyApprovalChanged({ instanceIds: [out.instanceId], extraUserIds: [user.id] });
+    void notifySendBackAnswered({ sendBackId: Number(sendBackId), actorId: user.id });
+    logger.info({ poId: out.poId, sendBackId }, 'PO hold answered');
+  });
+  return { poId: out.poId, sendBack };
 }
 
 /**
@@ -527,11 +556,14 @@ export async function withdrawInfoRequest({ user, sendBackId, note }) {
     };
   });
 
-  notifyApprovalChanged({
-    instanceIds: [out.instanceId],
-    extraUserIds: out.targetUserId ? [out.targetUserId] : [],
+  // COMMIT has happened: nothing below throws (see afterCommit).
+  const sendBack = await afterCommit(sendBackId, () => {
+    notifyApprovalChanged({
+      instanceIds: [out.instanceId],
+      extraUserIds: out.targetUserId ? [out.targetUserId] : [],
+    });
+    void notifySendBackWithdrawn({ sendBackId: Number(sendBackId), actorId: user.id, note: text || null });
+    logger.info({ poId: out.poId, sendBackId }, 'PO hold withdrawn');
   });
-  void notifySendBackWithdrawn({ sendBackId: Number(sendBackId), actorId: user.id, note: text || null });
-  logger.info({ poId: out.poId, sendBackId }, 'PO hold withdrawn');
-  return { poId: out.poId, sendBack: await loadSendBack(sendBackId) };
+  return { poId: out.poId, sendBack };
 }

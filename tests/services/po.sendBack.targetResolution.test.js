@@ -258,4 +258,24 @@ describe("who can see and touch a hold", () => {
     );
     expect(vendorNotes).toEqual([]);
   });
+
+  it("a vendor's copy of a rejected PO carries no approval history", async () => {
+    // The rejection's comment is the send-back reason the approver wrote for
+    // the buyer side (Task 6), and a vendor can still open a rejected PO.
+    const a = await world.poAtStep2();
+    const rejected = await world.reject(S.APPROVER_A, a.poId, { remarks: "Internal: their freight is padded" });
+    expect(rejected.status).toBe(200);
+    expect((await db.one(`SELECT status::text AS s FROM tbl_rfq_purchase_order WHERE id = $1`, [a.poId])).s)
+      .not.toBe("pending_approval");
+
+    const vendor = await (await world.client(S.VENDOR_A)).get(`/api/v1/po/${a.poId}`);
+    expect(vendor.status).toBe(200);
+    expect(Object.keys(vendor.body.data)).not.toContain("approval_history");
+    expect(JSON.stringify(vendor.body)).not.toMatch(/Internal: their freight is padded/);
+
+    // The buyer side still has the whole history.
+    const buyer = await (await world.client(S.APPROVER_A)).get(`/api/v1/po/${a.poId}`);
+    expect(buyer.status).toBe(200);
+    expect(buyer.body.data.approval_history.map((h) => h.action)).toEqual(["APPROVE", "REJECT"]);
+  });
 });

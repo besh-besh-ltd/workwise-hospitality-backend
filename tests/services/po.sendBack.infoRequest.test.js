@@ -27,15 +27,22 @@ const { makeSendBackWorld, S, PNG, PDF, TXT, keysOf, sendBackRows } = await impo
 const { drainPoRejectedNotifications } = await import("../../app/services/po/poRejectionNotifier.js");
 const { drainPoSendBackNotifications } = await import("../../app/services/po/poSendBackNotifier.js");
 const { default: s3Client } = await import("../../app/config/s3config.js");
+const { default: appDb } = await import("../../app/config/dbConn.js");
 
 // Record every S3 call. The function underneath is jestEnv's stub, so nothing
 // leaves the machine; the assertion below fails if that ever stops being true.
+// s3Params keeps the content type each object was stored with.
 const s3Calls = [];
+const s3Params = [];
 const stubbedSend = s3Client.send;
 s3Client.send = function recordS3(cmd, ...rest) {
   s3Calls.push({ op: cmd?.constructor?.name, key: cmd?.input?.Key });
+  s3Params.push({ op: cmd?.constructor?.name, key: cmd?.input?.Key, contentType: cmd?.input?.ContentType });
   return stubbedSend.call(this, cmd, ...rest);
 };
+// Send-back attachments only: approving a PO also writes its PDF.
+const SEND_BACK_KEY = /^purchase-order\/send-back\//;
+const keysFor = (op) => s3Calls.filter((c) => c.op === op && SEND_BACK_KEY.test(c.key || "")).map((c) => c.key).sort();
 
 const world = makeSendBackWorld(db);
 
@@ -45,6 +52,7 @@ afterEach(async () => {
   await drainPoRejectedNotifications();
   sentMails.length = 0;
   s3Calls.length = 0;
+  s3Params.length = 0;
   await world.cleanup();
 });
 afterAll(async () => {
@@ -482,5 +490,81 @@ describe("what a send-back request must carry", () => {
     } finally {
       await callOff.cleanup();
     }
+  });
+});
+
+describe("what happens to the files", () => {
+  const ask = (who, poId, body = {}) => world.sendBack(who, poId, {
+    target_role: "RFQ_CREATOR", reason_category: "INFO_MISSING", comment: "Which floor?", ...body,
+  });
+
+  it("a request refused after its upload leaves nothing stored: one file, and eleven", async () => {
+    const a = await world.poAtStep2();
+
+    // Refused by the service after multer stored the file.
+    const one = await ask(S.APPROVER_A, a.poId, { target_role: "BOSS", files: [PNG] });
+    expect({ status: one.status, code: one.body.code }).toEqual({ status: 400, code: "INVALID_TARGET" });
+    expect(keysFor("PutObjectCommand")).toHaveLength(1);
+    expect(keysFor("DeleteObjectCommand")).toEqual(keysFor("PutObjectCommand"));
+
+    // Refused by multer's file-count limit part-way through the upload.
+    s3Calls.length = 0;
+    const eleven = await ask(S.APPROVER_A, a.poId, { files: Array.from({ length: 11 }, () => PNG) });
+    expect({ status: eleven.status, code: eleven.body.code }).toEqual({ status: 400, code: "INVALID_FILE" });
+    expect(keysFor("PutObjectCommand").length).toBeGreaterThan(0);
+    expect(keysFor("DeleteObjectCommand")).toEqual(keysFor("PutObjectCommand"));
+
+    expect(await sendBackRows(db, a.poId)).toEqual([]);
+  });
+
+  it("stores an upload as the type it was accepted as, not what its bytes look like", async () => {
+    const a = await world.poAtStep2();
+    const svg = {
+      name: "x.png", type: "image/png",
+      buffer: Buffer.from('<svg xmlns="http://www.w3.org/2000/svg"><script>alert(1)</script></svg>'),
+    };
+    const res = await ask(S.APPROVER_A, a.poId, { files: [svg] });
+    expect(res.status).toBe(201);
+    const puts = s3Params.filter((p) => p.op === "PutObjectCommand" && SEND_BACK_KEY.test(p.key || ""));
+    expect(puts).toEqual([{ op: "PutObjectCommand", key: expect.stringMatching(/\.png$/), contentType: "image/png" }]);
+  });
+
+  it("a hold that committed keeps its files even if reading it back fails", async () => {
+    const a = await world.poAtStep2();
+
+    // Fail the read-back only: the thread's file query runs outside the
+    // transaction, after COMMIT, and nowhere in the write itself.
+    const realAny = appDb.any;
+    let failed = 0;
+    appDb.any = function failReadBack(query, ...rest) {
+      if (!failed && /FROM tbl_po_send_back_files WHERE send_back_id = ANY/.test(String(query))) {
+        failed += 1;
+        return Promise.reject(new Error("read-back failed"));
+      }
+      return realAny.call(this, query, ...rest);
+    };
+    let res;
+    try {
+      res = await ask(S.APPROVER_A, a.poId, { files: [PNG] });
+    } finally {
+      appDb.any = realAny;
+    }
+    expect(failed).toBe(1);
+
+    // The hold exists, so the answer says so; the client refetches the thread.
+    expect(res.status).toBe(201);
+    expect(res.body.status).toBe(1);
+    expect(res.body.data).toEqual({ send_back: null, po_id: a.poId });
+
+    const [row] = await sendBackRows(db, a.poId);
+    expect(row).toMatchObject({ status: "OPEN", requested_by: S.APPROVER_A });
+    const files = await db.any(`SELECT side, file_url FROM tbl_po_send_back_files WHERE send_back_id = $1`, [row.id]);
+    expect(files).toEqual([{ side: "REQUEST", file_url: expect.stringMatching(/purchase-order\/send-back\/.+\.png$/) }]);
+    expect(keysFor("PutObjectCommand")).toHaveLength(1);
+    expect(keysFor("DeleteObjectCommand")).toEqual([]);
+
+    // And it reads back fine afterwards.
+    const thread = await world.thread(S.APPROVER_A, a.poId);
+    expect(thread.body.data[0]).toMatchObject({ id: Number(row.id), status: "OPEN", files: [expect.objectContaining({ side: "REQUEST" })] });
   });
 });

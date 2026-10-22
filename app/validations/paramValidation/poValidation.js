@@ -82,7 +82,11 @@ const SEND_BACK_TYPES = Object.freeze({
 const store_send_back_file = multerS3({
   s3: s3Client,
   bucket: process.env.AWS_S3_BUCKET,
-  contentType: multerS3.AUTO_CONTENT_TYPE,
+  // The declared type, which fileFilter has already checked against
+  // SEND_BACK_TYPES. Not AUTO_CONTENT_TYPE: it sniffs the bytes, so an SVG
+  // named x.png and declared image/png would pass the filter and then be
+  // served as image/svg+xml from a public URL.
+  contentType: (req, file, cb) => cb(null, file.mimetype),
   key: function (req, file, cb) {
     const ext = path.extname(file.originalname).toLowerCase();
     cb(null, `purchase-order/send-back/${Date.now()}-${uuidv4()}${ext}`);

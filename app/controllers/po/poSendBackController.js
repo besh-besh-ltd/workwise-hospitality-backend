@@ -12,6 +12,11 @@
 //
 // Answers: success {status:1, message, data}; refusal HTTP 4xx
 // {status:0, message, code}.
+//
+// Uploads: the service throws only when nothing was committed, so a throw is
+// the one case where the files are removed again (discardUploads). After
+// COMMIT it never throws; if it cannot read the result back, send_back is
+// null and the answer is still a success, because the change happened.
 
 import { assertPoAccess, PoAccessError } from '../../models/purchaseOrderModel.js';
 import { PoDecisionError } from '../../services/po/poDecisionError.js';
@@ -116,7 +121,8 @@ export const createSendBack = async (req, res) => {
       data: { send_back: sendBack, po_id: poId },
     });
   } catch (err) {
-    void discardUploads(files);
+    // Not committed (see the header): nothing points at these files.
+    await discardUploads(files);
     return sendError(res, err, 'create');
   }
 };
@@ -138,7 +144,8 @@ export const respondSendBack = async (req, res) => {
       data: { send_back: out.sendBack, po_id: out.poId },
     });
   } catch (err) {
-    void discardUploads(files);
+    // Not committed (see the header): nothing points at these files.
+    await discardUploads(files);
     return sendError(res, err, 'respond');
   }
 };

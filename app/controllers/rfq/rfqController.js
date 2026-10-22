@@ -97,7 +97,7 @@ import { quoteGateApplies, assertOrgMayQuote, assertOrgMayClarify, memberRfqAssi
 import { lockLiveRfqAssignments, propagateRoutedCopiesLocked } from '../../services/vendorNetwork/subjects/rfqRoutedCopies.js';
 import { directInviteIdsForLine } from '../../services/vendorNetwork/directInvites.js';
 import { NetworkHttpError } from '../../services/vendorNetwork/guards.js';
-import { poFieldsFor, isVendorOrTokenViewer, stripLifecyclePoFields } from '../../services/po/buyerOnlyPoFields.js';
+import { poFieldsFor, isVendorOrTokenViewer } from '../../services/po/buyerOnlyPoFields.js';
 
 /** A Vendor Networks quote-gate refusal as its HTTP answer body. */
 const networkRefusalBody = (err) => ({ status: 0, message: err.message, ...(err.reason ? { reason: err.reason } : {}) });
@@ -8549,10 +8549,6 @@ const rfqController = {
         return res.status(200).json({ status: 2, message: 'RFQ not found or lifecycle not available' });
       }
 
-      // Buyer-only PO fields (a hold's who and why) never reach a vendor or a
-      // token user, should one ever get this far.
-      if (Array.isArray(data.phases)) data.phases = stripLifecyclePoFields(req.user, data.phases);
-
       return res.status(200).json({ status: 1, data });
     } catch (err) {
       logError('getLifecycleSummary error', err);
@@ -8643,8 +8639,6 @@ const rfqController = {
       }
 
       const shaped = shapeRfqLifecycle(summary, { permissions });
-      // acl([2, 8]) keeps vendors out; buyer-only PO fields are stripped anyway.
-      if (Array.isArray(shaped?.stages)) shaped.stages = stripLifecyclePoFields(req.user, shaped.stages);
       return res.status(200).json({ status: 1, data: { ...shaped, rfq } });
     } catch (err) {
       logError('getRfqLifecycle error', err);

@@ -109,14 +109,17 @@ describe("RFQ lifecycle — a PO on hold", () => {
     expect((await world.withdraw(S.PO_APPROVER, again.body.data.send_back.id)).status).toBe(200);
     expect((await poStage(r.rfq.id)).byId(held).hold).toBeNull();
 
-    // A vendor reaches neither lifecycle payload.
+    // A vendor reaches neither lifecycle payload, with a PO of theirs held:
+    // refused outright, so nothing on either payload is ever theirs to see.
     const vendor = await world.client(S.VENDOR_A);
     const ask2 = await ask(S.PO_APPROVER, held);
     expect(ask2.status).toBe(201);
-    for (const path of [`/api/v1/rfq/${r.rfq.id}/lifecycle`, `/api/v1/rfq/lifecycle-summary/${r.rfq.id}`]) {
-      const res = await vendor.get(path);
-      expect(JSON.stringify(res.body)).not.toMatch(/"hold"|send_back|Which floor/);
-    }
+    const full = await vendor.get(`/api/v1/rfq/${r.rfq.id}/lifecycle`);
+    expect({ status: full.status, body: full.body }).toEqual({ status: 403, body: { message: "Insufficient permissions" } });
+    const summary = await vendor.get(`/api/v1/rfq/lifecycle-summary/${r.rfq.id}`);
+    expect(summary.status).toBe(403);
+    expect(summary.body).toMatchObject({ status: 3, code: "PROCESS_NOT_IN_USER_SCOPE" });
+    expect(summary.body).not.toHaveProperty("data.phases");
   });
 
   it("approver pending count excludes the held PO; the target sees it under information_requests", async () => {
