@@ -222,6 +222,9 @@ export async function executePoApprovalAtomically(
           instance_status: 'APPROVED',
           message: 'Already approved, no action taken',
           already_completed: true,
+          // Nothing ran (R26). The activity trail skips on this, and only on
+          // this: the engine's own `already_completed` is not proof of it.
+          no_op: true,
         };
       }
       throw decisionNotRecorded(instance, noun);
@@ -245,7 +248,7 @@ export async function executePoApprovalAtomically(
     // twice. Kept as a guard: if the engine ever does answer
     // `already_completed` here, nothing new was decided, so neither the
     // document nor the post-action runs.
-    if (actionResult.already_completed) return actionResult;
+    if (actionResult.already_completed) return { ...actionResult, no_op: true };
 
     // 2. Rewrite the document.
     //
@@ -321,6 +324,7 @@ async function ownRejection(t, { poId, instanceId, userId }) {
       instance_status: 'REJECTED',
       message: 'Already rejected, no action taken',
       already_completed: true,
+      no_op: true, // nothing ran (R26); see executePoApprovalAtomically
     },
   };
 }

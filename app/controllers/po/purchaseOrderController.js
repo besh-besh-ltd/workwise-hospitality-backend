@@ -680,6 +680,9 @@ export const approvePO = async (req, res) => {
               reason_category: out.reasonCategory,
               send_back_id: out.sendBackId,
               already_completed: !!out.alreadyCompleted,
+              // True only when the service ran nothing (an approver's retry):
+              // the activity trail skips it (R26).
+              no_op: out.result?.no_op === true,
             },
           });
         } catch (err) {
@@ -771,6 +774,7 @@ export const approvePO = async (req, res) => {
           next_step: actionResult.next_step,
           approval_type: 'new',
           already_completed: !!actionResult.already_completed,
+          no_op: actionResult.no_op === true, // nothing ran; no activity row (R26)
         },
       });
     }
