@@ -354,23 +354,18 @@ export const PO_INITIATORS_LIMIT = 25;
 const TOP_MANAGEMENT_ROLE_TITLE = "Top Management";
 
 /**
- * @param {object} po      a tenancy row from assertPoAccess/resolvePoTenancy
- * @param {object} caller  req.user — excluded from the list, and the subject of
- *                         `can_initiate`
- * @returns {Promise<{can_initiate:boolean, initiators:Array, total:number}>}
+ * Every active, non-vendor user who may initiate a PO at `tuple`: UNCAPPED,
+ * ordered narrowest scope first then by name. This is the single place that
+ * intersects the read grant with the write grant (plus the buyer company's
+ * super admins), so the initiators panel and the "draft PO ready" notifier
+ * (services/po/poInitiateNotifier.js) cannot disagree about who can initiate.
+ *
+ * @param {object} tuple  {hospitality_company_id, hotel_id, department_id, process_id}
+ * @param {{excludeUserId?: number}} [opts]  omit for the notifier: a cron or the
+ *   approver who caused the draft is still a legitimate recipient
+ * @returns {Promise<Array<{user_id:number,name,employee_code,email,mobile,role_title,scope_breadth:number}>>}
  */
-export const listPoInitiators = async (po, caller, dbCtx = db) => {
-  const tuple = {
-    hospitality_company_id: po.hospitality_company_id,
-    hotel_id: po.hotel_id,
-    department_id: po.department_id,
-    process_id: po.process_id,
-  };
-
-  // can_initiate is the SAME predicate the gate uses, so the flag, the button
-  // and the write route can never disagree.
-  const can_initiate = await canInitiateOnTuple(caller, tuple, dbCtx);
-
+export const listPoInitiatorRecipients = async (tuple, { excludeUserId = null } = {}, dbCtx = db) => {
   // The two halves of the gate, then their intersection.
   const [readers, writers] = await Promise.all([
     listUsersWithAnyScope(PO_SCOPE_PERMISSIONS, tuple, dbCtx),
@@ -401,7 +396,7 @@ export const listPoInitiators = async (po, caller, dbCtx = db) => {
   }
 
   // Super admins of this PO's own buyer company.
-  if (po.hospitality_company_id) {
+  if (tuple.hospitality_company_id) {
     const admins = await dbCtx.any(
       `SELECT u.id AS user_id
          FROM tbl_users u
@@ -409,7 +404,7 @@ export const listPoInitiators = async (po, caller, dbCtx = db) => {
         WHERE hc.id = $1
           AND hc.is_deleted = 0
           AND u.user_type = 8`,
-      [po.hospitality_company_id]
+      [tuple.hospitality_company_id]
     );
     for (const a of admins) {
       if (!roleTitleById.has(Number(a.user_id))) {
@@ -419,9 +414,9 @@ export const listPoInitiators = async (po, caller, dbCtx = db) => {
     }
   }
 
-  const callerId = Number(caller?.id);
-  const candidateIds = [...roleTitleById.keys()].filter((id) => id !== callerId);
-  if (!candidateIds.length) return { can_initiate, initiators: [], total: 0 };
+  const excludedId = Number(excludeUserId);
+  const candidateIds = [...roleTitleById.keys()].filter((id) => id !== excludedId);
+  if (!candidateIds.length) return [];
 
   // Hydrate + apply the active-user filter in SQL. Ordered by name here; the
   // breadth ordering is applied below, BEFORE the cap, so the cap keeps the
@@ -442,14 +437,42 @@ export const listPoInitiators = async (po, caller, dbCtx = db) => {
   // keep name order.
   rows.sort((a, b) => breadthOf(a) - breadthOf(b));
 
+  return rows.map((r) => ({
+    ...r,
+    role_title: roleTitleById.get(Number(r.user_id)) || null,
+    scope_breadth: breadthOf(r),
+  }));
+};
+
+
+/**
+ * @param {object} po      a tenancy row from assertPoAccess/resolvePoTenancy
+ * @param {object} caller  req.user — excluded from the list, and the subject of
+ *                         `can_initiate`
+ * @returns {Promise<{can_initiate:boolean, initiators:Array, total:number}>}
+ */
+export const listPoInitiators = async (po, caller, dbCtx = db) => {
+  const tuple = {
+    hospitality_company_id: po.hospitality_company_id,
+    hotel_id: po.hotel_id,
+    department_id: po.department_id,
+    process_id: po.process_id,
+  };
+
+  // can_initiate is the SAME predicate the gate uses, so the flag, the button
+  // and the write route can never disagree.
+  const can_initiate = await canInitiateOnTuple(caller, tuple, dbCtx);
+
+  const rows = await listPoInitiatorRecipients(tuple, { excludeUserId: caller?.id }, dbCtx);
+
   const initiators = rows.slice(0, PO_INITIATORS_LIMIT).map((r) => ({
     user_id: Number(r.user_id),
     name: r.name || null,
     employee_code: r.employee_code || null,
     email: r.email || null,
     mobile: r.mobile || null,
-    role_title: roleTitleById.get(Number(r.user_id)) || null,
-    scope_breadth: breadthOf(r),
+    role_title: r.role_title || null,
+    scope_breadth: r.scope_breadth,
   }));
 
   // `total` is the TRUE uncapped count, so the UI can say "and N others".
@@ -800,6 +823,12 @@ export const draftPurchaseOrder = async (rfq_id, project_id, quote_item_id, tota
         }
       }
 
+      // `created` is the signal the "draft PO ready" notifier keys on: true only
+      // when this call INSERTed a new PO header. A merge (explicit existing_po_id
+      // or the auto-merge above) appends a line to a draft that already existed,
+      // and its initiators were told when it was first created.
+      const created = !existing_po_id;
+
       if(existing_po_id) {
         if(!(await t.oneOrNone(`SELECT id FROM tbl_rfq_purchase_order WHERE id = $1`, [existing_po_id])))
           throw new Error("No Purchase Order found from id:", existing_po_id);
@@ -921,6 +950,7 @@ export const draftPurchaseOrder = async (rfq_id, project_id, quote_item_id, tota
 
       return {
         po_id: po.id,
+        created,
         status: true,
         message: "PO has been drafted successfully!",
         should_auto_initiate,

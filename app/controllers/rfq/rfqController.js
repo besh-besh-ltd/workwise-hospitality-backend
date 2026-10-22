@@ -63,6 +63,7 @@ import {
 import moment from 'moment-timezone';
 import { deleteSchedule } from '../../helper/createSchedule.js';
 import { scheduleRfqPublish } from '../../helper/cronManager.js';
+import { notifyDraftCreated } from '../../services/po/poInitiateNotifier.js';
 import { draftPO, buildAuthoritativePOPayload } from '../po/purchaseOrderController.js';
 import { autoInitiateRFQPOs } from '../../models/purchaseOrderModel.js';
 import { sendApprovalNotification } from '../po/purchaseOrderEmails.js';
@@ -12372,6 +12373,8 @@ const rfqController = {
         // approvals), batch-initiate every draft PO spawned by this RFQ
         // now that the finalize transaction has committed. Wrapped in
         // try/catch so a failure here never breaks the finalize response.
+        // Post-commit: tell the initiators, only if this finalize CREATED the draft.
+        if (response.result?.created && response.result?.po_id) void notifyDraftCreated(response.result.po_id);
         let auto_initiate_summary = null;
         if (response.result?.should_auto_initiate && response.result?.rfq_id) {
           try {

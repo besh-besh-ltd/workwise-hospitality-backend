@@ -43,6 +43,7 @@ const formatRoundDeadlineIst = (endDate) => {
   })} IST`;
 };
 import { draftPO, buildAuthoritativePOPayload } from '../po/purchaseOrderController.js';
+import { notifyDraftCreated } from '../../services/po/poInitiateNotifier.js';
 import { buildDraftedPos } from '../../models/po/poInitiateGuide.js';
 import { initiatePurchaseOrder } from '../../models/purchaseOrderModel.js';
 import {
@@ -2917,6 +2918,8 @@ const NegotiationController = {
       // Ids of the draft POs this approval created or merged into, for the
       // `drafted_pos` guidance in the response.
       const draftedPoIds = [];
+      // Subset of draftedPoIds this approval CREATED (not merged into an existing draft).
+      const createdPoIds = [];
       let draftedRfqId = null;
 
       if (!rfq_product_id) {
@@ -3012,7 +3015,7 @@ const NegotiationController = {
           await db.tx(async (t) => {
             const authPayload = await buildAuthoritativePOPayload(poPayload, t);
             const poResult = await draftPO(authPayload, metadata.po_user, t);
-            if (poResult?.po_id) { draftedPoIds.push(poResult.po_id); draftedRfqId = metadata.rfq_id; }
+            if (poResult?.po_id) { draftedPoIds.push(poResult.po_id); draftedRfqId = metadata.rfq_id; if (poResult.created) createdPoIds.push(poResult.po_id); }
 
             await recordLifecycleEvent({
               entity_type: metadata.is_tender === 1 ? 'TENDER' : 'RFQ',
@@ -3233,7 +3236,7 @@ const NegotiationController = {
                           finalized_vendor_id: selectedQuote.vendor_id
                         }
                       }, { id: instance.initiated_by || user_id, company_id: req.user.company_id }, t);
-                      if (poResult?.po_id) { draftedPoIds.push(poResult.po_id); draftedRfqId = metadata.rfq_id; }
+                      if (poResult?.po_id) { draftedPoIds.push(poResult.po_id); draftedRfqId = metadata.rfq_id; if (poResult.created) createdPoIds.push(poResult.po_id); }
                     }
                   } catch (poError) {
                     logError(`Error creating PO for vendor ${selectedQuote.vendor_id}`, poError);
@@ -3250,6 +3253,10 @@ const NegotiationController = {
       // finished approval into an error response.
       const drafted_pos = await buildDraftedPos(req.user, draftedRfqId, draftedPoIds)
         .catch((e) => { logError('approveQuotes drafted_pos failed', e); return []; });
+
+      // Tell the people who can initiate, after commit, for newly CREATED drafts
+      // only. Fire-and-forget: notifyDraftCreated never throws.
+      for (const poId of new Set(createdPoIds)) void notifyDraftCreated(poId);
 
       return res.status(200).json({
         status: 1,

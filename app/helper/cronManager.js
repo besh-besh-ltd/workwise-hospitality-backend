@@ -19,6 +19,7 @@ import { CATEGORIES } from '../services/activity/eventRegistry.js';
 import { notifyApprovalChanged } from '../services/approvalEvents.js';
 import { runRoutingSweep } from '../services/vendorNetwork/routingSweep.js';
 import { SWEEP_CRON } from '../constants/vendorNetwork.js';
+import { remindStaleDrafts } from '../services/po/poInitiateNotifier.js';
 
 const milestoneCronRegistry = new Map();
 const generalRemindersCronRegistry = new Map();
@@ -1599,4 +1600,22 @@ export const rescheduleAllArcNegotiationRoundExpirations = async () => {
   } catch (err) {
     logError('[ARC Neg Expiry] Failed to reschedule ARC round expirations on startup', err);
   }
+};
+
+/**
+ * One reminder per draft PO that nobody has initiated for 48 hours.
+ * Schedule: daily at 10:00 AM IST. Drafts older than 14 days are skipped on
+ * purpose (see poInitiateNotifier), so deploying never emails about old drafts.
+ */
+export const startPoInitiateReminderCron = () => {
+  // 10:00 AM IST -> 4:30 AM UTC
+  cron.schedule('30 4 * * *', async () => {
+    try {
+      const { reminded } = await remindStaleDrafts(new Date());
+      logger.info(`[PO Initiate Reminder] Reminded ${reminded} draft PO(s).`);
+    } catch (error) {
+      logError('[PO Initiate Reminder] Cron job failed', error);
+    }
+  });
+  logger.info('[PO Initiate Reminder] Cron scheduled: daily at 10:00 AM IST');
 };
