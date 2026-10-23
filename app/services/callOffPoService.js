@@ -5,6 +5,7 @@ import { logArcEvent, ARC_EVENT_TYPES } from './arcEventLogService.js';
 import { dispatch as dispatchNotification } from './notificationService.js';
 import { buyerMrDetail, buyerMrList, vendorPoDetail } from './notificationLinks.js';
 import { sendMail } from '../helper/common.js';
+import { buildVendorPoReference } from '../helper/poReference.js';
 import { normalizeArcCharges } from '../models/arc_v2/arcEvaluationModel.js';
 import { effectiveSupplierExpr } from './vendorNetwork/fulfilmentSql.js';
 import { computeCallOffLine } from '../helper/arc_v2/callOffLineTax.js';
@@ -557,9 +558,20 @@ export async function notifyVendorCallOffAwaitingAcceptance({ po, mr, vendorId }
   try {
     const vendor = await db.oneOrNone(`SELECT email, name FROM tbl_users WHERE id = $1`, [vendorId]);
     if (vendor?.email) {
+      // Contract + requisition number so the vendor knows what this order is
+      // for. The MR title stays buyer-side.
+      const arcRef = po.arc_contract_id
+        ? await db.oneOrNone(
+            `SELECT a.arc_number, a.title AS arc_title
+               FROM tbl_arc_contract c JOIN tbl_arc a ON a.id = c.arc_id
+              WHERE c.id = $1`,
+            [po.arc_contract_id]
+          ).catch(() => null)
+        : null;
+      const reference = buildVendorPoReference({ ...arcRef, mr_number: mr?.mr_number, is_call_off: true });
       mail = Promise.resolve(sendMail({
         to: vendor.email,
-        subject: `New released purchase order ${po.po_number} — acceptance required`,
+        subject: `New released purchase order ${po.po_number}${reference ? ` (${reference})` : ''} — acceptance required`,
         html: `<p>Hello ${vendor.name || 'Vendor'},</p>
                <p>A new released purchase order <strong>${po.po_number}</strong> has been released against your active rate contract and is awaiting your acceptance.</p>
                <p>Please log in to your vendor portal to review and accept it.</p>`,

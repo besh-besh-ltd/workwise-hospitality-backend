@@ -3,7 +3,7 @@
 // rfq_approval/technical/commercial/purchase_order, each status ∈
 // upcoming|current|completed|skipped|expired) → the ARC-style lifecycle
 // contract the RFQ lifecycle page consumes (4 stages with state ∈
-// locked|active|complete|skipped|ended + default_stage). No DB access.
+// locked|active|open|complete|skipped|ended + default_stage). No DB access.
 
 const PHASE_TO_STAGE = {
   rfq_approval:   { key: "overview",          label: "Overview" },
@@ -11,6 +11,9 @@ const PHASE_TO_STAGE = {
   commercial:     { key: "negotiation-award", label: "Negotiation & Award" },
   purchase_order: { key: "purchase-order",    label: "Purchase Order" },
 };
+
+// A PO in one of these states holds no products (mirrors poInitiateGuide).
+const DEAD_PO_STATUSES = ["rejected", "cancelled", "rejected_by_vendor"];
 
 const PHASE_ORDER = ["rfq_approval", "technical", "commercial", "purchase_order"];
 
@@ -88,6 +91,10 @@ function redactUnreadableStages(stages, permissions) {
     }
     stage.can_read = false;
     stage.action = null;
+    // Whether a PO exists is not for this caller to learn: show the state the
+    // phase would have without the partial-award opening.
+    if (stage.reason === "partial_award") Object.assign(stage, mapState(stage.phase?.status));
+    delete stage.draft_count;
     // The summary is not safe either — it carries counts and values
     // ("2 POs · ₹4,20,000", "1 product finalized").
     stage.summary = null;
@@ -120,7 +127,22 @@ export function shapeRfqLifecycle(summary, { permissions = {} } = {}) {
   const stages = PHASE_ORDER.map((phaseKey) => {
     const meta = PHASE_TO_STAGE[phaseKey];
     const phase = byPhaseKey[phaseKey] || { status: "upcoming" };
-    const { state, reason } = mapState(phase.status);
+    let { state, reason } = mapState(phase.status);
+    // A partial award: the RFQ is still in Negotiation & Award (so the PO phase
+    // is upcoming) yet a LIVE PO already exists. Open the stage so it is
+    // reachable. A PO that was rejected or cancelled holds nothing, so an RFQ
+    // whose only POs are dead stays locked. 'open' is neither active nor locked,
+    // so it never wins default_stage (which picks the first 'active' stage).
+    // redactUnreadableStages undoes this for a caller who may not read the stage.
+    const livePoCount = Array.isArray(phase.purchase_orders)
+      ? phase.purchase_orders.filter((p) => !DEAD_PO_STATUSES.includes(p.status)).length
+      : 0;
+    let draft_count;
+    if (phaseKey === "purchase_order" && phase.status === "upcoming" && livePoCount > 0) {
+      state = "open";
+      reason = "partial_award";
+      draft_count = phase.purchase_orders.filter((p) => p.status === "draft").length;
+    }
     // Only a genuinely current phase carries the user action. An expired phase
     // used to be counted as current too, which hung the shared action object on
     // Overview and made it render "Action needed" for work owned by a later
@@ -131,6 +153,7 @@ export function shapeRfqLifecycle(summary, { permissions = {} } = {}) {
       label: meta.label,
       state,
       reason,
+      ...(draft_count !== undefined ? { draft_count } : {}),
       summary: phase.summary || null,
       phase,                                   // full per-phase payload for the stage panels
       action: isCurrent ? action : null,       // attach the user action to the current stage

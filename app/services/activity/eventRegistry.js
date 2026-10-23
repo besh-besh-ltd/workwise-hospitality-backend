@@ -67,10 +67,20 @@ const e = (def) => def;
  * that passes its validation (`rejected`, but also `pending` and `cancelled`)
  * is sent to the engine as REJECT. Anything else is refused with a 400, and a
  * refused request must not be written up as a decision either way.
+ *
+ * A rejection takes one of two routes. CANCEL ("not needed any more") cancels
+ * the PO rather than sending it back for re-award, and the trail says so. The
+ * route the server actually took (response `data.route`) wins; without one the
+ * body is read with the server's own default (NOT_REQUIRED means CANCEL).
  */
-const poDecisionVerb = (decision) => {
+const poDecisionVerb = (decision, { route, reasonCategory } = {}) => {
   if (decision === 'approved') return 'approved';
-  if (['rejected', 'pending', 'cancelled'].includes(decision)) return 'rejected';
+  if (['rejected', 'pending', 'cancelled'].includes(decision)) {
+    const taken = route
+      ? String(route).toUpperCase()
+      : String(reasonCategory || '').toUpperCase() === 'NOT_REQUIRED' ? 'CANCEL' : 'COMMERCIAL';
+    return taken === 'CANCEL' ? 'cancelled' : 'rejected';
+  }
   return 'tried to decide on';
 };
 
@@ -262,7 +272,31 @@ export const EVENTS = [
     method: 'POST', path: '/po/approve/:po_id', key: 'po_approval_decided',
     category: CATEGORIES.APPROVALS, severity: 'critical',
     entity: { type: 'PO', id: P('po_id') }, scope: SCOPE.entity('PO'),
-    summary: (c) => `${c.actor} ${poDecisionVerb(c.body?.decision)} purchase order ${c.entityLabel}`,
+    summary: (c) => `${c.actor} ${poDecisionVerb(c.body?.decision, {
+      route: c.response?.data?.route || c.body?.route,
+      reasonCategory: c.body?.reason_category,
+    })} purchase order ${c.entityLabel}`,
+  }),
+  // A PO put on hold to ask someone for information, and how the hold ends.
+  // Answer and withdraw act on a send-back id; the response carries the PO's
+  // id beside the send-back so the event files under the PO.
+  e({
+    method: 'POST', path: '/po/:po_id/send-back', key: 'po_send_back_requested',
+    category: CATEGORIES.APPROVALS, severity: 'notable',
+    entity: { type: 'PO', id: P('po_id') }, scope: SCOPE.entity('PO'),
+    summary: (c) => `${c.actor} put purchase order ${c.entityLabel} on hold to ask for information`,
+  }),
+  e({
+    method: 'POST', path: '/po/send-back/:id/respond', key: 'po_send_back_answered',
+    category: CATEGORIES.APPROVALS, severity: 'notable',
+    entity: { type: 'PO', id: R('data.po_id') }, scope: SCOPE.entity('PO'),
+    summary: (c) => `${c.actor} answered the request for information on purchase order ${c.entityLabel}`,
+  }),
+  e({
+    method: 'POST', path: '/po/send-back/:id/withdraw', key: 'po_send_back_withdrawn',
+    category: CATEGORIES.APPROVALS, severity: 'notable',
+    entity: { type: 'PO', id: R('data.po_id') }, scope: SCOPE.entity('PO'),
+    summary: (c) => `${c.actor} withdrew the request for information on purchase order ${c.entityLabel}`,
   }),
   e({
     method: 'POST', path: '/po/accept/:po_id', key: 'po_accepted',

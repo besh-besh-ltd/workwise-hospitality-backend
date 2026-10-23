@@ -48,12 +48,21 @@
 //   vendor_beta    — a different vendor
 
 import {
-  describe, it, expect, afterAll, beforeAll, beforeEach, afterEach,
+  describe, it, expect, afterAll, beforeAll, beforeEach, afterEach, jest,
 } from "@jest/globals";
-import { db, closeDb } from "../setup/db.js";
-import { IDS } from "../fixtures/ids.js";
-import { makeRFQ } from "../factories/rfq.js";
-import { httpClient } from "../helpers/http.js";
+
+// A PO rejection mails the people who can act on it. No mail leaves the machine.
+const fakeTransport = { sendMail: (opts, cb) => cb(null, { messageId: "<captured>" }) };
+jest.unstable_mockModule("nodemailer", () => {
+  const api = { createTransport: () => fakeTransport };
+  return { default: api, ...api };
+});
+
+const { db, closeDb } = await import("../setup/db.js");
+const { IDS } = await import("../fixtures/ids.js");
+const { makeRFQ } = await import("../factories/rfq.js");
+const { httpClient } = await import("../helpers/http.js");
+const { drainPoRejectedNotifications } = await import("../../app/services/po/poRejectionNotifier.js");
 
 const BUYER = IDS.users.a1_proc_buyer;
 const FOREIGN = IDS.users.companyB_admin;
@@ -565,7 +574,11 @@ describe("SECURITY: legacy PO write endpoints refuse a foreign PO", () => {
       expect(res.status).toBe(200);
       expect(await poStatus(po_id)).toBe("rejected");
     } finally {
+      // The rejection's post-commit notification must land before its rows go.
+      await drainPoRejectedNotifications();
       await db.none(`UPDATE tbl_rfq_purchase_order SET approval_instance_id = NULL WHERE id = $1`, [po_id]);
+      // A rejection records a closed send-back pointing at the instance and step.
+      await db.none(`DELETE FROM tbl_po_send_backs WHERE approval_instance_id = $1`, [instance.id]);
       await db.none(`DELETE FROM tbl_approval_actions WHERE approval_instance_id = $1`, [instance.id]);
       await db.none(`DELETE FROM tbl_approval_step_approvers WHERE approval_instance_step_id = $1`, [step.id]);
       await db.none(`DELETE FROM tbl_approval_instance_steps WHERE id = $1`, [step.id]);

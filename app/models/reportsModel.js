@@ -628,6 +628,34 @@ export async function openPoRegister(scope) {
 }
 
 /**
+ * Seconds a PO spent on hold (an information request, tbl_po_send_backs
+ * route INFO_REQUEST) inside the window [startExpr, endExpr], summed over
+ * every hold matching `matchSql`. A hold still OPEN counts up to now. Each
+ * hold is clipped to the window, so the total never exceeds it and never goes
+ * negative.
+ *
+ * While a PO is held nobody on its step can decide it, so reports 6.1 and 3.2
+ * leave this time out of an approver's (and an approval's) turnaround.
+ *
+ * Approval timestamps are naive UTC wall clock; send-backs are timestamptz,
+ * brought to the same clock with AT TIME ZONE 'UTC'. Every argument is a SQL
+ * expression written in this file, never input.
+ */
+const holdSecondsSql = (matchSql, startExpr, endExpr) => `
+  COALESCE((
+    SELECT SUM(GREATEST(0, EXTRACT(EPOCH FROM (
+             LEAST(COALESCE(sb_h.closed_at, NOW()) AT TIME ZONE 'UTC', ${endExpr})
+           - GREATEST(sb_h.created_at AT TIME ZONE 'UTC', ${startExpr})))))
+      FROM tbl_po_send_backs sb_h
+     WHERE sb_h.route = 'INFO_REQUEST' AND ${matchSql}
+  ), 0)`;
+
+/** Hours from `startExpr` to `endExpr`, less the hold time inside them. */
+const heldOutHoursSql = (matchSql, startExpr, endExpr) =>
+  `(GREATEST(0, EXTRACT(EPOCH FROM (${endExpr} - ${startExpr}))
+              - ${holdSecondsSql(matchSql, startExpr, endExpr)}) / 3600.0)`;
+
+/**
  * Report 3.2 — approvals still waiting, and who they are waiting on.
  *
  * One row per (pending approver, pending step). A step with decision rule ANY
@@ -653,7 +681,8 @@ export async function pendingPoApprovals(scope) {
             a.approver_user_id                      AS approver_id,
             au.name                                 AS approver_name,
             au.designation                          AS approver_designation,
-            (EXTRACT(EPOCH FROM ((NOW() AT TIME ZONE 'UTC') - s.created_at)) / 3600.0)::float8
+            -- Time on hold waiting for information is not the approver's.
+            ${heldOutHoursSql("sb_h.approval_instance_step_id = s.id", "s.created_at", "(NOW() AT TIME ZONE 'UTC')")}::float8
                                                     AS hours_pending
        FROM tbl_approval_instances ai
        JOIN tbl_rfq_purchase_order po
@@ -704,7 +733,8 @@ export async function poApprovalTat(scope, { from, to }) {
             ai.status                               AS status,
             ai.created_at                           AS submitted_at,
             ai.completed_at                         AS completed_at,
-            (EXTRACT(EPOCH FROM (ai.completed_at - ai.created_at)) / 3600.0)::float8 AS tat_hours
+            -- Less every hold on this approval, inside its own window.
+            ${heldOutHoursSql("sb_h.approval_instance_id = ai.id", "ai.created_at", "ai.completed_at")}::float8 AS tat_hours
        FROM tbl_approval_instances ai
        JOIN tbl_rfq_purchase_order po
               ON po.id = ai.entity_id AND ai.entity_type = 'PO'
@@ -730,24 +760,16 @@ export async function poApprovalTatByApprover(scope, { from, to }) {
   values.push(to);
   const base = poBase(scope, values, i);
 
+  // One row per decision with its hours (step opening to the decision, less
+  // the time the step was on hold), then aggregated.
   return db.any(
-    `SELECT a.approver_user_id                      AS approver_id,
+    `WITH decided AS (
+     SELECT a.approver_user_id                      AS approver_id,
             au.name                                 AS approver_name,
             au.designation                          AS approver_designation,
             s.step_order::int                       AS step_order,
-            COUNT(*)::int                           AS decisions,
-            AVG(EXTRACT(EPOCH FROM (a.acted_at - s.created_at)) / 3600.0)::float8 AS avg_hours,
-            PERCENTILE_CONT(0.5) WITHIN GROUP (
-              ORDER BY EXTRACT(EPOCH FROM (a.acted_at - s.created_at)) / 3600.0
-            )::float8                               AS median_hours,
-            PERCENTILE_CONT(0.9) WITHIN GROUP (
-              ORDER BY EXTRACT(EPOCH FROM (a.acted_at - s.created_at)) / 3600.0
-            )::float8                               AS p90_hours,
-            MAX(ps.sla_hours)::int                  AS sla_hours,
-            COUNT(*) FILTER (
-              WHERE ps.sla_hours IS NOT NULL
-                AND EXTRACT(EPOCH FROM (a.acted_at - s.created_at)) / 3600.0 > ps.sla_hours
-            )::int                                  AS breaches
+            ps.sla_hours                            AS sla_hours,
+            ${heldOutHoursSql("sb_h.approval_instance_step_id = s.id", "s.created_at", "a.acted_at")} AS hrs
        FROM tbl_approval_step_approvers a
        JOIN tbl_approval_instance_steps s ON s.id = a.approval_instance_step_id
        JOIN tbl_approval_instances ai ON ai.id = s.approval_instance_id
@@ -762,6 +784,15 @@ export async function poApprovalTatByApprover(scope, { from, to }) {
         AND a.acted_at >= (($${fromIdx}::date::timestamp AT TIME ZONE 'Asia/Kolkata') AT TIME ZONE 'UTC')
         AND a.acted_at <  (($${toIdx}::date::timestamp  AT TIME ZONE 'Asia/Kolkata') AT TIME ZONE 'UTC')
         AND ${base.where}
+     )
+     SELECT approver_id, approver_name, approver_designation, step_order,
+            COUNT(*)::int                           AS decisions,
+            AVG(hrs)::float8                        AS avg_hours,
+            PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY hrs)::float8 AS median_hours,
+            PERCENTILE_CONT(0.9) WITHIN GROUP (ORDER BY hrs)::float8 AS p90_hours,
+            MAX(sla_hours)::int                     AS sla_hours,
+            COUNT(*) FILTER (WHERE sla_hours IS NOT NULL AND hrs > sla_hours)::int AS breaches
+       FROM decided
       GROUP BY 1, 2, 3, 4
       ORDER BY decisions DESC, avg_hours DESC
       LIMIT ${REPORT_ROW_CAP}`,
@@ -779,17 +810,13 @@ export async function poApprovalTatByStage(scope, { from, to }) {
   values.push(to);
   const base = poBase(scope, values, i);
 
+  // One row per completed step with its hours (opening to completion, less
+  // the time it was on hold), then aggregated.
   return db.any(
-    `SELECT s.step_order::int                       AS step_order,
-            COUNT(*)::int                           AS approvals,
-            AVG(EXTRACT(EPOCH FROM (s.completed_at - s.created_at)) / 3600.0)::float8 AS avg_hours,
-            PERCENTILE_CONT(0.5) WITHIN GROUP (
-              ORDER BY EXTRACT(EPOCH FROM (s.completed_at - s.created_at)) / 3600.0
-            )::float8                               AS median_hours,
-            PERCENTILE_CONT(0.9) WITHIN GROUP (
-              ORDER BY EXTRACT(EPOCH FROM (s.completed_at - s.created_at)) / 3600.0
-            )::float8                               AS p90_hours,
-            MAX(ps.sla_hours)::int                  AS sla_hours
+    `WITH steps AS (
+     SELECT s.step_order::int                       AS step_order,
+            ps.sla_hours                            AS sla_hours,
+            ${heldOutHoursSql("sb_h.approval_instance_step_id = s.id", "s.created_at", "s.completed_at")} AS hrs
        FROM tbl_approval_instance_steps s
        JOIN tbl_approval_instances ai ON ai.id = s.approval_instance_id
        JOIN tbl_rfq_purchase_order po
@@ -802,6 +829,14 @@ export async function poApprovalTatByStage(scope, { from, to }) {
         AND s.completed_at >= (($${fromIdx}::date::timestamp AT TIME ZONE 'Asia/Kolkata') AT TIME ZONE 'UTC')
         AND s.completed_at <  (($${toIdx}::date::timestamp  AT TIME ZONE 'Asia/Kolkata') AT TIME ZONE 'UTC')
         AND ${base.where}
+     )
+     SELECT step_order,
+            COUNT(*)::int                           AS approvals,
+            AVG(hrs)::float8                        AS avg_hours,
+            PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY hrs)::float8 AS median_hours,
+            PERCENTILE_CONT(0.9) WITHIN GROUP (ORDER BY hrs)::float8 AS p90_hours,
+            MAX(sla_hours)::int                     AS sla_hours
+       FROM steps
       GROUP BY 1
       ORDER BY 1`,
     values
@@ -1048,7 +1083,10 @@ export const isCancellationAction = (a) =>
  *                    permanently; a reissue gets a NEW PO number, which is why
  *                    "re-raised as" can be shown at all.
  *   CANCELLED        the approval was cancelled, almost always because the RFQ
- *                    was closed. Before the platform fix these POs were left at
+ *                    was closed, or an approver rejected the PO as not needed
+ *                    (the CANCEL route: a REJECT action plus a CANCEL
+ *                    tbl_po_send_backs row; actor and reason come from that
+ *                    REJECT, exactly as for a rejection). Before the platform fix these POs were left at
  *                    'pending_approval' with nothing pending behind them, so
  *                    both that orphan shape and the fixed 'cancelled' status
  *                    are read — the report is correct before and after the
@@ -1128,8 +1166,19 @@ export async function rejectedPoLog(scope, { from, to }) {
              FROM tbl_approval_actions a
              JOIN tbl_approval_instances ai ON ai.id = a.approval_instance_id
             WHERE ai.entity_type = 'PO' AND ai.entity_id = sc.id
-              AND ai.status = 'CANCELLED'
-              AND ${isCancellationAction("a")}
+              AND (
+                (ai.status = 'CANCELLED' AND ${isCancellationAction("a")})
+                -- An approver who rejected the PO as not needed (the CANCEL
+                -- route): the PO is 'cancelled', the decision is that
+                -- approver's REJECT, identified by its CANCEL send-back. Same
+                -- actor and reason as an ordinary rejection.
+                OR (a.action = 'REJECT'
+                    AND NOT ${isCancellationAction("a")}
+                    AND EXISTS (SELECT 1 FROM tbl_po_send_backs sb
+                                 WHERE sb.purchase_order_id = sc.id
+                                   AND sb.approval_instance_id = ai.id
+                                   AND sb.route = 'CANCEL'))
+              )
             ORDER BY a.created_at DESC
             LIMIT 1
          ) c ON TRUE
@@ -1161,7 +1210,9 @@ export async function rejectedPoLog(scope, { from, to }) {
                  ELSE au.designation END        AS actor_designation,
             e.actor_id,
             rr.po_number                        AS reraised_po_number,
-            rr.status                           AS reraised_status
+            rr.status                           AS reraised_status,
+            rsb.reason_category,
+            rsb.route
        FROM events e
        LEFT JOIN tbl_hospitality_company_hotels h ON h.id = e.hotel_id
        LEFT JOIN tbl_department d ON d.id = e.department_id
@@ -1195,6 +1246,17 @@ export async function rejectedPoLog(scope, { from, to }) {
           ORDER BY p2.created_at ASC
           LIMIT 1
        ) rr ON TRUE
+       -- The rejection's reason code and route, recorded since PO rejections
+       -- carry them (a closed COMMERCIAL / CANCEL tbl_po_send_backs row).
+       -- Older rejections, RFQ closures and vendor refusals have none.
+       LEFT JOIN LATERAL (
+         SELECT sb.reason_category, sb.route
+           FROM tbl_po_send_backs sb
+          WHERE sb.purchase_order_id = e.id
+            AND sb.route IN ('COMMERCIAL', 'CANCEL')
+          ORDER BY sb.id DESC
+          LIMIT 1
+       ) rsb ON e.kind IN ('REJECTED', 'CANCELLED')
       WHERE COALESCE(e.event_at, e.updated_at) >= ($${fromIdx}::date::timestamp AT TIME ZONE 'Asia/Kolkata')
         AND COALESCE(e.event_at, e.updated_at) <  ($${toIdx}::date::timestamp  AT TIME ZONE 'Asia/Kolkata')
       ORDER BY COALESCE(e.event_at, e.updated_at) DESC

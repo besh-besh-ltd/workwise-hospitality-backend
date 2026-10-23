@@ -3,7 +3,8 @@ import { acceptPO, addSiteRepresentative, approvePO, createMilestoneController, 
 import { listPOs, dashboardKpis, awaitingPOs, poDetailFull, tracking, analytics, exportPOList, exportTracking, exportAnalytics } from "../../controllers/po/poDashboardController.js";
 import { vendorDashboard, vendorListView, vendorPoDetail, vendorPoPdf, vendorExport } from "../../controllers/po/poVendorController.js";
 import { getRejectionUndoState, withdrawRejection, getReinstate, reinstate } from "../../controllers/po/poRejectionRecoveryController.js";
-import { poUploadMiddleware } from "../../validations/paramValidation/poValidation.js";
+import { poUploadMiddleware, poSendBackUploadMiddleware } from "../../validations/paramValidation/poValidation.js";
+import { getTargets, getSendBacks, createSendBack, respondSendBack, withdrawSendBack, guardAsker, guardResponder } from "../../controllers/po/poSendBackController.js";
 import passport from '../../middleware/passport.js';
 import { acl, noAcl } from "../../helper/common.js";
 import auth from "../../middleware/auth.js";
@@ -61,6 +62,17 @@ PORoutes.get('/:po_id', auth.authUserOrGRNToken, getPODetails);
 // the PII is only ever shown to someone who could already open the PO. No
 // can() here, per the same reasoning as the initiate routes.
 PORoutes.get('/:po_id/initiators', passportSignIn, noAcl([3]), getPoInitiators);
+// Send-back (client ticket T3): an approver on the PO's current step puts it
+// on hold to ask a named person for information; that person answers, or the
+// request is withdrawn. Buyer-side only (noAcl([3]): a vendor gets 403 and
+// never sees any of it). The guard runs before the upload, so nothing is
+// stored for a request that would be refused; the person asked is resolved
+// from the PO, never read from the body. See poSendBackController.
+PORoutes.get('/:po_id/send-back/targets', passportSignIn, noAcl([3]), getTargets);
+PORoutes.get('/:po_id/send-backs', passportSignIn, noAcl([3]), getSendBacks);
+PORoutes.post('/:po_id/send-back', passportSignIn, noAcl([3]), guardAsker, poSendBackUploadMiddleware, createSendBack);
+PORoutes.post('/send-back/:id/respond', passportSignIn, noAcl([3]), guardResponder, poSendBackUploadMiddleware, respondSendBack);
+PORoutes.post('/send-back/:id/withdraw', passportSignIn, noAcl([3]), withdrawSendBack);
 // Edit PO: vendors are NEVER permitted to edit a PO. The hierarchy/creator
 // check inside handleUpdatePO is defence-in-depth; this `noAcl([3])` blocks
 // vendor user_types at the route layer.

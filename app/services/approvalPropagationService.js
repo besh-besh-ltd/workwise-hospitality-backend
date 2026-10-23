@@ -24,6 +24,7 @@ import {
 } from '../models/generalModel.js';
 import { logger } from '../util/logger.js';
 import { notifyApprovalChanged } from './approvalEvents.js';
+import { closeHoldsThatOutlivedTheirStep, lockPosOfInstances } from './po/poHold.js';
 import { logError } from '../helper/common.js';
 import {
   sendPolicyChangeNotification,
@@ -1713,6 +1714,12 @@ export async function propagatePolicyChangeToInstances({ policyId, diff, changed
     return { instancesAffected: 0, details: [], linksRestored };
   }
 
+  // PO rows first (PO id order), then the instances: the order every PO
+  // decision and hold takes, so this edit and a PO edit / approve / hold on
+  // the same PO wait for each other instead of deadlocking. Needed because a
+  // hold whose step this edit ends or reshapes is closed below.
+  await lockPosOfInstances(t, { policyId });
+
   // Lock all PENDING instances for this policy (ascending ID to prevent deadlocks).
   // Published RFQs are excluded — their approval has already served its purpose.
   logger.info(`[Propagate] Querying PENDING instances for policy ${policyId}`);
@@ -1751,6 +1758,8 @@ export async function propagatePolicyChangeToInstances({ policyId, diff, changed
   const allApproversRemoved = [];
   const allApproversKeptApproved = [];
   const autoCompletedInstanceIds = [];
+  // Instance steps whose approvers or decision rule this edit changed.
+  const reshapedStepIds = [];
 
   for (const instance of pendingInstances) {
     // Lock instance steps
@@ -1828,7 +1837,19 @@ export async function propagatePolicyChangeToInstances({ policyId, diff, changed
     if (instanceResult.autoCompleted) {
       autoCompletedInstanceIds.push(instance.id);
     }
+    reshapedStepIds.push(...instanceResult.stepsModified.map((m) => m.instance_step_id));
   }
+
+  // A PO on hold whose held step this edit removed, skipped, reshaped or moved
+  // the approval past (or whose approval it completed) has nobody left to wait
+  // for: the hold closes here, in this transaction, and the person asked is
+  // told after commit.
+  await closeHoldsThatOutlivedTheirStep(
+    t,
+    pendingInstances.filter((i) => i.entity_type === 'PO').map((i) => i.id),
+    changedBy,
+    { reshapedStepIds }
+  );
 
   // Log policy-level change
   const changeLogId = await t.one(
@@ -2309,6 +2330,9 @@ export async function revalidateApproverMembership({
 
   const affectedRows = await t.any(removeQuery, removeParams);
 
+  // PO rows before instance locks (PO id order), as every PO path does.
+  await lockPosOfInstances(t, { instanceIds: affectedRows.filter((r) => r.entity_type === 'PO').map((r) => r.instance_id) });
+
   for (const row of affectedRows) {
     // UNRESOLVABLE STEP — neither `policy_step_id` nor the ordinal found a live
     // policy step (policy deleted, or the policy now has fewer steps than the
@@ -2492,6 +2516,10 @@ export async function revalidateApproverMembership({
 
     const candidateRows = await t.any(addQuery, addParams);
 
+    // PO rows before instance locks (PO id order): an initiator auto-approved
+    // here can move a held PO past its held step.
+    await lockPosOfInstances(t, { instanceIds: candidateRows.filter((r) => r.entity_type === 'PO').map((r) => r.instance_id) });
+
     for (const row of candidateRows) {
       // Check if user is already an active approver on this step
       const existingApprover = await t.oneOrNone(
@@ -2604,6 +2632,11 @@ export async function revalidateApproverMembership({
       }
     }
   }
+
+  // A hold whose step this change retired, or moved the approval past, closes
+  // with it. A hold whose step merely lost one approver stays: the step is
+  // still current, and any approver left on it can withdraw it.
+  await closeHoldsThatOutlivedTheirStep(t, [...result.instancesAffected], changedBy);
 
   // Log instance change logs
   for (const instanceId of result.instancesAffected) {
@@ -2731,6 +2764,17 @@ export async function revalidateRolePermissionChange({
     [numericRoleId]
   );
 
+  // The PO rows of the steps about to be retired, before any instance lock
+  // (PO id order), as every PO path does. The verdict is per (role, entity
+  // type) and cached, so asking it here first costs nothing extra.
+  const retiring = [];
+  for (const row of rows) {
+    if (row.entity_type !== 'PO') continue;
+    const v = await roleStepPermissionVerdict(numericRoleId, row.entity_type, t, permCache);
+    if (!v.permitted) retiring.push(row.instance_id);
+  }
+  await lockPosOfInstances(t, { instanceIds: retiring });
+
   for (const row of rows) {
     const verdict = await roleStepPermissionVerdict(numericRoleId, row.entity_type, t, permCache);
     // The overwhelmingly common case: the role still holds read+approve for
@@ -2771,6 +2815,9 @@ export async function revalidateRolePermissionChange({
     instancesAffected.add(row.instance_id);
     if (retired.instanceCompleted) autoCompletedInstanceIds.push(row.instance_id);
   }
+
+  // A hold on a retired step, or on an approval it completed, closes with it.
+  await closeHoldsThatOutlivedTheirStep(t, [...instancesAffected], changedBy);
 
   for (const instanceId of instancesAffected) {
     await t.none(
