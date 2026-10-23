@@ -53,6 +53,14 @@ export const resetTrackedCalls = () => { calls.length = 0; };
  * and both are mocked before any controller is loaded.
  */
 export async function installPostCommitTracking() {
+  // sendMail first, so every module loaded afterwards binds to the tracked one.
+  // The real transport still runs; a suite that must not reach SMTP patches
+  // nodemailer.createTransport itself.
+  const actualCommon = await import("../../app/helper/common.js");
+  jest.unstable_mockModule("../../app/helper/common.js", () => ({
+    ...actualCommon,
+    sendMail: track("sendMail", actualCommon.sendMail),
+  }));
   const actualNotifications = await import("../../app/services/notificationService.js");
   jest.unstable_mockModule("../../app/services/notificationService.js", () => ({
     ...actualNotifications,

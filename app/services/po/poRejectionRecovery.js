@@ -222,6 +222,16 @@ async function loadCallOffContext(t, po) {
   return { links, mrId, contractId };
 }
 
+// Requisition facts the post-commit notices need for a call-off PO: who raised it
+// and what it is called. Shared by the vendor undo and the buyer send-back.
+async function loadCallOffNotice(t, po) {
+  const { mrId } = await loadCallOffContext(t, po);
+  const mr = mrId
+    ? await t.oneOrNone(`SELECT id, mr_number, raised_by FROM tbl_material_requisition WHERE id = $1`, [mrId])
+    : null;
+  return { raised_by: mr?.raised_by ?? null, mr_id: mr?.id ?? null, mr_number: mr?.mr_number ?? null };
+}
+
 async function findCallOffBlockers(t, po) {
   const { mrId, contractId } = await loadCallOffContext(t, po);
   // Summed per contract line, so two links on one line are tested together —
@@ -522,16 +532,7 @@ export async function withdrawRejectionByVendor(poId, vendorUserId) {
       txContext: t,
     });
 
-    let callOff = null;
-    if (po.is_call_off) {
-      const mrId = po.source_mr_id
-        ?? (await t.oneOrNone(`SELECT mr_id FROM tbl_arc_callof_po WHERE po_id = $1 ORDER BY id LIMIT 1`, [po.id]))?.mr_id
-        ?? null;
-      const mr = mrId
-        ? await t.oneOrNone(`SELECT id, mr_number, raised_by FROM tbl_material_requisition WHERE id = $1`, [mrId])
-        : null;
-      callOff = { raised_by: mr?.raised_by ?? null, mr_id: mr?.id ?? null, mr_number: mr?.mr_number ?? null };
-    }
+    const callOff = po.is_call_off ? await loadCallOffNotice(t, po) : null;
 
     return { po: { ...po, status: 'approved' }, callOff };
   });
@@ -659,7 +660,7 @@ export async function reinstateByBuyer(poId, user, note) {
     if (!text) {
       throw new RecoveryError(400, 'NOTE_REQUIRED', 'Add a note saying why the order is being sent back.');
     }
-    if (text.length > NOTE_MAX_LENGTH) {
+    if ([...text].length > NOTE_MAX_LENGTH) {
       throw new RecoveryError(400, 'NOTE_TOO_LONG', `Keep the note to ${NOTE_MAX_LENGTH} characters or fewer.`);
     }
 
@@ -669,6 +670,12 @@ export async function reinstateByBuyer(poId, user, note) {
     await assertCanReinstate(t, user, po);
 
     const blockers = await findRecoveryBlockers(t, po);
+    if (blockers[0] === BLOCKERS.NOT_REJECTED_BY_VENDOR) {
+      throw new RecoveryError(
+        409, BLOCKERS.NOT_REJECTED_BY_VENDOR,
+        'This order is no longer rejected by the vendor, so there is nothing to send back.'
+      );
+    }
     if (blockers.length) throw new RecoveryError(409, blockers[0]);
 
     await restoreAward(t, po, user.id);
@@ -698,14 +705,7 @@ export async function reinstateByBuyer(poId, user, note) {
       txContext: t,
     });
 
-    let callOff = null;
-    if (po.is_call_off) {
-      const { mrId } = await loadCallOffContext(t, po);
-      const mr = mrId
-        ? await t.oneOrNone(`SELECT id, mr_number, raised_by FROM tbl_material_requisition WHERE id = $1`, [mrId])
-        : null;
-      callOff = { raised_by: mr?.raised_by ?? null, mr_id: mr?.id ?? null, mr_number: mr?.mr_number ?? null };
-    }
+    const callOff = po.is_call_off ? await loadCallOffNotice(t, po) : null;
 
     const fresh = await t.one(`SELECT * FROM tbl_rfq_purchase_order WHERE id = $1`, [po.id]);
     return { po: fresh, previous, callOff, note: text };

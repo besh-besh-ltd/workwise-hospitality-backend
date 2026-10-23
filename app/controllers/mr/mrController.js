@@ -1,6 +1,6 @@
 import db from '../../config/dbConn.js';
 import mrModel from '../../models/mr/mrModel.js';
-import { releaseForMr } from '../../services/callOffPoService.js';
+import { releaseForMr, notifyVendorCallOffAwaitingAcceptance } from '../../services/callOffPoService.js';
 import { logArcEvent, ARC_EVENT_TYPES } from '../../services/arcEventLogService.js';
 import { notifyArcEvent } from '../../services/arcNotificationService.js';
 import { logger } from '../../util/logger.js';
@@ -14,8 +14,7 @@ import {
 import { dispatchPostApprovalAction } from '../../services/approvalActionService.js';
 import rbacModel from '../../models/rbacModel.js';
 import { dispatch as dispatchNotification } from '../../services/notificationService.js';
-import { buyerMrDetail, buyerMrList, buyerPoDetail, vendorPoDetail } from '../../services/notificationLinks.js';
-import { sendMail } from '../../helper/common.js';
+import { buyerMrDetail, buyerMrList, buyerPoDetail } from '../../services/notificationLinks.js';
 import { generateCallOffPoPdf } from '../../helper/arc_v2/callOffPoRenderer.js';
 
 // Notify the vendor + the MR raiser that a call-off PO was released and awaits
@@ -25,36 +24,26 @@ async function notifyCallOffReleased(mr, released) {
   for (const { po, group } of released) {
     // The vendor and the raiser act on the same PO from opposite sides of the
     // app, so they cannot share one link — the buyer PO page is not reachable
-    // by a vendor account. Two dispatches, one destination each.
-    const audiences = [
-      { userId: Number(group.vendor_id), actionUrl: vendorPoDetail(po.id) },
-      { userId: Number(mr.raised_by),    actionUrl: buyerPoDetail(po.id) },
-    ].filter((a) => a.userId && a.actionUrl);
-    for (const { userId, actionUrl } of audiences) {
+    // by a vendor account. Two dispatches, one destination each. The vendor's
+    // is shared with the buyer send-back of a rejected call-off.
+    await notifyVendorCallOffAwaitingAcceptance({ po, mr, vendorId: group.vendor_id });
+    const raiserId = Number(mr.raised_by);
+    const raiserUrl = buyerPoDetail(po.id);
+    if (raiserId && raiserUrl) {
       try {
         await dispatchNotification({
-          userIds: [userId],
+          userIds: [raiserId],
           senderUserId: mr.raised_by || null,
           category: 'mr',
           type: 'CALL_OFF_RELEASED',
           title: 'Released PO awaiting acceptance',
           body: `Released PO ${po.po_number} (₹${Number(po.total_value).toLocaleString('en-IN')}) was released from requisition ${mr.mr_number} and is awaiting vendor acceptance.`,
           data: { po_id: po.id, mr_id: mr.id, po_number: po.po_number },
-          actionUrl,
+          actionUrl: raiserUrl,
         });
       } catch (err) {
         logger.error({ err, poId: po.id }, '[mrController.notifyCallOffReleased] in-app notify failed');
       }
-    }
-    const vendorEmail = await db.oneOrNone(`SELECT email, name FROM tbl_users WHERE id = $1`, [group.vendor_id]);
-    if (vendorEmail?.email) {
-      sendMail({
-        to: vendorEmail.email,
-        subject: `New released purchase order ${po.po_number} — acceptance required`,
-        html: `<p>Hello ${vendorEmail.name || 'Vendor'},</p>
-               <p>A new released purchase order <strong>${po.po_number}</strong> has been released against your active rate contract and is awaiting your acceptance.</p>
-               <p>Please log in to your vendor portal to review and accept it.</p>`,
-      }).catch((err) => logger.error({ err, poId: po.id }, '[mrController.notifyCallOffReleased] email failed'));
     }
   }
 }

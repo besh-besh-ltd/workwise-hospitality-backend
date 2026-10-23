@@ -14,6 +14,7 @@ import {
 } from "@jest/globals";
 import { db, closeDb } from "../setup/db.js";
 import { IDS } from "../fixtures/ids.js";
+import { stampAdmin } from "../helpers/auth.js";
 import { TEST_CATEGORIES } from "../fixtures/vendors.js";
 import {
   installPostCommitTracking, drainPostCommitWork, deleteNotificationsFor, mockExpress,
@@ -175,11 +176,21 @@ describe("vendor undo — RFQ PO", () => {
 
   it("a buyer token cannot call the vendor route", async () => {
     const s = await rejectedPo();
-    const client = await httpClient(BUYER);
-    const post = await client.post(`/api/v1/po/vendor/${s.po_id}/withdraw-rejection`).send({});
-    expect(post.status).toBe(403);
-    const get = await client.get(`/api/v1/po/vendor/${s.po_id}/rejection-undo`);
-    expect(get.status).toBe(403);
+    // Fixture users carry user_type NULL, which acl() refuses by itself; stamp a
+    // real buyer (2) so the 403 can only come from the vendor-only gate.
+    const prevType = await stampAdmin(BUYER, 2);
+    try {
+      const client = await httpClient(BUYER);
+      const post = await client.post(`/api/v1/po/vendor/${s.po_id}/withdraw-rejection`).send({});
+      expect(post.status).toBe(403);
+      const get = await client.get(`/api/v1/po/vendor/${s.po_id}/rejection-undo`);
+      expect(get.status).toBe(403);
+      // The role gate's own answer, not the service's NOT_YOUR_PO, so the gate is what is tested.
+      expect(post.body.message).toBe("Insufficient permissions");
+      expect(get.body.message).toBe("Insufficient permissions");
+    } finally {
+      await db.none(`UPDATE tbl_users SET user_type = $2 WHERE id = $1`, [BUYER, prevType]);
+    }
     expect((await readPo(s.po_id)).status).toBe("rejected_by_vendor");
   });
 

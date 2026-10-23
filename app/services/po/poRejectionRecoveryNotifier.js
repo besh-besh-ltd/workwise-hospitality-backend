@@ -11,7 +11,8 @@ import { generateEmailTemplate } from '../../helper/notificationEmailLayout.js';
 import userModel from '../../models/userModel.js';
 import rbacModel from '../../models/rbacModel.js';
 import { dispatch as dispatchNotification } from '../notificationService.js';
-import { buyerPoDetail, buyerPoList, buyerMrDetail, buyerMrList, vendorPoDetail, toAbsoluteUrl } from '../notificationLinks.js';
+import { buyerPoDetail, buyerPoList, buyerMrDetail, buyerMrList, toAbsoluteUrl } from '../notificationLinks.js';
+import { notifyVendorCallOffAwaitingAcceptance } from '../callOffPoService.js';
 import { sendPONotificationToVendor, sendPOAcceptedNotificationToTeam, sendPOAcceptanceRequestToVendor } from '../../controllers/po/purchaseOrderEmails.js';
 
 const esc = (v) => String(v ?? '').replace(/[&<>"']/g, (c) => (
@@ -70,11 +71,19 @@ export async function notifyRejectionWithdrawn({ po, vendorUserId, callOff = nul
   }
 }
 
-async function notifyEvaluators({ po, vendorName }) {
+// The RFQ and the commercial evaluators (quote-compare read + create at its
+// hotel) to tell about a PO event, optionally leaving one user out (the actor).
+async function loadEvaluators(po, { excludeId = null } = {}) {
   const rfq = await db.oneOrNone(`SELECT id, rfq_no, title, hotel_id FROM tbl_rfq WHERE id = $1`, [po.rfq_id]);
-  const evaluators = await rbacModel.getUsersWithModuleActionsForHotels(
+  const found = (await rbacModel.getUsersWithModuleActionsForHotels(
     [rfq?.hotel_id], 'quote-compare', ['read', 'create'], null
-  );
+  )) || [];
+  const evaluators = excludeId == null ? found : found.filter((u) => Number(u.id) !== Number(excludeId));
+  return { rfq, evaluators };
+}
+
+async function notifyEvaluators({ po, vendorName }) {
+  const { rfq, evaluators } = await loadEvaluators(po);
   if (!evaluators || evaluators.length === 0) {
     logger.info('No commercial evaluators to notify for withdrawn PO rejection');
     return;
@@ -182,38 +191,18 @@ export async function notifyPoSentBackToVendor({ po, actor, note, callOff = null
 const sentBackBody = ({ actorName, po, vendorName, note }) =>
   `${actorName} sent PO #${po.po_number} back to ${vendorName} for acceptance: “${note}”`;
 
-// Same two notices the call-off release sends the vendor (mrController
-// notifyCallOffReleased), without the buyer-side one.
+// The call-off release's own vendor notice, shared with mrController.
 async function notifyVendorCallOff({ po, callOff }) {
-  const vendorId = Number(po.finalized_vendor_id);
-  const actionUrl = vendorPoDetail(po.id);
-  await dispatchNotification({
-    userIds: [vendorId],
-    senderUserId: callOff?.raised_by || null,
-    category: 'mr',
-    type: 'CALL_OFF_RELEASED',
-    title: 'Released PO awaiting acceptance',
-    body: `Released PO ${po.po_number} (₹${Number(po.total_value).toLocaleString('en-IN')}) was released from requisition ${callOff?.mr_number ?? ''} and is awaiting vendor acceptance.`,
-    data: { po_id: po.id, mr_id: callOff?.mr_id ?? null, po_number: po.po_number },
-    actionUrl,
+  const { mail } = await notifyVendorCallOffAwaitingAcceptance({
+    po,
+    mr: { id: callOff?.mr_id ?? null, mr_number: callOff?.mr_number ?? '', raised_by: callOff?.raised_by ?? null },
+    vendorId: po.finalized_vendor_id,
   });
-  const vendor = await db.oneOrNone(`SELECT email, name FROM tbl_users WHERE id = $1`, [vendorId]);
-  if (vendor?.email) {
-    Promise.resolve(sendMail({
-      to: vendor.email,
-      subject: `New released purchase order ${po.po_number} — acceptance required`,
-      html: `<p>Hello ${esc(vendor.name || 'Vendor')},</p>
-             <p>A released purchase order <strong>${esc(po.po_number)}</strong> against your active rate contract is awaiting your acceptance.</p>
-             <p>Please log in to your vendor portal to review and accept it.</p>`,
-    })).catch((err) => logError('call-off acceptance request email failed', err));
-  }
+  await mail;
 }
 
 async function notifyEvaluatorsSentBack({ po, actor, actorName, vendorName, note }) {
-  const rfq = await db.oneOrNone(`SELECT id, rfq_no, title, hotel_id FROM tbl_rfq WHERE id = $1`, [po.rfq_id]);
-  const evaluators = (await rbacModel.getUsersWithModuleActionsForHotels(
-    [rfq?.hotel_id], 'quote-compare', ['read', 'create'], null
-  ) || []).filter((u) => Number(u.id) !== Number(actor?.id));
+  const { rfq, evaluators } = await loadEvaluators(po, { excludeId: actor?.id });
   if (evaluators.length === 0) {
     logger.info('No other commercial evaluators to notify for a PO sent back to the vendor');
     return;
@@ -222,6 +211,7 @@ async function notifyEvaluatorsSentBack({ po, actor, actorName, vendorName, note
   const url = toAbsoluteUrl(linkPath);
   const subject = `PO #${po.po_number} sent back to ${vendorName} for acceptance`;
 
+  const mails = [];
   for (const user of evaluators) {
     if (!user.email) continue;
     const html = generateEmailTemplate(
@@ -235,8 +225,8 @@ async function notifyEvaluatorsSentBack({ po, actor, actorName, vendorName, note
          </div>
        </div>`
     );
-    Promise.resolve(sendMail({ from: config.webmasterMail, to: user.email, subject, html }))
-      .catch((err) => logError('sent-back email failed', err));
+    mails.push(Promise.resolve(sendMail({ from: config.webmasterMail, to: user.email, subject, html }))
+      .catch((err) => logError('sent-back email failed', err)));
   }
 
   await dispatchNotification({
@@ -249,6 +239,7 @@ async function notifyEvaluatorsSentBack({ po, actor, actorName, vendorName, note
     data: { po_id: po.id, rfq_id: po.rfq_id },
     actionUrl: linkPath,
   });
+  await Promise.all(mails);
 }
 
 async function notifyRaiserSentBack({ po, actor, actorName, vendorName, note, callOff }) {

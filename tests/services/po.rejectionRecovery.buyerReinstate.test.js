@@ -12,6 +12,7 @@ import {
 import nodemailer from "nodemailer";
 import { db, closeDb } from "../setup/db.js";
 import { IDS } from "../fixtures/ids.js";
+import { stampAdmin } from "../helpers/auth.js";
 import { TEST_CATEGORIES } from "../fixtures/vendors.js";
 import {
   installPostCommitTracking, drainPostCommitWork, deleteNotificationsFor, mockExpress,
@@ -65,8 +66,12 @@ const { findPosNeedingVendorReminder } = await import("../../app/helper/cronMana
 
 // Let the rejection's own post-commit mails and notices land before the case
 // starts recording, so they cannot be mistaken for the send-back's.
-const settle = async () => { await drainPostCommitWork(); await new Promise((r) => setTimeout(r, 80)); };
+// Every sender involved is tracked by the shared helper, so draining is enough.
+const settle = () => drainPostCommitWork();
 
+const approvalCounts = async () => db.one(
+  `SELECT (SELECT COUNT(*) FROM tbl_approval_instances)::int AS instances,
+          (SELECT COUNT(*) FROM tbl_approval_instance_steps)::int AS steps`);
 const readPo = (po_id) => db.one(`SELECT * FROM tbl_rfq_purchase_order WHERE id = $1`, [po_id]);
 const live = (rfq_id) => db.any(`SELECT vendor_id FROM tbl_quote_finalization WHERE rfq_id = $1`, [rfq_id]);
 const nqStatus = async (id) => (await db.one(`SELECT status FROM tbl_approval_instances WHERE id = $1`, [id])).status;
@@ -107,6 +112,7 @@ describe("buyer send-back — RFQ PO", () => {
     await db.none(`UPDATE tbl_rfq_purchase_order SET vendor_reminder_count = 2 WHERE id = $1`, [s.po_id]);
     const before = await readPo(s.po_id);
     expect(await live(s.rfq_id)).toEqual([]);
+    const approvalsBefore = await approvalCounts();
 
     const { status, body } = await reinstate(s.po_id);
     expect(status).toBe(200);
@@ -120,6 +126,8 @@ describe("buyer send-back — RFQ PO", () => {
     expect(Number(po.total_value)).toBe(Number(before.total_value));
     expect((await live(s.rfq_id)).map((r) => r.vendor_id)).toEqual([ALPHA]);
     expect(await nqStatus(s.nqIds[0])).toBe("APPROVED");
+    // No re-approval: the same instances, no new ones.
+    expect(await approvalCounts()).toEqual(approvalsBefore);
 
     const row = (await lifecycle(s.po_id)).find((r) => r.stage === "PO_SENT_BACK_TO_VENDOR");
     expect(row).toMatchObject({ action: "REINSTATE", performed_by: EVALUATOR, remarks: NOTE });
@@ -131,14 +139,21 @@ describe("buyer send-back — RFQ PO", () => {
 
   it("the reminder cron picks the reinstated PO up again from day 1", async () => {
     const s = await rejectedPo();
-    await db.none(`UPDATE tbl_rfq_purchase_order SET vendor_reminder_count = 2 WHERE id = $1`, [s.po_id]);
+    // An old rejection with reminders already spent: without the reset, the PO
+    // would be due the day-5 final reminder (or none) the moment it comes back.
+    await db.none(
+      `UPDATE tbl_rfq_purchase_order
+          SET vendor_reminder_count = 2,
+              updated_at = NOW() - INTERVAL '10 days',
+              vendor_action_at = NOW() - INTERVAL '10 days'
+        WHERE id = $1`, [s.po_id]);
     expect((await reinstate(s.po_id)).status).toBe(200);
 
     // Just sent back: nothing due yet.
-    expect((await findPosNeedingVendorReminder(new Date())).find((r) => r.id === s.po_id)).toBeUndefined();
-    // A day and a bit later it is due the gentle day-1 reminder, not the day-5 final one.
-    const updatedAt = (await readPo(s.po_id)).updated_at;
-    const due = (await findPosNeedingVendorReminder(new Date(new Date(updatedAt).getTime() + DAY + 60_000)))
+    const now = Date.now();
+    expect((await findPosNeedingVendorReminder(new Date(now))).find((r) => r.id === s.po_id)).toBeUndefined();
+    // 25 hours on it is due the gentle day-1 reminder, not the day-5 final one.
+    const due = (await findPosNeedingVendorReminder(new Date(now + 25 * 3600_000)))
       .find((r) => r.id === s.po_id);
     expect(due).toMatchObject({ reminder_to_send: 1 });
   });
@@ -150,7 +165,6 @@ describe("buyer send-back — RFQ PO", () => {
     sentMail.length = 0;
     expect((await reinstate(s.po_id)).status).toBe(200);
     await drainPostCommitWork();
-    await new Promise((r) => setTimeout(r, 50));
 
     expect(trackedCalls("sendPOAcceptanceRequestToVendor")).toHaveLength(1);
     const vendorMail = sentMail.filter((m) => String(m.to).includes("alpha@vendor.test"));
@@ -175,7 +189,6 @@ describe("buyer send-back — RFQ PO", () => {
     sentMail.length = 0;
     expect((await reinstate(s.po_id)).status).toBe(200);
     await drainPostCommitWork();
-    await new Promise((r) => setTimeout(r, 50));
 
     const rows = await db.any(
       `SELECT recipient_user_id, title, message FROM tbl_notifications
@@ -212,9 +225,22 @@ describe("buyer send-back — RFQ PO", () => {
 
   it("a vendor token cannot reach the buyer route", async () => {
     const s = await rejectedPo();
-    const client = await httpClient(ALPHA);
-    expect((await client.get(`/api/v1/po/${s.po_id}/reinstate`)).status).toBe(403);
-    expect((await client.post(`/api/v1/po/${s.po_id}/reinstate`).send({ note: NOTE })).status).toBe(403);
+    // Fixture users carry user_type NULL, which acl() refuses by itself; stamp the
+    // vendor as a real vendor (3) so the 403 can only come from the buyer-only gate.
+    const prevType = await stampAdmin(ALPHA, 3);
+    try {
+      const client = await httpClient(ALPHA);
+      // The role gate's own answer, so the service-level checks cannot satisfy this by accident.
+      for (const r of [
+        await client.get(`/api/v1/po/${s.po_id}/reinstate`),
+        await client.post(`/api/v1/po/${s.po_id}/reinstate`).send({ note: NOTE }),
+      ]) {
+        expect(r.status).toBe(403);
+        expect(r.body.message).toBe("Insufficient permissions");
+      }
+    } finally {
+      await db.none(`UPDATE tbl_users SET user_type = $2 WHERE id = $1`, [ALPHA, prevType]);
+    }
     expect((await readPo(s.po_id)).status).toBe("rejected_by_vendor");
   });
 
@@ -248,14 +274,19 @@ describe("buyer send-back — RFQ PO", () => {
         status: 0, code: "NOTE_REQUIRED", message: "Add a note saying why the order is being sent back.",
       });
     }
+    // Length counts characters, not UTF-16 units: 1000 emoji are fine, 1001 are not.
+    const emoji = await reinstate(s.po_id, "\u{1F600}".repeat(1001));
+    expect(emoji.status).toBe(400);
+    expect(emoji.body.code).toBe("NOTE_TOO_LONG");
     const long = await reinstate(s.po_id, "x".repeat(1001));
     expect(long.status).toBe(400);
     expect(long.body.code).toBe("NOTE_TOO_LONG");
     expect((await readPo(s.po_id)).status).toBe("rejected_by_vendor");
 
-    const ok = await reinstate(s.po_id, `  ${"y".repeat(1000)}  `);
+    const thousandEmoji = "\u{1F600}".repeat(1000);
+    const ok = await reinstate(s.po_id, `  ${thousandEmoji}  `);
     expect(ok.status).toBe(200);
-    expect((await lifecycle(s.po_id)).find((r) => r.stage === "PO_SENT_BACK_TO_VENDOR").remarks).toBe("y".repeat(1000));
+    expect((await lifecycle(s.po_id)).find((r) => r.stage === "PO_SENT_BACK_TO_VENDOR").remarks).toBe(thousandEmoji);
   });
 
   it("blocked when the product was re-awarded, with 409 PRODUCT_REAWARDED", async () => {
@@ -313,15 +344,22 @@ describe("buyer send-back — RFQ PO", () => {
 
     const withdraw = call(vendorUndo.withdrawRejection, s.po_id, ALPHA);
     const buyer = reinstate(s.po_id);
-    await waitForLockWaiters(2);
-    release();
-    await holder;
+    try {
+      await waitForLockWaiters(2);
+    } finally {
+      release();
+      await holder;
+    }
 
-    const [w, b] = await Promise.all([withdraw, buyer]);
+    const [wRes, bRes] = await Promise.allSettled([withdraw, buyer]);
+    expect(wRes.status).toBe("fulfilled");
+    expect(bRes.status).toBe("fulfilled");
+    const w = wRes.value; const b = bRes.value;
     const statuses = [w.status, b.status].sort();
     expect(statuses).toEqual([200, 409]);
     const loser = w.status === 409 ? w : b;
     expect(loser.body.code).toBe("NOT_REJECTED_BY_VENDOR");
+    if (loser === b) expect(loser.body.message).toMatch(/nothing to send back/);
 
     const po = await readPo(s.po_id);
     expect(po.status).toBe(w.status === 200 ? "approved" : "acceptance_pending");
@@ -468,7 +506,6 @@ describe("buyer send-back — call-off PO", () => {
     const r = await reinstate(poId, NOTE, RAISER);
     expect(r.status).toBe(200);
     await drainPostCommitWork();
-    await new Promise((res) => setTimeout(res, 50));
 
     expect(await consumed()).toBe(150);
     expect(await mrStatus(mrId)).toBe("po_released");
