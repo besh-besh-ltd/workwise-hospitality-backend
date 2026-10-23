@@ -4421,6 +4421,10 @@ export const uploadToS3 = async (filePath, s3Key) => {
 
 // ============= LIFECYCLE TRACKING =============
 
+// NOTE: tbl_lifecycle_history.remarks can hold internal buyer text (negotiation
+// creator remarks, PO send-back notes). Any vendor-facing reader must filter by
+// action, as getRfqById does with RFQ_CLOSED.
+
 /**
  * Record a lifecycle event for any entity type (RFQ, TENDER, NEGOTIATION, PO, INDENT)
  * @param {string} entity_type - Type of entity ('RFQ', 'TENDER', 'NEGOTIATION', 'PO', 'INDENT')

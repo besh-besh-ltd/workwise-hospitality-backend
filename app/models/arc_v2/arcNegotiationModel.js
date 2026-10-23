@@ -29,6 +29,7 @@ const arcNegotiationModel = {
       endDate,
       targetPrice = null,
       remarks = null,
+      creatorRemarks = null,
       createdBy,
       vendorIds = [],
       vendorApprovals = [],
@@ -39,13 +40,13 @@ const arcNegotiationModel = {
       `INSERT INTO tbl_negotiation_rounds
          (source_type, source_id, rfq_id, rfq_product_id,
           arc_item_id, products,
-          round_number, end_date, target_price, remarks,
+          round_number, end_date, target_price, remarks, creator_remarks,
           status, created_by, vendor_ids, vendor_approvals,
           created_at, updated_at)
        VALUES
          ('ARC', $1, NULL, NULL,
           $2, $3::jsonb,
-          $4, $5, $6, $7,
+          $4, $5, $6, $7, $11,
           'PENDING_APPROVAL', $8, $9::int[], $10::jsonb,
           NOW(), NOW())
        RETURNING *`,
@@ -60,6 +61,7 @@ const arcNegotiationModel = {
         createdBy,
         vendorIds,
         JSON.stringify(vendorApprovals),
+        creatorRemarks,
       ]
     );
   },

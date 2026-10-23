@@ -6,6 +6,7 @@ import {
   withIsoTimestamps,
 } from '../helper/dbTime.js';
 import { getBidEndMomentIst } from '../helper/quoteVisibility.js';
+import { stripInternalRoundFields } from '../helper/negotiation/roundRemarks.js';
 
 /**
  * A naive-IST text column -> a real ISO instant.
@@ -1080,6 +1081,7 @@ const negotiationModel = {
       status = 'DRAFT',
       created_by,
       remarks = null,
+      creator_remarks = null,
       vendor_ids = null,
       vendor_approvals = null,
       source_type,
@@ -1102,10 +1104,10 @@ const negotiationModel = {
 
     return (txContext || db).one(
       `INSERT INTO tbl_negotiation_rounds
-        (rfq_id, rfq_product_id, round_number, target_price, end_date, status, created_by, remarks, vendor_ids, vendor_approvals, source_type, source_id, products)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb, $11, $12, $13::jsonb)
+        (rfq_id, rfq_product_id, round_number, target_price, end_date, status, created_by, remarks, creator_remarks, vendor_ids, vendor_approvals, source_type, source_id, products)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb, $12, $13, $14::jsonb)
        RETURNING *`,
-      [rfq_id, rfq_product_id, round_number, target_price, end_date, status, created_by, remarks, vendor_ids, JSON.stringify(vendor_approvals || []), resolvedSourceType, resolvedSourceId, products ? JSON.stringify(products) : null]
+      [rfq_id, rfq_product_id, round_number, target_price, end_date, status, created_by, remarks, creator_remarks, vendor_ids, JSON.stringify(vendor_approvals || []), resolvedSourceType, resolvedSourceId, products ? JSON.stringify(products) : null]
     );
   },
 
@@ -2113,6 +2115,7 @@ const negotiationModel = {
         rounds_on_products: relatedRounds.length,
         target_price: num(primary.target_price),
         remarks: primary.remarks ?? null,
+        creator_remarks: primary.creator_remarks ?? null,
         end_date: isoOrNull(primary.end_date),
         time_remaining_ms: endDate ? endDate.getTime() - now : null,
         created_at: isoOrNull(primary.created_at),
@@ -2215,7 +2218,10 @@ const negotiationModel = {
     // each one an explicit offset before it leaves — see helper/dbTime.js.
     rows.forEach(r => withIsoTimestamps(r, NEGOTIATION_TIMESTAMP_KEYS));
     // Vendor reads must not leak other vendors' targets.
-    if (vendorId) rows.forEach(r => stripProductsForVendor(r, vendorId));
+    if (vendorId) {
+      rows.forEach(r => stripProductsForVendor(r, vendorId));
+      return stripInternalRoundFields(rows);
+    }
     return rows;
   },
 
@@ -3138,7 +3144,10 @@ const negotiationModel = {
     }
     // Same rule for multi-product rounds: strip products[].vendor_targets
     // down to the requesting vendor.
-    if (row && vendorId) stripProductsForVendor(row, vendorId);
+    if (row && vendorId) {
+      stripProductsForVendor(row, vendorId);
+      return stripInternalRoundFields(row);
+    }
 
     return row;
   },
@@ -3564,7 +3573,7 @@ const negotiationModel = {
       hasActiveRound: isActive,
       hasRound: true,
       round: {
-        ...latestRound,
+        ...stripInternalRoundFields(latestRound),
         negotiation_fields_for_product: negotiationFields,
         isExpired
       },
@@ -3626,7 +3635,7 @@ const negotiationModel = {
         );
       }
       return {
-        ...round,
+        ...stripInternalRoundFields(round),
         // Per-product identity for consumers that key by rfq_product_id.
         rfq_product_id: coveredProductId,
         negotiation_fields_for_product: getVendorFieldsForProduct(round, vendorId, coveredProductId),

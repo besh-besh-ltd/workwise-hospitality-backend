@@ -16,7 +16,7 @@ export const approvalStepEmailContext = (entityType, entityId, metadata) => {
   const isPo = entityType === 'PO';
   const entityIdentifier = (isPo && metadata?.po_number)
     || metadata?.rfq_number || metadata?.rfq_no || metadata?.po_number || `ID-${entityId}`;
-  const extraContext = { rfq_id: metadata?.rfq_id || entityId, rfq_title: metadata?.rfq_title || '', end_date: metadata?.end_date || null, product_name: metadata?.product_name || '', company_name: metadata?.company_name || '', hotel_name: metadata?.hotel_name || '' };
+  const extraContext = { rfq_id: metadata?.rfq_id || entityId, rfq_title: metadata?.rfq_title || '', end_date: metadata?.end_date || null, product_name: metadata?.product_name || '', company_name: metadata?.company_name || '', hotel_name: metadata?.hotel_name || '', creator_remarks: metadata?.creator_remarks || null };
   if (isPo) extraContext.po_id = metadata?.po_id || entityId;
   return { entityIdentifier, extraContext };
 };

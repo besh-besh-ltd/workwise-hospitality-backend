@@ -1,6 +1,7 @@
 import config from "../../config/app.config.js";
 import { sendMail, logError } from "../common.js";
 import { generateEmailTemplate, emailButton } from "../notificationEmailLayout.js";
+import { creatorRemarksRowHtml } from "../negotiation/roundRemarks.js";
 import { logger } from '../../util/logger.js';
 import { dispatch as dispatchNotification, resolveRecipientUserIds } from "../../services/notificationService.js";
 import { buyerQuoteComparison, buyerRfqList, toAbsoluteUrl, vendorRfqDetail, vendorRfqList } from "../../services/notificationLinks.js";
@@ -643,6 +644,7 @@ export const sendNegotiationRoundCreatedNotification = async ({
           <li style="padding:4px 0;"><strong>Company:</strong> ${companyName || '—'}</li>
           <li style="padding:4px 0;"><strong>Business Unit:</strong> ${businessUnitName || '—'}</li>
           <li style="padding:4px 0;"><strong>Negotiation End Date:</strong> ${formatDateIST(round.end_date)} <span style="color:#64748B;">(Vendor to submit the revised quote before the mentioned date/time)</span></li>
+          ${creatorRemarksRowHtml(round.creator_remarks)}
         </ul>
 
 
@@ -858,6 +860,7 @@ export const sendNegotiationRoundApprovedNotification = async ({
           <li style="padding:4px 0;"><strong>Company:</strong> ${companyName || '—'}</li>
           <li style="padding:4px 0;"><strong>Business Unit:</strong> ${businessUnitName || '—'}</li>
           <li style="padding:4px 0;"><strong>Negotiation End Date:</strong> ${formatDateIST(round.end_date)}</li>
+          ${creatorRemarksRowHtml(round.creator_remarks)}
         </ul>
 
 

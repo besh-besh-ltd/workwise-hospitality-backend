@@ -18,6 +18,7 @@ import {
 import { deferBad, isDeferred, sendDeferred } from '../../helper/deferredResponse.js';
 import { parseAsUTC } from '../../helper/dbTime.js';
 import { resolveArcPolicyFor, noArcPolicyError } from '../../helper/arc_v2/arcPolicy.js';
+import { normalizeCreatorRemarks, stripInternalRoundFields } from '../../helper/negotiation/roundRemarks.js';
 
 /**
  * ARC Negotiation Controller
@@ -84,6 +85,11 @@ export async function createRound(req, res) {
     const endDate     = body.end_date;
     const targetPrice = body.target_price || null;
     const remarks     = body.remarks     || null;
+
+    // Internal note for approvers; validated before any DB work.
+    const creatorRemarksCheck = normalizeCreatorRemarks(body.creator_remarks);
+    if (!creatorRemarksCheck.ok) return bad(res, 400, creatorRemarksCheck.message);
+    const creatorRemarks = creatorRemarksCheck.value;
 
     if (!endDate || new Date(endDate) <= new Date()) {
       return bad(res, 400, 'end_date must be a future date');
@@ -259,6 +265,7 @@ export async function createRound(req, res) {
         endDate,
         targetPrice,
         remarks,
+        creatorRemarks,
         createdBy:   userId,
         vendorIds:   vendorIdsArr,
         vendorApprovals,
@@ -280,6 +287,7 @@ export async function createRound(req, res) {
           arc_id:       arcId,
           round_number: roundNumber,
           end_date:     endDate,
+          creator_remarks: creatorRemarks,
         },
         txContext: t,
       });
@@ -530,7 +538,8 @@ export async function listVendorRounds(req, res) {
     const arc = await arcModel.getById(arcId);
     if (!arc) return bad(res, 404, 'ARC not found', 2);
 
-    const allRounds = await arcNegotiationModel.getRoundsForArc(arcId);
+    // Vendors never see the creator's internal remarks.
+    const allRounds = stripInternalRoundFields(await arcNegotiationModel.getRoundsForArc(arcId));
     // Filter to rounds where this vendor is in vendor_ids
     const myRounds = allRounds.filter(
       (r) => Array.isArray(r.vendor_ids) && r.vendor_ids.map(Number).includes(Number(vendorId))

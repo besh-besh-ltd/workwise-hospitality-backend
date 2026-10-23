@@ -44,6 +44,7 @@
     "migrations/20261019100000_client_role_terminology.sql",
     "migrations/20261019100100_retire_proxy_approver.sql",
     "migrations/20261019100200_arc_commercial_evaluator_round_approval.sql",
-    "migrations/20261022100000_po_send_backs.sql"
+    "migrations/20261022100000_po_send_backs.sql",
+    "migrations/20261023100000_negotiation_round_creator_remarks.sql"
   ]
 }
