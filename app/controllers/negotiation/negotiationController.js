@@ -16,6 +16,7 @@ import {
   findBestMatchingPolicy
 } from '../../models/generalModel.js';
 import db, { pgp } from '../../config/dbConn.js';
+import { normalizeCreatorRemarks, stripInternalRoundFields } from '../../helper/negotiation/roundRemarks.js';
 import { assertCanReadParentRfq, assertUserHasScope, isAuthorizationError, sendScopeError } from '../../services/authorizationService.js';
 import { executeApprovalAction } from '../../services/approvalActionService.js';
 import { resolveHospitalityCompanyId, resolveHospitalityCompanyScope } from '../../helper/arc_v2/resolveHospitalityCompany.js';
@@ -666,7 +667,7 @@ const handleNegotiationRejection = async (approval_instance_id, approver_user_id
  * Creates an approval instance for a negotiation round using the centralized approval engine.
  * Uses entity_type: 'NEGOTIATION' and entity_id: roundId (the negotiation round's own ID).
  */
-const startApprovalForNegotiation = async (scope, roundId, roundNumber, rfqId, rfqData, userId, txContext, endDate = null) => {
+const startApprovalForNegotiation = async (scope, roundId, roundNumber, rfqId, rfqData, userId, txContext, endDate = null, creatorRemarks = null) => {
   try {
     // `scope` is either a legacy single product id (number) or
     // { coveredProductIds: [], hasRfqLevel, isMultiProduct } for multi rounds.
@@ -716,6 +717,7 @@ const startApprovalForNegotiation = async (scope, roundId, roundNumber, rfqId, r
         is_multi_product: isMultiProduct,
         has_rfq_level: hasRfqLevel,
         end_date: endDate || null,
+        creator_remarks: creatorRemarks || null,
         company_name: names?.company_name || '',
         hotel_name: names?.hotel_name || ''
       },
@@ -903,6 +905,13 @@ const NegotiationController = {
       if (isMalformedRfqId(rawRfqId, rfq_id)) {
         return res.status(400).json({ status: 2, message: RFQ_ID_INVALID_MESSAGE });
       }
+      // Validate the creator's note before any DB work. Optional, trimmed,
+      // max 1000 chars; empty becomes NULL. Internal only, never sent to vendors.
+      const remarksCheck = normalizeCreatorRemarks(req.body.creator_remarks);
+      if (!remarksCheck.ok) {
+        return res.status(400).json({ status: 2, message: remarksCheck.message });
+      }
+      const creatorRemarks = remarksCheck.value;
       const user_id = req.user.id;
 
       // ── Normalize the request into a products[] array ──────────────────
@@ -1223,6 +1232,7 @@ const NegotiationController = {
           end_date: endDateUtc,
           status: 'PENDING_APPROVAL',
           created_by: user_id,
+          creator_remarks: creatorRemarks,
           vendor_ids: parsedVendorIds,
           vendor_approvals,
           products: roundProducts
@@ -1263,7 +1273,8 @@ const NegotiationController = {
           rfqData,
           user_id,
           t,
-          round.end_date
+          round.end_date,
+          creatorRemarks
         );
 
         // If auto-approved (initiator is the only approver), activate immediately
@@ -1302,6 +1313,7 @@ const NegotiationController = {
             status: (updatedRound || round).status,
             vendor_ids: parsedVendorIds
           },
+          remarks: creatorRemarks,
           txContext: t
         });
 
@@ -1505,9 +1517,11 @@ const NegotiationController = {
         vendorsByProduct[pid] = vendorsByProductId.get(Number(pid)) || [];
       }
 
+      // Vendors never see the creator's internal note (the model also strips
+      // it; this keeps the guarantee local to the response).
       return res.status(200).json({
         status: 1,
-        data: enrichedRounds,
+        data: vendorId ? stripInternalRoundFields(enrichedRounds) : enrichedRounds,
         vendors: vendorsByProduct
       });
     } catch (error) {
@@ -1556,7 +1570,7 @@ const NegotiationController = {
 
       return res.status(200).json({
         status: 1,
-        data: round
+        data: req.user.user_type == 3 ? stripInternalRoundFields(round) : round
       });
     } catch (error) {
       logError(error);
@@ -1611,7 +1625,7 @@ const NegotiationController = {
             r.status === 'ACTIVE' && parseAsUTC(r.end_date) > new Date() && Array.isArray(r.vendor_ids) && r.vendor_ids.includes(vendorId)
           )
           .map(({ vendor_ids, ...r }) => ({
-            ...r,
+            ...stripInternalRoundFields(r),
             vendor_approvals: (r.vendor_approvals || []).filter(va => va.vendor_id === vendorId),
             // Multi rounds: never leak other vendors' targets in products[].
             products: Array.isArray(r.products)
