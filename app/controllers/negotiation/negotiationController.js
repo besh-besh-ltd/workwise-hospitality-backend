@@ -16,6 +16,7 @@ import {
   findBestMatchingPolicy
 } from '../../models/generalModel.js';
 import db, { pgp } from '../../config/dbConn.js';
+import { assertCanReadParentRfq, assertUserHasScope, isAuthorizationError, sendScopeError } from '../../services/authorizationService.js';
 import { executeApprovalAction } from '../../services/approvalActionService.js';
 import { resolveHospitalityCompanyId, resolveHospitalityCompanyScope } from '../../helper/arc_v2/resolveHospitalityCompany.js';
 
@@ -63,6 +64,50 @@ import {
 // as "no matrix filter".
 const readScopeUserId = (req) =>
   Number(req.user?.user_type) === 8 ? null : (req.user?.id ?? null);
+
+// rfq_id arrives in request bodies; it must be a plain positive integer before
+// it is used anywhere. Returns the number, or null for anything else.
+const parseRfqId = (value) => {
+  if (typeof value === 'number') {
+    return Number.isSafeInteger(value) && value > 0 ? value : null;
+  }
+  if (typeof value === 'string' && /^[1-9]\d{0,15}$/.test(value.trim())) {
+    const n = Number(value.trim());
+    return Number.isSafeInteger(n) ? n : null;
+  }
+  return null;
+};
+
+// True when the caller supplied an rfq_id but it is not a positive integer.
+// A missing rfq_id keeps each handler's existing "required" message.
+const isMalformedRfqId = (raw, parsed) =>
+  parsed === null && raw !== undefined && raw !== null && raw !== '';
+
+// Scope check against the RFQ row the handler already loaded. Buyers reach
+// negotiation through RFQ read access; negotiator roles carry the negotiation
+// permission but not rfq.read. Either one, within the RFQ's own tenant, hotel,
+// department and process, is enough; if neither holds, the read error is
+// returned.
+const assertRfqActionScope = async (userId, permission, rfqRow) => {
+  try {
+    await assertCanReadParentRfq(userId, rfqRow.id, db, { rfqRow });
+  } catch (readErr) {
+    if (!isAuthorizationError(readErr)) throw readErr;
+    try {
+      await assertUserHasScope(userId, permission, {
+        hospitality_company_id: rfqRow.hospitality_company_id,
+        hotel_id: rfqRow.hotel_id,
+        department_id: rfqRow.department_id,
+        process_id: rfqRow.process_id
+      });
+    } catch (permErr) {
+      if (!isAuthorizationError(permErr)) throw permErr;
+      throw readErr;
+    }
+  }
+};
+
+const RFQ_ID_INVALID_MESSAGE = 'rfq_id must be a positive integer';
 
 const formatErrorResponse = (res, error) => {
   const statusCode = error.statusCode || 400;
@@ -853,7 +898,11 @@ const NegotiationController = {
    */
   createRound: async (req, res) => {
     try {
-      const { rfq_id, rfq_product_id, target_price, end_date, vendor_targets } = req.body;
+      const { rfq_id: rawRfqId, rfq_product_id, target_price, end_date, vendor_targets } = req.body;
+      const rfq_id = parseRfqId(rawRfqId);
+      if (isMalformedRfqId(rawRfqId, rfq_id)) {
+        return res.status(400).json({ status: 2, message: RFQ_ID_INVALID_MESSAGE });
+      }
       const user_id = req.user.id;
 
       // ── Normalize the request into a products[] array ──────────────────
@@ -947,7 +996,7 @@ const NegotiationController = {
       const endDateUtc = endDate.format('YYYY-MM-DD HH:mm:ss');
 
       // Check if RFQ exists and get hospitality context
-      const rfq = await rfqModel.checkIfExists('tbl_rfq', `id = ${rfq_id}`);
+      const rfq = await rfqModel.checkIfExists('tbl_rfq', { where: 'id = $1', values: [rfq_id] });
       if (!rfq || rfq.length === 0) {
         return res.status(404).json({
           status: 2,
@@ -961,6 +1010,16 @@ const NegotiationController = {
           status: 2,
           message: 'Negotiation rounds are only available for hospitality RFQs/Tenders'
         });
+      }
+
+      // The caller must hold negotiation.create on this RFQ's tenant/hotel/
+      // department/process. (rfq.read is not enough, and negotiator roles do
+      // not carry it.)
+      try {
+        await assertRfqActionScope(user_id, 'negotiation.create', rfqData);
+      } catch (err) {
+        if (isAuthorizationError(err)) return sendScopeError(res, err);
+        throw err;
       }
 
       const quoteVisibility = buildQuoteVisibilityMeta(rfqData);
@@ -1900,7 +1959,7 @@ const NegotiationController = {
       removeNegotiationRoundExpiration(round_id);
 
       // Record lifecycle event for round rejection
-      const rfq = await rfqModel.checkIfExists('tbl_rfq', `id = ${round.rfq_id}`);
+      const rfq = await rfqModel.checkIfExists('tbl_rfq', { where: 'id = $1', values: [round.rfq_id] });
       const rfqData = rfq?.[0];
       if (rfqData) {
         await recordLifecycleEvent({
@@ -2037,7 +2096,7 @@ const NegotiationController = {
       // The round is terminal now; its scheduled closer has nothing to do.
       removeNegotiationRoundExpiration(round_id);
 
-      const rfq = await rfqModel.checkIfExists('tbl_rfq', `id = ${round.rfq_id}`);
+      const rfq = await rfqModel.checkIfExists('tbl_rfq', { where: 'id = $1', values: [round.rfq_id] });
       const rfqData = rfq?.[0];
       if (rfqData) {
         await recordLifecycleEvent({
@@ -2278,7 +2337,7 @@ const NegotiationController = {
       removeNegotiationRoundExpiration(round_id);
 
       // Record lifecycle event
-      const rfq = await rfqModel.checkIfExists('tbl_rfq', `id = ${round.rfq_id}`);
+      const rfq = await rfqModel.checkIfExists('tbl_rfq', { where: 'id = $1', values: [round.rfq_id] });
       const rfqData = rfq[0];
       await recordLifecycleEvent({
         entity_type: rfqData.is_tender === 1 ? 'TENDER' : 'RFQ',
@@ -2546,7 +2605,11 @@ const NegotiationController = {
    */
   submitQuotesForApproval: async (req, res) => {
     try {
-      const { rfq_id, rfq_product_id, quote_ids, quote_source, remarks } = req.body;
+      const { rfq_id: rawRfqId, rfq_product_id, quote_ids, quote_source, remarks } = req.body;
+      const rfq_id = parseRfqId(rawRfqId);
+      if (isMalformedRfqId(rawRfqId, rfq_id)) {
+        return res.status(400).json({ status: 2, message: RFQ_ID_INVALID_MESSAGE });
+      }
       const user_id = req.user.id;
       const isRegularQuotes = quote_source === 'regular';
 
@@ -2559,7 +2622,7 @@ const NegotiationController = {
       }
 
       // 2. Validate RFQ exists and is hospitality
-      const rfq = await rfqModel.checkIfExists('tbl_rfq', `id = ${rfq_id}`);
+      const rfq = await rfqModel.checkIfExists('tbl_rfq', { where: 'id = $1', values: [rfq_id] });
       if (!rfq || rfq.length === 0) {
         return res.status(404).json({
           status: 2,
@@ -2573,6 +2636,13 @@ const NegotiationController = {
           status: 2,
           message: 'Quote approval is only available for hospitality RFQs/Tenders'
         });
+      }
+
+      try {
+        await assertRfqActionScope(user_id, 'quote-compare.create', rfqData);
+      } catch (err) {
+        if (isAuthorizationError(err)) return sendScopeError(res, err);
+        throw err;
       }
 
       // 3. Validate product belongs to RFQ using model
@@ -3024,7 +3094,7 @@ const NegotiationController = {
             });
           });
         } else if (metadata.rfq_id && metadata.selected_quotes?.length > 0) {
-          const rfq = await rfqModel.checkIfExists('tbl_rfq', `id = ${metadata.rfq_id}`);
+          const rfq = await rfqModel.checkIfExists('tbl_rfq', { where: 'id = $1', values: [metadata.rfq_id] });
           const rfqData = rfq[0];
 
           // Check if this is a hospitality tender (requires ARC)

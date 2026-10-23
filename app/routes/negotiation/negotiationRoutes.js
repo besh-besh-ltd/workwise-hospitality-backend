@@ -41,7 +41,7 @@ NegotiationRoutes.post(
 NegotiationRoutes.post(
   '/rounds',
   passportSignIn,
-  acl([2, 8, 3]), // Procurement and Top Management and Vendor (same as RFQ routes)
+  acl([2, 8]), // Procurement and Top Management only; vendors never create rounds
   // can('negotiation.create'), // Uncomment after running migration: add_negotiation_permissions.sql
   hospitalityMiddleware.requireHospitality,
   negotiationController.createRound
