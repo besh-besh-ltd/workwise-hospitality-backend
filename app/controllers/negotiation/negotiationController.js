@@ -1556,6 +1556,23 @@ const NegotiationController = {
 
       // Vendors (user_type 3) see only rounds they are selected for
       const vendorId = req.user.user_type == 3 ? (req.user.vendor_id || req.user.id) : null;
+
+      // SECURITY (IDOR): buyers had no tenant check here, unlike the sibling
+      // getRounds / getActiveRounds. Same gate, same refusal. The vendor path
+      // is unchanged (narrowed to its own rounds by vendorId).
+      if (!vendorId) {
+        const allowed = await negotiationModel.userCanReadRfqNegotiation(
+          readScopeUserId(req),
+          rfq_id
+        );
+        if (!allowed) {
+          return res.status(403).json({
+            status: 0,
+            message: 'You do not have access to this RFQ'
+          });
+        }
+      }
+
       const round = await negotiationModel.getActiveRound(rfq_id, rfq_product_id, true, vendorId);
 
       // Vendors (user_type 3) should only see fully approved (ACTIVE) rounds with end_date not yet passed
