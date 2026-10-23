@@ -62,9 +62,15 @@ const postActionRegistry = {
     APPROVED: () => import('../controllers/rfq/rfqController.js').then(m => m.handleTechnicalPostApproval),
     REJECTED: () => import('../controllers/rfq/rfqController.js').then(m => m.handleTechnicalRejection),
   },
+  // PO decisions never reach the post-commit dispatcher from
+  // executeApprovalAction: both run inside poApprovalService's transaction.
+  // APPROVED stays registered for executePoApproval's in-transaction lookup.
+  // REJECTED is deliberately absent — a PO rejection is decision, status,
+  // de-finalization, reason and lifecycle in ONE transaction
+  // (poApprovalService.rejectPurchaseOrder), and running half of it after
+  // somebody else's commit is exactly the split it exists to prevent.
   PO: {
     APPROVED: () => import('../controllers/po/purchaseOrderController.js').then(m => m.handlePOPostApproval),
-    REJECTED: () => import('../controllers/po/purchaseOrderController.js').then(m => m.handlePORejectionByInstance),
   },
   // ARC v2 — separate entity types per plan §5.5. The legacy single 'ARC'
   // entity type is intentionally NOT registered here; any leftover v1 ARC
@@ -122,29 +128,27 @@ const postActionRegistry = {
  * @param {number} args.approver_user_id
  * @param {'APPROVE'|'REJECT'} args.action
  * @param {string} [args.comment]
+ * @param {string} [args.reason_category] - PO REJECT only; see poApprovalService.resolveRejectionRoute
+ * @param {string} [args.route] - PO REJECT only: COMMERCIAL or CANCEL
  * @returns {Promise<Object>} Result from submitApprovalAction (instance_status, step_status, etc.)
+ * @throws PoDecisionError for a refused PO rejection (carries httpStatus + code)
  */
 export async function executeApprovalAction(args) {
   const instance = await getApprovalInstanceById(args.approval_instance_id);
 
-  // PO approvals are all-or-nothing: the decision and the PO document commit
-  // together, or neither does. They take their own path because that guarantee
-  // needs one transaction spanning both, which the generic sequence below
-  // cannot provide — see poApprovalService.js.
+  // PO decisions take their own path, both of them, and both lock the PO row
+  // before the approval instance (poApprovalService's lock order):
   //
-  // APPROVE only. A rejection produces no document, so it has nothing to be
-  // atomic with, and its handler is actively hostile to being run inside an
-  // open transaction: handlePORejectionByInstance opens its own `db.tx` and
-  // re-reads the instance to confirm it is REJECTED. On a separate connection
-  // that read still sees PENDING, so it would return early and the vendor
-  // de-finalization would silently never happen. Rejections stay on the
-  // post-commit path below, where they have always worked.
-  if (
-    instance?.entity_type === 'PO' &&
-    instance.entity_id &&
-    String(args.action || '').toUpperCase() === 'APPROVE'
-  ) {
-    return executePoApproval(args, instance);
+  //   APPROVE — the decision and the PO document commit together, or neither
+  //             does (executePoApprovalAtomically).
+  //   REJECT  — decision, status, vendor de-finalization, the reason and the
+  //             lifecycle row commit together, then the people who can act are
+  //             told (rejectPurchaseOrder). Same function as POST
+  //             /po/approve/:po_id, so the two surfaces end in the same state.
+  if (instance?.entity_type === 'PO' && instance.entity_id) {
+    const action = String(args.action || '').toUpperCase();
+    if (action === 'APPROVE') return executePoApproval(args, instance);
+    if (action === 'REJECT') return executePoRejection(args, instance);
   }
 
   // 1. Run the underlying transactional model action (status updates only).
@@ -163,6 +167,30 @@ export async function executeApprovalAction(args) {
   }
 
   return result;
+}
+
+/**
+ * A PO rejection from the generic approval card. The optional `reason_category`
+ * and `route` are the PO page's, with the same defaults (OTHER, COMMERCIAL).
+ * Returns the engine's result shape plus the route and reason taken.
+ */
+async function executePoRejection(args, instance) {
+  const { rejectPurchaseOrder } = await import('./poApprovalService.js');
+  const out = await rejectPurchaseOrder({
+    poId: Number(instance.entity_id),
+    approvalInstanceId: args.approval_instance_id,
+    approvalInstanceStepId: args.approval_instance_step_id || null,
+    user: { id: args.approver_user_id },
+    comment: args.comment || '',
+    reason_category: args.reason_category,
+    route: args.route,
+  });
+  return {
+    ...out.result,
+    route: out.route,
+    reason_category: out.reasonCategory,
+    send_back_id: out.sendBackId,
+  };
 }
 
 /**
@@ -199,7 +227,7 @@ async function executePoApproval(args, instance) {
       writeDocument: writePoDocument,
 
       // Inside the transaction: the PO status transition and its lifecycle row.
-      // Only APPROVED reaches here — rejections never take this path.
+      // Only APPROVE decisions take this path (rejections: executePoRejection).
       postAction: async (tx, result) => {
         if (result.instance_status !== 'APPROVED') return;
         const handler = await postActionRegistry.PO.APPROVED();
@@ -215,7 +243,7 @@ async function executePoApproval(args, instance) {
       // After the commit: everything that leaves the building.
       afterCommit: async (result) => {
         await notifyNextApprovalStep(args.approval_instance_id, result);
-        if (result.instance_status === 'APPROVED' || result.instance_status === 'REJECTED') {
+        if (result.instance_status === 'APPROVED') {
           await notifyApprovalOutcome(args.approval_instance_id, args.approver_user_id, {
             status: result.instance_status,
             comment: args.comment,

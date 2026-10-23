@@ -4,6 +4,7 @@ import { APPROVAL_DECISIONS, PO_STATUSES, RFQ_STATUSES } from '../util/constants
 import { sendApprovalStepNotification } from '../helper/sendEmailFunctions/approvalEmails.js';
 import { approvalStepEmailContext } from '../helper/approvalEmailContext.js';
 import { approvalActionUrl, entityLabel, stageLabel, buyerHome } from '../services/notificationLinks.js';
+import { assertPoNotOnHold, instanceNotHeldSql, closeOpenHoldTx, assertProductNotOnHeldPo } from '../services/po/poHold.js';
 
 // ── Unit vs Group ARC awareness for notification copy ────────────────────────
 // Instances keep the unit entity types (ARC_TECH, ...); a Group ARC is only
@@ -3696,6 +3697,14 @@ export async function submitApprovalAction({
       };
     }
 
+    // 1a. A PO on hold (an OPEN tbl_po_send_backs row) is frozen at its step:
+    // no approver on it may approve or reject until the person asked answers
+    // or the request is withdrawn. poApprovalService checks this under the PO
+    // lock before it gets here; this is the backstop for any other caller.
+    if (instance.entity_type === 'PO') {
+      await assertPoNotOnHold(t, instance.entity_id);
+    }
+
     // 1b. A publish approval stops being decidable once the RFQ has published.
     // Publication does not wait for the approval — when the publish date
     // arrives the RFQ goes out and the instance is simply left PENDING. From
@@ -3824,7 +3833,12 @@ export async function submitApprovalAction({
         await recordLifecycleEvent({
           entity_type: instance.entity_type,
           entity_id: instance.entity_id,
-          stage: 'APPROVED', // Stage before rejection
+          // Was 'APPROVED' ("stage before rejection"), which read as an
+          // approval to anyone scanning the history. Nothing reads this
+          // label back: tbl_lifecycle_history.stage consumers are the
+          // activity backfill (copies it into metadata, verb from `action`)
+          // and the RFQ close-comment lookup (filters on action).
+          stage: 'REJECTED',
           action: 'REJECT',
           performed_by: approver_user_id,
           metadata: {
@@ -3904,6 +3918,16 @@ export async function submitApprovalAction({
         message: `Step ${currentStep.step_order} approved. Moving to step ${nextStep.step_order}.`
       };
     } else {
+      // The last approval of an award re-drafts the product's PO, cancelling
+      // any pending one that carries it. Refused while that PO is on hold
+      // (409 PO_ON_HOLD), before anything is approved, so the award is never
+      // left approved with no PO drafted. A plain read: locking the PO here
+      // would take PO after award instance, the reverse of re-finalize; the
+      // draft re-checks under the PO lock (draftPurchaseOrder).
+      if (instance.entity_type === 'NEGOTIATION_QUOTE') {
+        await assertProductNotOnHeldPo(t, { rfqProductId: instance.entity_id });
+      }
+
       // This was the last step - approve the entire instance
       await t.none(`
         UPDATE tbl_approval_instances
@@ -4017,6 +4041,16 @@ export async function cancelApprovalInstance(instance_id, cancelled_by, reason =
   // site that notified was closeRFQ — the ARC publish-withdrawal, the generic
   // cancel endpoint and the four sendback cascades all went silent.
   const outcome = await db.tx(async t => {
+    // A PO's approval: lock the PO row before the instance, the order every
+    // PO decision and hold uses, so a hold cannot open or close under us.
+    const peek = await t.oneOrNone(
+      `SELECT entity_type, entity_id FROM tbl_approval_instances WHERE id = $1`,
+      [instance_id]
+    );
+    if (peek?.entity_type === 'PO') {
+      await t.oneOrNone(`SELECT id FROM tbl_rfq_purchase_order WHERE id = $1 FOR UPDATE`, [peek.entity_id]);
+    }
+
     const instance = await t.oneOrNone(`
       SELECT * FROM tbl_approval_instances
       WHERE id = $1
@@ -4055,6 +4089,17 @@ export async function cancelApprovalInstance(instance_id, cancelled_by, reason =
       (approval_instance_id, approver_user_id, action, comment)
       VALUES ($1, $2, 'CANCELLED', $3)
     `, [instance_id, cancelled_by, reason ? `[CANCELLED] ${reason}` : '[CANCELLED]']);
+
+    // A hold on this PO's approval ends with it (the PO row is locked above).
+    if (instance.entity_type === 'PO' && peek?.entity_type === 'PO') {
+      await closeOpenHoldTx(t, {
+        poId: Number(instance.entity_id),
+        status: 'SUPERSEDED',
+        resolution: 'PO_SUPERSEDED',
+        actorId: cancelled_by,
+        note: 'the approval was cancelled',
+      });
+    }
 
     // Collected inside the transaction, notified after it commits.
     const pendingApprovers = await t.any(`
@@ -4168,6 +4213,8 @@ export async function getPendingApprovalsForUser(user_id, { hospitality_company_
     LEFT JOIN tbl_hospitality_company_hotels hh ON i.hotel_id = hh.id
     LEFT JOIN tbl_users initiator ON i.initiated_by = initiator.id
     WHERE ${conditions.join(' AND ')}
+      -- A PO on hold waits on the person asked, not on its approvers.
+      AND ${instanceNotHeldSql('i')}
       -- A publish approval on an already-published RFQ is not actionable: the
       -- RFQ went out without it and submitApprovalAction now refuses the
       -- decision. getPendingApprovalCounts has excluded these for a while, but
@@ -4211,6 +4258,7 @@ export async function getRfqIdsWithPendingApprovals(user_id, entityTypes, rfqIds
       AND i.entity_type IN ($2:csv)
       AND i.metadata->>'rfq_id' IS NOT NULL
       AND (i.metadata->>'rfq_id')::INTEGER IN ($3:csv)
+      AND ${instanceNotHeldSql('i')}
   `, [user_id, entityTypes, intRfqIds]);
 
   return rows.map(r => parseInt(r.rfq_id));
@@ -4246,6 +4294,8 @@ export async function getPendingApprovalCountsByEntityType(user_id, { hospitalit
     JOIN tbl_approval_instance_steps s ON s.approval_instance_id = i.id
     JOIN tbl_approval_step_approvers sa ON sa.approval_instance_step_id = s.id
     WHERE ${conditions.join(' AND ')}
+      -- A PO on hold waits on the person asked, not on its approvers.
+      AND ${instanceNotHeldSql('i')}
       AND NOT (
         i.entity_type IN ('RFQ', 'TENDER')
         AND EXISTS (

@@ -475,7 +475,7 @@ describe("POST /po/vendor/export", () => {
 
     const ws = (await loadWorkbook(res.body)).getWorksheet("My orders");
     expect(headers(ws)).toEqual([
-      "PO #", "Status", "Order type", "Buyer", "Hotel", "Value (₹)", "Created (IST)",
+      "PO #", "Status", "Order type", "RFQ / Contract", "Buyer", "Hotel", "Value (₹)", "Created (IST)",
     ]);
     const text = sheetText(ws);
     expect(text).toContain(alphaPo.po_number);

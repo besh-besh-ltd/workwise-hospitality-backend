@@ -409,9 +409,12 @@ RfqRoutes.post(
   rfqController.sendSelectiveReminder
 );
 
+// Buyer-only, and the controller scope-checks the RFQ (404 when out of scope).
+// It returned any vendor's raw draft POs to any signed-in caller before.
 RfqRoutes.get(
   '/get-existing-po',
   passportSignIn,
+  acl([2, 8]),
   rfqController.getExistingPO
 );
 

@@ -118,6 +118,9 @@ async function makePoAwaitingApproval() {
 afterEach(async () => {
   const del = (sql, ids) => (ids.length ? db.none(sql, [ids]) : null);
   await del(`DELETE FROM tbl_activity_events WHERE entity_type = 'PO' AND entity_id = ANY($1)`, inserted.poIds);
+  // A rejection records its reason as a closed send-back on the PO.
+  await del(`DELETE FROM tbl_po_send_backs WHERE purchase_order_id = ANY($1)`, inserted.poIds);
+  await del(`DELETE FROM tbl_lifecycle_history WHERE entity_type = 'PO' AND entity_id = ANY($1)`, inserted.poIds);
   await del(`DELETE FROM tbl_purchase_order_product WHERE id = ANY($1)`, inserted.poProductIds);
   await del(`DELETE FROM tbl_rfq_purchase_order WHERE id = ANY($1)`, inserted.poIds);
   await del(`DELETE FROM tbl_approval_actions WHERE approval_instance_id = ANY($1)`, inserted.instIds);
@@ -174,6 +177,20 @@ describe("activity trail — PO approval decisions", () => {
     const def = EVENTS.find((d) => d.method === "POST" && d.path === "/po/approve/:po_id");
     const ctx = { actor: "Vishal Kamat", entityLabel: "138721", body: { decision: "approved" } };
     expect(def.summary(ctx)).toBe("Vishal Kamat approved purchase order 138721");
+  });
+
+  it("says 'cancelled' when the rejection cancels the PO as not needed", () => {
+    // A NOT_REQUIRED rejection takes the CANCEL route: the PO is cancelled, not
+    // sent back for re-award. The route the server took (response) wins; the
+    // body's NOT_REQUIRED implies it when there is no response route.
+    const def = EVENTS.find((d) => d.method === "POST" && d.path === "/po/approve/:po_id");
+    const base = { actor: "Vishal Kamat", entityLabel: "138721" };
+    expect(def.summary({ ...base, body: { decision: "rejected", reason_category: "NOT_REQUIRED" } }))
+      .toBe("Vishal Kamat cancelled purchase order 138721");
+    expect(def.summary({ ...base, body: { decision: "rejected" }, response: { data: { route: "CANCEL" } } }))
+      .toBe("Vishal Kamat cancelled purchase order 138721");
+    expect(def.summary({ ...base, body: { decision: "rejected", reason_category: "RENEGOTIATE" }, response: { data: { route: "COMMERCIAL" } } }))
+      .toBe("Vishal Kamat rejected purchase order 138721");
   });
 
   it("does not claim a decision the request never carried", () => {

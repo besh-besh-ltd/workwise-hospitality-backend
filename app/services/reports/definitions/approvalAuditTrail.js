@@ -40,7 +40,16 @@ const ACTION_LABELS = {
   STEP_REMOVED: "Step removed",
   STEP_ADDED: "Step added",
   MEMBERSHIP_REVALIDATION: "Membership revalidated",
+  SEND_BACK: "Asked for information",
+  SEND_BACK_ANSWERED: "Information provided",
+  SEND_BACK_WITHDRAWN: "Request withdrawn",
 };
+
+// A PO on hold for information: the question, its answer and its withdrawal.
+// They are logged with the decisions but are not decisions, and the answer
+// usually comes from someone who is not an approver at all, so their timing
+// is never an after-hours finding.
+const NOT_A_DECISION = new Set(["SEND_BACK", "SEND_BACK_ANSWERED", "SEND_BACK_WITHDRAWN"]);
 
 const LOG_COLUMNS = [
   { header: "Event ID", key: "event_id", width: 11, align: "right", type: "int" },
@@ -92,7 +101,7 @@ export default {
 
     const rows = raw.map((e) => {
       const hour = Number(e.ist_hour);
-      const afterHours = hour < WORK_START_HOUR || hour >= WORK_END_HOUR;
+      const afterHours = !NOT_A_DECISION.has(e.action) && (hour < WORK_START_HOUR || hour >= WORK_END_HOUR);
       return {
         event_id: Number(e.event_id),
         occurred_at: istDate(e.occurred_at),

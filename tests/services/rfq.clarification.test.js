@@ -156,6 +156,34 @@ describe("raiseClarification", () => {
     expect(msg.message).toBe("What size?");
   });
 
+  it("tells the RFQ creator what was asked, quoting the subject with one full stop", async () => {
+    const told = {};
+    for (const subject of ["Is GST included?", "Spec query"]) {
+      const rfq_id = await makePublishedRfqInClarificationWindow();
+      const { req, res, calls } = mockExpress({
+        user: { id: IDS.users.vendor_alpha, user_type: 3, company_id: IDS.companies.vendorAlpha },
+        body: { rfq_id, subject, question: "Details inside" },
+      });
+      await rfqController.raiseClarification(req, res);
+      expect(calls.status).toBe(200);
+      const rows = await db.any(
+        `SELECT recipient_user_id, message FROM tbl_notifications
+          WHERE type = 'clarification_raised' AND (additional_data->>'rfq_id')::int = $1`,
+        [rfq_id]
+      );
+      await db.none(
+        `DELETE FROM tbl_notifications WHERE type = 'clarification_raised' AND (additional_data->>'rfq_id')::int = $1`,
+        [rfq_id]
+      );
+      expect(rows.map((r) => r.recipient_user_id)).toEqual([IDS.users.a1_proc_buyer]);
+      told[subject] = rows[0].message;
+    }
+    // A question keeps its own question mark, alone ...
+    expect(told["Is GST included?"]).toMatch(/ asked: "Is GST included\?" Quoting is paused for all vendors until you close it\.$/);
+    // ... and a subject with no closing punctuation gets the sentence's full stop.
+    expect(told["Spec query"]).toMatch(/ asked: "Spec query"\. Quoting is paused for all vendors until you close it\.$/);
+  });
+
   it("rejects raise BEFORE the publish date when the RFQ is not yet published", async () => {
     // RFQ has tender_publish_date in the future and is_published=0 (status 4).
     const futurePublish = new Date(Date.now() + 1 * 86400_000).toISOString().replace("T", " ").slice(0, 19);

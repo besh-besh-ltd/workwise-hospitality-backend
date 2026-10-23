@@ -180,6 +180,30 @@ export async function assertUserHasScope(userId, requiredPermission, scope, dbCo
 }
 
 /**
+ * Boolean, single-statement form of "assertUserHasScope for ANY of these
+ * permissions": true when the user's grant on at least one of `permissions`
+ * covers `scope`. Same WHERE body (scopeMatchWhere), the permissions travel as
+ * the array the inverse already uses. Never throws on a missing user or
+ * company; those are simply "no grant".
+ */
+export async function userHasAnyScope(userId, permissions, scope, dbContext = db) {
+  const perms = (Array.isArray(permissions) ? permissions : [permissions])
+    .filter((p) => typeof p === 'string' && p.includes('.'));
+  if (!userId || !scope?.hospitality_company_id || !perms.length) return false;
+  const row = await dbContext.oneOrNone(
+    `
+    SELECT 1
+    ${SCOPE_MATCH_FROM}
+    WHERE urs.user_id = $1
+      AND ${scopeMatchWhere(2)}
+    LIMIT 1
+    `,
+    [userId, ...scopeMatchParams(scope, perms)]
+  );
+  return !!row;
+}
+
+/**
  * THE INVERSE of assertUserHasScope: every user whose grant on ANY of
  * `permissions` covers `scope`. Same predicate, same NULL/wildcard semantics —
  * scopeMatchWhere() is shared verbatim, so a user appears here if and only if
@@ -196,7 +220,7 @@ export async function assertUserHasScope(userId, requiredPermission, scope, dbCo
  * @param {string[]} permissions - e.g. ['awarding.create', 'awarding.update']
  * @param {Object} scope - same shape as assertUserHasScope's
  * @param {Object} [dbContext]
- * @returns {Promise<Array<{user_id:number, role_id:number, role_title:string}>>}
+ * @returns {Promise<Array<{user_id:number, role_id:number, role_title:string, scope_breadth:number}>>}
  */
 export async function listUsersWithAnyScope(permissions, scope, dbContext = db) {
   const perms = (Array.isArray(permissions) ? permissions : [permissions])
@@ -212,7 +236,13 @@ export async function listUsersWithAnyScope(permissions, scope, dbContext = db) 
     SELECT DISTINCT ON (urs.user_id)
            urs.user_id,
            urs.role_id,
-           rl.title AS role_title
+           rl.title AS role_title,
+           -- Narrowest qualifying grant per user (a window, so it is computed
+           -- over ALL the user's matching rows before DISTINCT ON keeps one):
+           -- 0 = department-scoped, 1 = hotel-scoped, 2 = company-wide.
+           MIN(CASE WHEN urs.department_id IS NOT NULL THEN 0
+                    WHEN urs.hotel_id IS NOT NULL THEN 1
+                    ELSE 2 END) OVER (PARTITION BY urs.user_id)::int AS scope_breadth
     ${SCOPE_MATCH_FROM}
     JOIN tbl_roles rl ON rl.id = urs.role_id
     WHERE ${scopeMatchWhere(1)}
