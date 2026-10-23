@@ -8774,6 +8774,15 @@ const rfqController = {
         const lifecycleMap = await rfqModel.computeLifecycleStages([parseInt(rfqData.id)]);
         rfqData.lifecycle_stage = lifecycleMap[parseInt(rfqData.id)] || null;
 
+        // PO_REJECTED is internal: an approver turned a PO down. For a vendor
+        // or token user the RFQ is back in commercial evaluation, which is
+        // what is true for them; who evaluates is not theirs to read.
+        if (rfqData.lifecycle_stage === 'PO_REJECTED' && isVendorOrTokenViewer(req.user)) {
+          rfqData.lifecycle_stage = 'COMMERCIAL_EVALUATION';
+          rfqData.action_holders = null;
+          return;
+        }
+
         // Enrich with action holders (who can act at current lifecycle stage)
         if (rfqData.lifecycle_stage) {
           try {
@@ -8812,7 +8821,8 @@ const rfqController = {
       // RFQ. Used by Quote Compare to surface why the vendor was de-finalized.
       // - rejection_type='vendor':   PO row status='rejected_by_vendor'.
       //   Reason from po.vendor_rejection_reason; rejected_by = the vendor.
-      // - rejection_type='approver': PO row status='rejected'. Reason and
+      // - rejection_type='approver': PO row status='rejected', or 'cancelled'
+      //   by an approver as not needed (route 'CANCEL'). Reason and
       //   rejecter pulled from the matching tbl_approval_actions REJECT row,
       //   joined via the PO's approval_instance_id.
       // Shared with the RFQ listing card (rfqModel.getLivePoRejectionsForRfqs)
@@ -9453,6 +9463,8 @@ const rfqController = {
           po_number: r.po_number,
           rejection_type: r.rejection_type,
           reason_category: r.reason_category ?? null,
+          // 'CANCEL': cancelled as not needed, nothing to re-award.
+          route: r.route ?? null,
           rejected_by_name: r.rejected_by_name,
           rejected_at: r.rejected_at,
           rejection_reason: r.rejection_reason,

@@ -1682,7 +1682,8 @@ export function effectiveApproverStatus(rowStatus, stepStatus, rule) {
 // their designation and department, when each acted, why one was removed, and
 // above all the free-text comment each approver wrote to the next — is none of
 // their business. The vendor still gets the trail's shape (level, status, when)
-// so "where is my PO" keeps working; they simply do not get the people.
+// so "where is my PO" keeps working; they simply do not get the people. A
+// rejected or cancelled level loses its actor and the approver's comment too.
 //
 // This mirrors the `comparison` gate in getPODetailFull, which suppresses
 // competitors' quote amounts on the same path for the same reason.
@@ -1890,6 +1891,11 @@ async function buildAuditTrail(po, docRows = [], { isVendorView = false } = {}) 
           null;
         policy = reason; // surface the rejection reason as the node's sub-note
       }
+      // A vendor reads their own rejected or cancelled PO here: the approver's
+      // comment and who turned it down are the buyer's. The node keeps its
+      // level, status and date.
+      const ended = nodeStatus === "rejected" || nodeStatus === "cancelled";
+      const hideDecision = isVendorView && ended;
 
       // ---- the full per-level roster (additive; everything above is unchanged)
       // Ordered acted-first (by acted_at asc), then still-live PENDING rows in
@@ -1965,10 +1971,10 @@ async function buildAuditTrail(po, docRows = [], { isVendorView = false } = {}) 
         step: ++stepCounter,
         status: nodeStatus,
         title: `L${st.step_order} approval`,
-        by,
+        by: hideDecision ? null : by,
         when: iso(st.completed_at),
-        policy,
-        reason,
+        policy: hideDecision ? null : policy,
+        reason: hideDecision ? null : reason,
         level: st.step_order,
         decision_rule: st.decision_rule || "ANY",
         // Redacted wholesale on the vendor path — see the note on this

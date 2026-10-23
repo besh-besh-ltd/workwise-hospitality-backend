@@ -36,7 +36,7 @@ afterAll(async () => {
 });
 
 describe("rejecting a PO as not needed", () => {
-  it("NOT_REQUIRED cancels the PO, archives finalization, raises no re-award chip and tells the RFQ creator", async () => {
+  it("NOT_REQUIRED cancels the PO, archives finalization, marks it cancelled (no re-award) and tells the RFQ creator", async () => {
     const a = await world.pendingPo();
     sentMails.length = 0;
 
@@ -68,17 +68,22 @@ describe("rejecting a PO as not needed", () => {
         WHERE entity_type = 'PO' AND entity_id = $1 AND (action = 'REJECT' OR stage ~ 'REJECT|CANCEL')`, [a.poId]);
     expect(lifecycle).toEqual([{ stage: "REJECTED", action: "REJECT" }]);
 
-    // No re-award chip: not on the RFQ detail, not on the list card, and the
-    // lifecycle does not call it a rejection waiting for re-award.
+    // No re-award: the RFQ detail and the list card explain the unawarded
+    // product as cancelled (route CANCEL, which the page reads as "not needed
+    // any more", with no negotiation offered), and the lifecycle does not call
+    // it a rejection waiting for re-award.
+    const cancelled = expect.objectContaining({
+      po_id: a.poId, rejection_type: "approver", route: "CANCEL", reason_category: "NOT_REQUIRED",
+    });
     const creator = await world.client(W.CREATOR);
     const detail = await creator.get(`/api/v1/rfq/getRfqById/${a.rfq.id}`);
     expect(detail.status).toBe(200);
-    expect(detail.body.data.vendor_rejections).toEqual([]);
+    expect(detail.body.data.vendor_rejections).toEqual([cancelled]);
     const list = await creator.post("/api/v1/rfq/list-view").send({ page: 1, limit: 100 });
     expect(list.status).toBe(200);
     const row = list.body.data.rows.find((r) => Number(r.id) === Number(a.rfq.id));
     expect(row).toBeDefined();
-    expect(row.po_rejection).toBeNull();
+    expect(row.po_rejection).toEqual(cancelled);
     expect(row.lifecycle_stage).not.toBe("PO_REJECTED");
 
     // The RFQ creator is told, with a link to the RFQ, to close it.

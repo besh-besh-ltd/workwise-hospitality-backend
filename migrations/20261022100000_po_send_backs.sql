@@ -44,7 +44,7 @@ CREATE TABLE IF NOT EXISTS public.tbl_po_send_backs (
   response_text   TEXT,
   responded_by    INT REFERENCES public.tbl_users(id),
   responded_at    TIMESTAMPTZ,
-  resolution      VARCHAR(30),  -- RESUMED | PO_AMENDED_RESTARTED | REJECTED_AFTER | RFQ_CLOSED | PO_SUPERSEDED
+  resolution      VARCHAR(30),  -- RESUMED (answered) | REJECTED | CANCELLED (a rejection's row) | PO_AMENDED_RESTARTED | RFQ_CLOSED | PO_SUPERSEDED; NULL while OPEN and when WITHDRAWN
   reminded_at     TIMESTAMPTZ,
   created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
   closed_at       TIMESTAMPTZ,
@@ -57,6 +57,9 @@ CREATE INDEX IF NOT EXISTS ix_po_send_back_target_open
   ON public.tbl_po_send_backs (target_user_id) WHERE status = 'OPEN';
 CREATE INDEX IF NOT EXISTS ix_po_send_back_rfq
   ON public.tbl_po_send_backs (rfq_id);
+-- Every send-back of a PO (the thread, the rejection's reason): the partial
+-- unique index above covers OPEN rows only.
+CREATE INDEX IF NOT EXISTS ix_po_send_back_po ON public.tbl_po_send_backs (purchase_order_id);
 -- Holds per approval instance: the propagation sweep and the report hold-time
 -- joins look them up by instance.
 CREATE INDEX IF NOT EXISTS ix_po_send_back_instance ON public.tbl_po_send_backs (approval_instance_id);

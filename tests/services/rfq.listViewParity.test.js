@@ -114,14 +114,15 @@ function record(body) {
 // Fields the live list view has gained since the oracle was frozen. The oracle
 // is never edited, so they are compared by their own suites and removed from a
 // COPY of the live payload here; everything else must still match exactly.
-//   po_rejection.po_id, po_rejection.reason_category — client ticket T3
-//   (rfq.lifecycle.poRejected.test.js)
+//   po_rejection.po_id, po_rejection.reason_category, po_rejection.route —
+//   client ticket T3 (rfq.lifecycle.poRejected.test.js)
 function withoutPostFreezeFields(payload) {
   const copy = JSON.parse(JSON.stringify(payload));
   for (const r of copy?.data?.rows || []) {
     if (r.po_rejection) {
       delete r.po_rejection.po_id;
       delete r.po_rejection.reason_category;
+      delete r.po_rejection.route;
     }
   }
   return copy;

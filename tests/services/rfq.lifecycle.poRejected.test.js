@@ -112,12 +112,104 @@ describe("RFQ lifecycle — PO rejected by approver", () => {
     expect((await listRow(staged.rfq.id)).po_rejection).toBeNull();
   });
 
-  it("does not call a cancelled PO a rejection waiting for re-award", async () => {
+  it("does not call a cancelled PO a rejection waiting for re-award, but says why it was cancelled", async () => {
     const a = await world.pendingPo();
     expect((await world.rejectOnPoPage(a.poId, { remarks: "not needed", reason_category: "NOT_REQUIRED" })).status).toBe(200);
+    const poNumber = (await db.one(`SELECT po_number FROM tbl_rfq_purchase_order WHERE id = $1`, [a.poId])).po_number;
     // Not waiting for a re-award: the RFQ is back in commercial evaluation.
     expect((await lifecycle(a.rfq.id)).stage).toBe("COMMERCIAL_EVALUATION");
+    // The product shows as unawarded, so the reason travels with it: an
+    // approver said it is not needed (route CANCEL), not "re-award it".
+    const cancelled = expect.objectContaining({
+      po_id: a.poId, po_number: poNumber, rejection_type: "approver", route: "CANCEL",
+      reason_category: "NOT_REQUIRED", rejection_reason: "not needed",
+    });
+    expect(await detailRejections(a.rfq.id)).toEqual([cancelled]);
+    const row = await listRow(a.rfq.id);
+    expect(row.lifecycle_stage).toBe("COMMERCIAL_EVALUATION");
+    expect(row.po_rejection).toEqual(cancelled);
+
+    // The vendor reads none of it.
+    const vendor = await (await world.client(W.VENDOR_A)).get(`/api/v1/rfq/getRfqById/${a.rfq.id}`);
+    expect(vendor.status).toBe(200);
+    expect(vendor.body.data.vendor_rejections).toEqual([]);
+    const seen = JSON.stringify(vendor.body);
+    expect(seen).not.toContain("not needed");
+    expect(seen).not.toContain("NOT_REQUIRED");
+    expect(seen).not.toContain('"route"');
+  });
+
+  it("says nothing about a PO cancelled any other way", async () => {
+    const a = await world.pendingPo();
+    // Cancelled by a path that records no CANCEL decision: a draft replaced
+    // by a re-award, a merge source, a PO whose RFQ was closed. Written
+    // directly, as closing the RFQ leaves a held PO: cancelled, its hold
+    // CLOSED (RFQ_CLOSED). The award is archived as well, so the product is
+    // unawarded and nothing but the route can keep this PO off the list.
+    await db.none(`UPDATE tbl_rfq_purchase_order SET status = 'cancelled' WHERE id = $1`, [a.poId]);
+    await db.none(
+      `INSERT INTO tbl_po_send_backs
+         (purchase_order_id, rfq_id, approval_instance_id, approval_instance_step_id, step_order, route,
+          reason_category, comment, requested_by, target_role, target_user_id, status, resolution, closed_at)
+       VALUES ($1, $2, $3, $4, 1, 'INFO_REQUEST', 'INFO_MISSING', 'which floor?', $5, 'RFQ_CREATOR', $6,
+               'CLOSED', 'RFQ_CLOSED', NOW())`,
+      [a.poId, a.rfq.id, a.instanceId, await world.currentStepId(a.instanceId), W.PO_APPROVER, W.CREATOR]
+    );
+    await db.none(`DELETE FROM tbl_quote_finalization WHERE rfq_id = $1`, [a.rfq.id]);
+
     expect(await detailRejections(a.rfq.id)).toEqual([]);
+    expect((await listRow(a.rfq.id)).po_rejection).toBeNull();
+  });
+
+  it("I2: in PO_REJECTED the commercial evaluators hold the re-award, not the PO initiators", async () => {
+    const a = await world.pendingPo();
+    expect((await world.rejectOnPoPage(a.poId, { remarks: "too slow", reason_category: "RENEGOTIATE" })).status).toBe(200);
+    expect((await lifecycle(a.rfq.id)).stage).toBe("PO_REJECTED");
+
+    // COMM_EVAL holds quote-compare read+create (a commercial evaluator).
+    // PO_APPROVER holds awarding read+create and no quote-compare: a PO
+    // initiator only, with nothing to do until the product is awarded again.
+    const expectEvaluators = (holders) => {
+      expect(holders).toMatchObject({ type: "permission", kind: "evaluation", label: "Commercial Evaluators" });
+      const ids = holders.users.map((u) => Number(u.id));
+      expect(ids).toContain(W.COMM_EVAL);
+      expect(ids).not.toContain(W.PO_APPROVER);
+    };
+    const detail = await (await world.client(W.CREATOR)).get(`/api/v1/rfq/getRfqById/${a.rfq.id}`);
+    expect(detail.status).toBe(200);
+    expect(detail.body.data.lifecycle_stage).toBe("PO_REJECTED");
+    expectEvaluators(detail.body.data.action_holders);
+    const row = await listRow(a.rfq.id);
+    expect(row.lifecycle_stage).toBe("PO_REJECTED");
+    expectEvaluators(row.action_holders);
+
+    // Quote Comparison, where the re-award is done (the evaluator holds
+    // quote-compare.read, not rfq.read): its banner tells the evaluator the
+    // next step is theirs, and does not name the PO-initiator-only user.
+    const qc = await (await world.client(W.COMM_EVAL)).get(`/api/v1/rfq/quote-comparison-view/${a.rfq.id}`);
+    expect(qc.status).toBe(200);
+    const banner = qc.body.stage_actors;
+    expect(banner.role_label).toBe("Commercial Evaluators");
+    expect(banner.actors).toEqual(expect.arrayContaining([expect.objectContaining({ user_id: W.COMM_EVAL, is_me: true })]));
+    expect(banner.actors.map((u) => u.user_id)).not.toContain(W.PO_APPROVER);
+  });
+
+  it("M3: a vendor never sees the internal PO_REJECTED stage", async () => {
+    const staged = await world.stageRfq({ products: 1, vendors: [W.VENDOR_A, W.VENDOR_B] });
+    const poA = (await world.award(staged, staged.products[0], [W.VENDOR_A])).pos[0].id;
+    await world.initiate(poA);
+    expect((await world.rejectOnPoPage(poA, { remarks: "x", reason_category: "RENEGOTIATE" })).status).toBe(200);
+    expect((await lifecycle(staged.rfq.id)).stage).toBe("PO_REJECTED");
+
+    // For the vendors it is back in evaluation, which is true for them; who
+    // evaluates is not theirs to read.
+    for (const vendorId of [W.VENDOR_A, W.VENDOR_B]) {
+      const res = await (await world.client(vendorId)).get(`/api/v1/rfq/getRfqById/${staged.rfq.id}`);
+      expect(res.status).toBe(200);
+      expect(res.body.data.lifecycle_stage).toBe("COMMERCIAL_EVALUATION");
+      expect(res.body.data.action_holders ?? null).toBeNull();
+      expect(JSON.stringify(res.body)).not.toContain("PO_REJECTED");
+    }
   });
 
   it("orders the CASE: pending sibling, then vendor rejection, then approver rejection", async () => {

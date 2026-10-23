@@ -1027,6 +1027,8 @@ export const draftPurchaseOrder = async (rfq_id, project_id, quote_item_id, tota
  *     visibility gate keeps it hidden until approval anyway, but a stale URL
  *     would still surface in some places — null is the safe state)
  *   - rfq_product_id / quote_id / quantity rebuilt from the new line set
+ *   - send-back history (tbl_po_send_backs) moves to the kept PO; it keeps its
+ *     replaces_po_id, else takes a source's
  */
 export const mergeDraftPOs = async ({ keep_po_id, po_ids, user, txContext = null } = {}) => {
   const executor = async (t) => {
@@ -1049,7 +1051,7 @@ export const mergeDraftPOs = async ({ keep_po_id, po_ids, user, txContext = null
     // concurrent initiate/approve/edit on any of these drafts can't race
     // past us mid-merge.
     const rows = await t.any(
-      `SELECT id, status, finalized_vendor_id, rfq_id, company_id
+      `SELECT id, status, finalized_vendor_id, rfq_id, company_id, replaces_po_id
          FROM tbl_rfq_purchase_order
         WHERE id = ANY($1::int[])
         FOR UPDATE`,
@@ -1083,6 +1085,33 @@ export const mergeDraftPOs = async ({ keep_po_id, po_ids, user, txContext = null
     if (user && user.company_id && Number(user.company_id) !== Number(keepRow.company_id)) {
       throw new Error('You do not have access to these purchase orders');
     }
+
+    // Send-back history (holds and rejections, and their files by FK) is the
+    // order's record: it moves to the kept PO. Its FK has no ON DELETE, so a
+    // source draft carrying any (a held PO returned to draft by an edit) made
+    // the delete below fail. A draft has no OPEN hold: the hold closes with the
+    // approval that returned it to draft. Guarded anyway, since the kept PO
+    // may hold at most one.
+    const openHold = await t.oneOrNone(
+      `SELECT purchase_order_id FROM tbl_po_send_backs
+        WHERE purchase_order_id = ANY($1::int[]) AND status = 'OPEN'
+        LIMIT 1`,
+      [allIds]
+    );
+    if (openHold) {
+      throw new Error(`PO ${openHold.purchase_order_id} is on hold for information; it cannot be merged`);
+    }
+    await t.none(
+      `UPDATE tbl_po_send_backs
+          SET purchase_order_id = $1
+        WHERE purchase_order_id = ANY($2::int[])`,
+      [keepIdNum, sourceIds]
+    );
+    // The re-award trace: the kept PO keeps its own, else takes a source's
+    // (lowest id first). Read from the rows locked above, before the delete.
+    const inheritedReplacesPoId = keepRow.replaces_po_id ?? (rows
+      .filter((r) => r.id !== keepIdNum && r.replaces_po_id != null)
+      .sort((a, b) => a.id - b.id)[0]?.replaces_po_id ?? null);
 
     // Re-parent ALL child rows from source POs to the kept PO. Order doesn't
     // matter since they're sibling tables, but we keep it deterministic for
@@ -1191,6 +1220,7 @@ export const mergeDraftPOs = async ({ keep_po_id, po_ids, user, txContext = null
               rfq_product_id = $2::int[],
               quote_id       = $3::int[],
               quantity       = $4,
+              replaces_po_id = $6::int,
               po_pdf_url     = NULL,
               updated_at     = NOW()
         WHERE id = $5`,
@@ -1200,6 +1230,7 @@ export const mergeDraftPOs = async ({ keep_po_id, po_ids, user, txContext = null
         linesAgg?.quotes || [],
         Number(linesAgg?.qty) || 0,
         keepIdNum,
+        inheritedReplacesPoId,
       ]
     );
 

@@ -5005,6 +5005,13 @@ LIMIT 2;
    *   po.vendor_rejection_reason, rejected_by = the vendor.
    * - rejection_type 'approver': PO status 'rejected'; reason and rejecter from
    *   the REJECT row in tbl_approval_actions, via the PO's approval_instance_id.
+   *   Also a PO an approver cancelled as not needed (status 'cancelled' with a
+   *   closed CANCEL send-back): it de-finalizes the product just the same, and
+   *   without it an evaluator could re-award what an approver said is not
+   *   needed. No other cancelled PO (a replaced draft, a merge source, an RFQ
+   *   closed) is a decision, so none is listed.
+   * - route: 'COMMERCIAL' | 'CANCEL' for an approver's decision (NULL for one
+   *   recorded before reasons existed), NULL for a vendor's.
    *
    * A rejection de-finalizes the product, and that is what sends the RFQ back
    * to commercial evaluation. Once the product is awarded again the rejection
@@ -5041,6 +5048,10 @@ LIMIT 2;
           ELSE sb.reason_category
         END AS reason_category,
         CASE
+          WHEN po.status = 'rejected_by_vendor' THEN NULL
+          ELSE sb.route
+        END AS route,
+        CASE
           WHEN po.status = 'rejected_by_vendor' THEN po.vendor_rejection_reason
           ELSE aa.comment
         END AS rejection_reason,
@@ -5070,7 +5081,7 @@ LIMIT 2;
       ) aa ON TRUE
       LEFT JOIN tbl_users au ON au.id = aa.approver_user_id
       LEFT JOIN LATERAL (
-        SELECT s.reason_category
+        SELECT s.reason_category, s.route
         FROM tbl_po_send_backs s
         WHERE s.purchase_order_id = po.id
           AND s.status = 'CLOSED'
@@ -5079,7 +5090,8 @@ LIMIT 2;
         LIMIT 1
       ) sb ON TRUE
       WHERE po.rfq_id = ANY($1::int[])
-        AND po.status IN ('rejected_by_vendor', 'rejected')
+        AND (po.status IN ('rejected_by_vendor', 'rejected')
+             OR (po.status = 'cancelled' AND sb.route = 'CANCEL'))
         AND NOT EXISTS (
           SELECT 1 FROM tbl_quote_finalization qf
           WHERE qf.rfq_id = po.rfq_id
@@ -5476,7 +5488,9 @@ LIMIT 2;
       COMMERCIAL_EVALUATION:     { resource: 'quote-compare', actions: ['read', 'create'], useDepartment: false, label: 'Commercial Evaluators' },
       AWAITING_PO:               { resource: 'awarding',      actions: ['read', 'create'], useDepartment: false, label: 'PO initiator' },
       PO_VENDOR_REJECTED:        { resource: 'awarding',      actions: ['read', 'create'], useDepartment: false, label: 'PO initiator' },
-      PO_REJECTED:               { resource: 'awarding',      actions: ['read', 'create'], useDepartment: false, label: 'PO initiator' },
+      // An approver's rejection de-finalizes the product: the next step is a
+      // re-award in Quote Comparison, by the commercial evaluators.
+      PO_REJECTED:               { resource: 'quote-compare', actions: ['read', 'create'], useDepartment: false, label: 'Commercial Evaluators' },
     };
     const APPROVAL_LABEL = 'Pending Approvers';
     // PO_APPROVAL with every live PO on hold: the work is with the people asked
@@ -5631,8 +5645,11 @@ LIMIT 2;
           const sql = cteParts.join(' UNION ') + ' ORDER BY rfq_id, name';
           const rows = await db.any(sql, params);
 
-          // Group by rfq_id. PO rows are sorted first: the people asked on
-          // held POs, and which RFQs have a live PO approval that is not held.
+          // Group by rfq_id. Rows come ordered by (rfq_id, name) and the loop
+          // does not depend on that order: an RFQ is in one stage, so its rows
+          // are all of one entity type. For a PO row, the loop first notes the
+          // people asked on held POs and which RFQs have a live PO approval
+          // that is not held.
           const grouped = {};
           const holdTargets = new Map();
           const unheldPo = new Set();
