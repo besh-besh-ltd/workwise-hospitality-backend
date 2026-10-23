@@ -4,7 +4,7 @@ import { APPROVAL_DECISIONS, PO_STATUSES, RFQ_STATUSES } from '../util/constants
 import { sendApprovalStepNotification } from '../helper/sendEmailFunctions/approvalEmails.js';
 import { approvalStepEmailContext } from '../helper/approvalEmailContext.js';
 import { approvalActionUrl, entityLabel, stageLabel, buyerHome } from '../services/notificationLinks.js';
-import { assertPoNotOnHold, instanceNotHeldSql } from '../services/po/poHold.js';
+import { assertPoNotOnHold, instanceNotHeldSql, closeOpenHoldTx, assertProductNotOnHeldPo } from '../services/po/poHold.js';
 
 // ── Unit vs Group ARC awareness for notification copy ────────────────────────
 // Instances keep the unit entity types (ARC_TECH, ...); a Group ARC is only
@@ -3918,6 +3918,16 @@ export async function submitApprovalAction({
         message: `Step ${currentStep.step_order} approved. Moving to step ${nextStep.step_order}.`
       };
     } else {
+      // The last approval of an award re-drafts the product's PO, cancelling
+      // any pending one that carries it. Refused while that PO is on hold
+      // (409 PO_ON_HOLD), before anything is approved, so the award is never
+      // left approved with no PO drafted. A plain read: locking the PO here
+      // would take PO after award instance, the reverse of re-finalize; the
+      // draft re-checks under the PO lock (draftPurchaseOrder).
+      if (instance.entity_type === 'NEGOTIATION_QUOTE') {
+        await assertProductNotOnHeldPo(t, { rfqProductId: instance.entity_id });
+      }
+
       // This was the last step - approve the entire instance
       await t.none(`
         UPDATE tbl_approval_instances
@@ -4031,6 +4041,16 @@ export async function cancelApprovalInstance(instance_id, cancelled_by, reason =
   // site that notified was closeRFQ — the ARC publish-withdrawal, the generic
   // cancel endpoint and the four sendback cascades all went silent.
   const outcome = await db.tx(async t => {
+    // A PO's approval: lock the PO row before the instance, the order every
+    // PO decision and hold uses, so a hold cannot open or close under us.
+    const peek = await t.oneOrNone(
+      `SELECT entity_type, entity_id FROM tbl_approval_instances WHERE id = $1`,
+      [instance_id]
+    );
+    if (peek?.entity_type === 'PO') {
+      await t.oneOrNone(`SELECT id FROM tbl_rfq_purchase_order WHERE id = $1 FOR UPDATE`, [peek.entity_id]);
+    }
+
     const instance = await t.oneOrNone(`
       SELECT * FROM tbl_approval_instances
       WHERE id = $1
@@ -4069,6 +4089,17 @@ export async function cancelApprovalInstance(instance_id, cancelled_by, reason =
       (approval_instance_id, approver_user_id, action, comment)
       VALUES ($1, $2, 'CANCELLED', $3)
     `, [instance_id, cancelled_by, reason ? `[CANCELLED] ${reason}` : '[CANCELLED]']);
+
+    // A hold on this PO's approval ends with it (the PO row is locked above).
+    if (instance.entity_type === 'PO' && peek?.entity_type === 'PO') {
+      await closeOpenHoldTx(t, {
+        poId: Number(instance.entity_id),
+        status: 'SUPERSEDED',
+        resolution: 'PO_SUPERSEDED',
+        actorId: cancelled_by,
+        note: 'the approval was cancelled',
+      });
+    }
 
     // Collected inside the transaction, notified after it commits.
     const pendingApprovers = await t.any(`

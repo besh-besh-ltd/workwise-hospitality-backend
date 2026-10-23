@@ -42,6 +42,7 @@ import {
   notifySendBackRequested,
   notifySendBackAnswered,
   notifySendBackWithdrawn,
+  notifySendBackReminder,
 } from './poSendBackNotifier.js';
 
 /** Who can be asked, in the order the dialog lists them. */
@@ -566,4 +567,70 @@ export async function withdrawInfoRequest({ user, sendBackId, note }) {
     logger.info({ poId: out.poId, sendBackId }, 'PO hold withdrawn');
   });
   return { poId: out.poId, sendBack };
+}
+
+// ── Reminders ─────────────────────────────────────────────────────────────
+
+/** A hold this old, never reminded, gets one reminder. */
+export const HOLD_REMINDER_AFTER_HOURS = 48;
+
+/**
+ * Remind, once, the person asked on every hold OPEN for 48 hours or more.
+ * Run by the daily PO reminder cron (cronManager.startPoInitiateReminderCron).
+ *
+ * Each hold is claimed and stamped reminded_at in the same statement that
+ * selects it (UPDATE ... RETURNING), so two overlapping runs never remind
+ * twice. Timestamps are compared in SQL against `now` (timestamptz).
+ *
+ * Skipped, and left to a later run: a target whose account is inactive,
+ * deleted or a vendor (not claimed at all), and one who can no longer see the
+ * PO (claimed, then released). The reminder goes to the target only; approvers
+ * are not nudged about a step they cannot decide while it is held.
+ *
+ * @param {Date} [now]
+ * @returns {Promise<{reminded:number}>}
+ */
+export async function remindOpenHolds(now = new Date()) {
+  let reminded = 0;
+  try {
+    const due = await db.any(
+      `UPDATE tbl_po_send_backs sb
+          SET reminded_at = $1::timestamptz
+         FROM tbl_users u
+        WHERE u.id = sb.target_user_id
+          AND sb.status = 'OPEN'
+          AND sb.route = 'INFO_REQUEST'
+          AND sb.reminded_at IS NULL
+          AND sb.created_at <= $1::timestamptz - make_interval(hours => $2)
+          AND u.status = 1
+          AND COALESCE(u.is_deleted, 0) = 0
+          AND COALESCE(u.user_type, 0) <> 3
+      RETURNING sb.id, sb.purchase_order_id, sb.target_user_id, u.user_type`,
+      [now, HOLD_REMINDER_AFTER_HOURS]
+    );
+    for (const sb of due.sort((a, b) => a.id - b.id)) {
+      try {
+        try {
+          await assertPoAccess({ id: Number(sb.target_user_id), user_type: sb.user_type }, sb.purchase_order_id);
+        } catch (err) {
+          if (!(err instanceof PoAccessError)) throw err;
+          // Cannot see the PO any more: release the claim so a later grant
+          // still gets the one reminder.
+          await db.none(
+            `UPDATE tbl_po_send_backs SET reminded_at = NULL WHERE id = $1 AND reminded_at = $2::timestamptz`,
+            [sb.id, now]
+          );
+          logger.info({ send_back_id: sb.id, target: sb.target_user_id }, '[PO hold reminder] target cannot see the PO; skipped');
+          continue;
+        }
+        await notifySendBackReminder({ sendBackId: Number(sb.id) });
+        reminded += 1;
+      } catch (err) {
+        logError(`remindOpenHolds failed for send-back ${sb.id}`, err);
+      }
+    }
+  } catch (err) {
+    logError('remindOpenHolds failed', err);
+  }
+  return { reminded };
 }

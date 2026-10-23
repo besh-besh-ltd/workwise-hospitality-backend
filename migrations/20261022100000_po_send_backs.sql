@@ -57,6 +57,9 @@ CREATE INDEX IF NOT EXISTS ix_po_send_back_target_open
   ON public.tbl_po_send_backs (target_user_id) WHERE status = 'OPEN';
 CREATE INDEX IF NOT EXISTS ix_po_send_back_rfq
   ON public.tbl_po_send_backs (rfq_id);
+-- Holds per approval instance: the propagation sweep and the report hold-time
+-- joins look them up by instance.
+CREATE INDEX IF NOT EXISTS ix_po_send_back_instance ON public.tbl_po_send_backs (approval_instance_id);
 
 CREATE TABLE IF NOT EXISTS public.tbl_po_send_back_files (
   id           SERIAL PRIMARY KEY,

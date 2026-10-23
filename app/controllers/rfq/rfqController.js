@@ -98,6 +98,8 @@ import { lockLiveRfqAssignments, propagateRoutedCopiesLocked } from '../../servi
 import { directInviteIdsForLine } from '../../services/vendorNetwork/directInvites.js';
 import { NetworkHttpError } from '../../services/vendorNetwork/guards.js';
 import { poFieldsFor, isVendorOrTokenViewer } from '../../services/po/buyerOnlyPoFields.js';
+import { closeOpenHoldTx, assertProductNotOnHeldPo } from '../../services/po/poHold.js';
+import { PoDecisionError } from '../../services/po/poDecisionError.js';
 
 /** A Vendor Networks quote-gate refusal as its HTTP answer body. */
 const networkRefusalBody = (err) => ({ status: 0, message: err.message, ...(err.reason ? { reason: err.reason } : {}) });
@@ -11141,6 +11143,18 @@ const rfqController = {
 
       // Update RFQ status to CLOSED (2) and cancel ALL pending approvals tied to this RFQ.
       await db.tx(async t => {
+        // The RFQ's pending POs first, in id order, before any approval
+        // instance: the lock order every PO decision and hold uses (PO, then
+        // its instance). A hold cannot open or answer under us, and the holds
+        // closed below are closed on POs this transaction owns.
+        await t.any(
+          `SELECT id FROM tbl_rfq_purchase_order
+            WHERE rfq_id = $1 AND status = 'pending_approval'
+            ORDER BY id
+            FOR UPDATE`,
+          [rfq_id]
+        );
+
         await t.none(
           'UPDATE tbl_rfq SET status = 2, updated_by = $1 WHERE id = $2',
           [id, rfq_id]
@@ -11249,6 +11263,14 @@ const rfqController = {
                 WHERE id = $1 AND status = 'pending_approval'`,
               [instance.entity_id]
             );
+            // Nobody will answer for an approval that no longer exists: the
+            // hold closes with it, and the person asked is told after commit.
+            await closeOpenHoldTx(t, {
+              poId: Number(instance.entity_id),
+              status: 'CLOSED',
+              resolution: 'RFQ_CLOSED',
+              actorId: id,
+            });
           }
 
           cancelledInstances.push({
@@ -11948,6 +11970,15 @@ const rfqController = {
         // return 09 Conflict status code if vendor already exist for same product + variant,
 
         const response = await db.tx(async (t) => {
+          // A product on a PO that is on hold (an approver waiting on an
+          // answer) cannot be re-awarded: the re-draft would cancel that PO
+          // under them. Checked here, inside the transaction, after locking
+          // every pending-approval PO that carries the product, so no hold can
+          // open between the check and the draft. 409 PO_ON_HOLD.
+          if (rfqProductForNego) {
+            await assertProductNotOnHeldPo(t, { rfqProductId: rfqProductForNego.id, lock: true });
+          }
+
           // const userInHierarchy = t.oneOrNone(
           //   `SELECT * FROM tbl_approval_hierarchy
           //   WHERE company_id = $1 AND user_id = $2 AND hierarchy_type = $3 AND is_active = true`,
@@ -12454,6 +12485,11 @@ const rfqController = {
           .end();
       }
     } catch (error) {
+      // A refused award (a product on a held PO) answers with its own status
+      // and code, the same body as every PO hold refusal.
+      if (error instanceof PoDecisionError) {
+        return res.status(error.httpStatus || 409).json({ status: 0, message: error.message, code: error.code });
+      }
       logError(error);
       res
         .status(400)

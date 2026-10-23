@@ -298,7 +298,10 @@ describe("Report 3.3 — Rejected PO Log", () => {
     expect(column(ws, "PO Number")).toEqual([po.po_number]);
     expect(column(ws, "PO Value (₹)")).toEqual([42000]);
     expect(column(ws, "Step")).toEqual(["L1"]);
-    expect(column(ws, "Reason")).toEqual(["vendor not empanelled"]);
+    // The approver's own words; reason code and route are not on record for this one.
+    expect(column(ws, "Comment")).toEqual(["vendor not empanelled"]);
+    expect(column(ws, "Reason")).toEqual(["—"]);
+    expect(column(ws, "Route")).toEqual(["—"]);
     const who = await db.one(`SELECT name FROM tbl_users WHERE id = $1`, [APPROVER]);
     expect(column(ws, "Rejected By")).toEqual([who.name]);
   });
@@ -317,7 +320,7 @@ describe("Report 3.3 — Rejected PO Log", () => {
     expect(column(wb.getWorksheet("Rejected by Approver"), "PO Number")).toEqual([]);
     expect(column(wb.getWorksheet("Cancelled"), "PO Number")).toEqual([po.po_number]);
     // The mechanical prefix is stripped; the human reason is kept.
-    expect(column(wb.getWorksheet("Cancelled"), "Reason")).toEqual([
+    expect(column(wb.getWorksheet("Cancelled"), "Comment")).toEqual([
       "RFQ closed by creator: configuration does not match",
     ]);
   });
@@ -373,7 +376,9 @@ describe("Report 3.3 — Rejected PO Log", () => {
     expect(column(ws, "PO Number")).toEqual([po.po_number]);
     const who = await db.one(`SELECT name FROM tbl_users WHERE id = $1`, [APPROVER]);
     expect(column(ws, "Cancelled By")).toEqual([who.name]);
-    expect(column(ws, "Reason")).toEqual(["outlet refurbishment dropped"]);
+    expect(column(ws, "Comment")).toEqual(["outlet refurbishment dropped"]);
+    expect(column(ws, "Reason")).toEqual(["Not needed any more"]);
+    expect(column(ws, "Route")).toEqual(["Cancelled"]);
     expect(column(ws, "Cancelled On (IST)")[0]).toBeInstanceOf(Date);
     // A cancellation, not a rejection: it is not counted twice.
     expect(column(wb.getWorksheet("Rejected by Approver"), "PO Number")).toEqual([]);

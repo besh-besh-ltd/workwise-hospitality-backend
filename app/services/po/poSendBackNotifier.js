@@ -5,6 +5,11 @@
 //               step (any of them may now decide), never the person who
 //               answered; link: the PO's approval.
 //   withdrawn → the person asked; link: the PO.
+//   closed    → the person asked, when the approval the hold froze ended or
+//               was restarted (PO edited, RFQ closed, policy or membership
+//               change, approval cancelled); link: the PO.
+//   reminder  → the person asked, once, when the hold is 48 hours old
+//               (remindOpenHolds); link: the PO.
 //
 // In the app (notificationService.dispatch) and by email. Active buyers only:
 // never a vendor, an inactive or deleted account, or the actor.
@@ -22,6 +27,7 @@ import { clampText } from "../../helper/poReference.js";
 import { dispatch as dispatchNotification } from "../notificationService.js";
 import { buyerPoApproval, buyerPoDetail, toAbsoluteUrl } from "../notificationLinks.js";
 import { reasonLabel } from "./poSendBackReasons.js";
+import { afterCommitOf } from "../approvalEvents.js";
 
 const esc = (v) =>
   String(v ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
@@ -29,12 +35,14 @@ const esc = (v) =>
 /** The send-back with what the copy needs, or null. */
 async function loadContext(sendBackId) {
   return db.oneOrNone(
-    `SELECT sb.id, sb.status, sb.reason_category, sb.comment, sb.response_text,
-            sb.requested_by, sb.target_user_id, sb.approval_instance_step_id,
+    `SELECT sb.id, sb.status, sb.resolution, sb.reason_category, sb.comment, sb.response_text,
+            sb.requested_by, rq.name AS requested_by_name,
+            sb.target_user_id, sb.approval_instance_step_id,
             po.id AS po_id, po.po_number, po.rfq_id, r.rfq_no
        FROM tbl_po_send_backs sb
        JOIN tbl_rfq_purchase_order po ON po.id = sb.purchase_order_id
        LEFT JOIN tbl_rfq r ON r.id = po.rfq_id
+       LEFT JOIN tbl_users rq ON rq.id = sb.requested_by
       WHERE sb.id = $1`,
     [sendBackId]
   );
@@ -61,10 +69,35 @@ const poLabelOf = (ctx) => `PO ${ctx.po_number || `#${ctx.po_id}`}`;
 const rfqPart = (ctx) => (ctx.rfq_no ? ` (RFQ ${ctx.rfq_no})` : "");
 const quoted = (text) => (text && String(text).trim() ? ` "${String(text).trim()}"` : "");
 
+/** Why a hold was closed, by its resolution, for the "closed" copy. */
+export const CLOSED_BECAUSE = Object.freeze({
+  PO_AMENDED_RESTARTED: "the PO was edited",
+  RFQ_CLOSED: "the RFQ was closed",
+  PO_SUPERSEDED: "the approval was restarted",
+});
+
 /** Title, body, link and button per event. Exported for copy tests. */
-export function buildSendBackCopy(event, { ctx, actorName }) {
+export function buildSendBackCopy(event, { ctx, actorName, because }) {
   const who = actorName || "Someone";
   const po = poLabelOf(ctx);
+  if (event === "closed") {
+    const why = because || CLOSED_BECAUSE[ctx.resolution] || "the approval it was waiting on ended";
+    return {
+      title: clampText(`Request for information on ${po} closed`),
+      body: `The request for information on ${po} was closed because ${why}. Nothing more is needed from you.`,
+      linkPath: buyerPoDetail(ctx.po_id),
+      button: "Open the purchase order",
+    };
+  }
+  if (event === "reminder") {
+    const asker = ctx.requested_by_name || "An approver";
+    return {
+      title: clampText(`Reminder: ${po} is waiting for your answer`),
+      body: `${asker} asked you for information on ${po}${rfqPart(ctx)}: ${reasonLabel(ctx.reason_category)}.${quoted(ctx.comment)} The approval is waiting for your answer.`,
+      linkPath: buyerPoDetail(ctx.po_id),
+      button: "Answer on the purchase order",
+    };
+  }
   if (event === "requested") {
     return {
       title: clampText(`${po} is on hold: ${who} needs information from you`),
@@ -93,6 +126,8 @@ const TYPES = Object.freeze({
   requested: "po_send_back_requested",
   answered: "po_send_back_answered",
   withdrawn: "po_send_back_withdrawn",
+  closed: "po_send_back_closed",
+  reminder: "po_send_back_reminder",
 });
 
 async function recipientsFor(event, ctx, actorId) {
@@ -109,7 +144,7 @@ async function recipientsFor(event, ctx, actorId) {
   return activeBuyers([ctx.target_user_id], actorId);
 }
 
-async function notifyNow(event, { sendBackId, actorId }) {
+async function notifyNow(event, { sendBackId, actorId, because }) {
   try {
     const ctx = await loadContext(sendBackId);
     if (!ctx) return;
@@ -121,7 +156,7 @@ async function notifyNow(event, { sendBackId, actorId }) {
       logger.info({ send_back_id: ctx.id, event }, "[poSendBackNotifier] no one to notify");
       return;
     }
-    const { title, body, linkPath, button } = buildSendBackCopy(event, { ctx, actorName: actor?.name });
+    const { title, body, linkPath, button } = buildSendBackCopy(event, { ctx, actorName: actor?.name, because });
 
     await dispatchNotification({
       userIds: recipients.map((r) => r.user_id),
@@ -195,6 +230,18 @@ export const notifySendBackAnswered = (args) => track(notifyNow("answered", args
 
 /** The person asked hears they are no longer needed. Call after COMMIT. Never throws. */
 export const notifySendBackWithdrawn = (args) => track(notifyNow("withdrawn", args));
+
+/**
+ * The person asked hears the hold was closed because the approval it froze
+ * ended or restarted (`because` completes "was closed because ..."). Called
+ * INSIDE the closing transaction with its context: sends only after the
+ * outermost transaction commits, nothing if it rolls back. Never throws.
+ */
+export const notifySendBackClosed = (args, dbContext) =>
+  track(afterCommitOf(dbContext, () => notifyNow("closed", args)));
+
+/** The person asked is reminded the PO still waits on them. Never throws. */
+export const notifySendBackReminder = (args) => track(notifyNow("reminder", { ...args, actorId: null }));
 
 /**
  * Resolves once every send-back notification started so far has settled. For

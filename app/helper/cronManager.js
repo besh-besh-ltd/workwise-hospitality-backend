@@ -20,6 +20,7 @@ import { notifyApprovalChanged } from '../services/approvalEvents.js';
 import { runRoutingSweep } from '../services/vendorNetwork/routingSweep.js';
 import { SWEEP_CRON } from '../constants/vendorNetwork.js';
 import { remindStaleDrafts } from '../services/po/poInitiateNotifier.js';
+import { remindOpenHolds } from '../services/po/poSendBackService.js';
 
 const milestoneCronRegistry = new Map();
 const generalRemindersCronRegistry = new Map();
@@ -1607,15 +1608,25 @@ export const rescheduleAllArcNegotiationRoundExpirations = async () => {
  * One reminder per draft PO that nobody has initiated for 48 hours.
  * Schedule: daily at 10:00 AM IST. Drafts older than 14 days are skipped on
  * purpose (see poInitiateNotifier), so deploying never emails about old drafts.
+ *
+ * The same job reminds, once, whoever was asked for information on a PO that
+ * has been on hold for 48 hours (poSendBackService.remindOpenHolds).
  */
 export const startPoInitiateReminderCron = () => {
   // 10:00 AM IST -> 4:30 AM UTC
   cron.schedule('30 4 * * *', async () => {
+    const now = new Date();
     try {
-      const { reminded } = await remindStaleDrafts(new Date());
+      const { reminded } = await remindStaleDrafts(now);
       logger.info(`[PO Initiate Reminder] Reminded ${reminded} draft PO(s).`);
     } catch (error) {
       logError('[PO Initiate Reminder] Cron job failed', error);
+    }
+    try {
+      const { reminded } = await remindOpenHolds(now);
+      logger.info(`[PO Hold Reminder] Reminded ${reminded} person(s) asked for information.`);
+    } catch (error) {
+      logError('[PO Hold Reminder] Cron job failed', error);
     }
   });
   logger.info('[PO Initiate Reminder] Cron scheduled: daily at 10:00 AM IST');

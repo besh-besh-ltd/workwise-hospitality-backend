@@ -18,6 +18,7 @@ import fs from 'fs';
 import { writePoDocument } from "../services/poDocumentService.js";
 import { notifyApprovalChanged } from '../services/approvalEvents.js';
 import { stripBuyerOnlyPoFields } from '../services/po/buyerOnlyPoFields.js';
+import { closeOpenHoldTx, findOpenHold, heldPoReawardError } from '../services/po/poHold.js';
 
 // ===========================================================================
 // SECURITY — legacy Purchase Order authorization gate
@@ -776,13 +777,22 @@ export const draftPurchaseOrder = async (rfq_id, project_id, quote_item_id, tota
       // the two, fall back to total_value to preserve legacy behaviour.
       const linePrice = line_total ?? total_value;
 
-      // 1. Check if a pending PO already exists for this RFQ Product
+      // 1. Check if a pending PO already exists for this RFQ Product. Locked:
+      // it is about to be cancelled, and a PO on hold (an approver waiting on
+      // an answer) must not be: the re-award is refused instead. The award
+      // paths check this up front; this is the backstop under the lock.
       const existing = await t.oneOrNone(
-        `SELECT TRPO.id FROM tbl_rfq_purchase_order TRPO
+        `SELECT TRPO.id, TRPO.po_number
+           FROM tbl_rfq_purchase_order TRPO
         LEFT JOIN tbl_purchase_order_product TPOP ON TPOP.purchase_order_id = TRPO.id AND TPOP.rfq_product_id = $2
-      WHERE rfq_id = $1 AND TPOP.id IS NOT NULL AND status = $3`,
+      WHERE rfq_id = $1 AND TPOP.id IS NOT NULL AND status = $3
+      FOR UPDATE OF TRPO`,
         [rfq_id, rfq_product_id, PO_STATUSES.PENDING_APPROVAL]
       );
+
+      // Read after the lock, on a fresh snapshot: a hold opened by whoever
+      // held the lock before us is seen.
+      if (existing && (await findOpenHold(t, existing.id))) throw heldPoReawardError(existing.po_number);
 
       if (existing) {
         await t.none(
@@ -2801,6 +2811,16 @@ export const handleUpdatePO = async (po_id, changes, current_user) => {
         VALUES ($1, $2, 'CANCELLED', $3)`,
         [existingInstance.id, current_user.id, `[CANCELLED] PO edited by ${current_user.name || `user ${current_user.id}`}, re-initiating approval`]
       );
+      // A hold on the cancelled approval goes with it, in this transaction
+      // (PO locked above, then the instance): the restarted approval begins
+      // at step 1 with nothing pending on anyone. The person asked is told
+      // after commit.
+      await closeOpenHoldTx(t, {
+        poId: Number(po_id),
+        status: 'SUPERSEDED',
+        resolution: 'PO_AMENDED_RESTARTED',
+        actorId: current_user.id,
+      });
       // Clear the old instance reference from PO
       await t.none(
         `UPDATE tbl_rfq_purchase_order SET approval_instance_id = NULL, status = 'draft' WHERE id = $1`,
@@ -2839,13 +2859,30 @@ export const handleUpdatePO = async (po_id, changes, current_user) => {
     let notify = null;
     if (initiator) {
       const result = await initiatePurchaseOrder(po_id, initiator, t);
-      if (result.approval_required && result.current_approver_id) {
-        const purchaseOrder = await t.oneOrNone(
-          `SELECT * FROM tbl_rfq_purchase_order
-          WHERE id = $1`,
-          [result.po_id]
-        );
-        if (purchaseOrder) notify = { purchaseOrder, approverId: result.current_approver_id };
+      if (result.approval_required) {
+        // Who to tell, read on this transaction, told after it commits. The
+        // hospitality workflow reports no single current_approver_id: its
+        // approvers are the PENDING ones on the new instance's current step,
+        // exactly as initiatePO tells them.
+        let approverIds = [];
+        if (result.approval_type === 'new' && result.approval_instance_id) {
+          approverIds = (await t.any(
+            `SELECT DISTINCT sa.approver_user_id AS user_id
+               FROM tbl_approval_step_approvers sa
+               JOIN tbl_approval_instance_steps st ON st.id = sa.approval_instance_step_id
+               JOIN tbl_approval_instances ai ON ai.id = st.approval_instance_id
+              WHERE ai.id = $1 AND st.step_order = ai.current_step
+                AND st.status = 'PENDING' AND sa.status = 'PENDING'
+              ORDER BY sa.approver_user_id`,
+            [result.approval_instance_id]
+          )).map((r) => r.user_id);
+        } else if (result.current_approver_id) {
+          approverIds = [result.current_approver_id];
+        }
+        const purchaseOrder = approverIds.length
+          ? await t.oneOrNone(`SELECT * FROM tbl_rfq_purchase_order WHERE id = $1`, [result.po_id])
+          : null;
+        if (purchaseOrder) notify = { purchaseOrder, approverIds };
       }
     }
 
@@ -2854,10 +2891,12 @@ export const handleUpdatePO = async (po_id, changes, current_user) => {
 
   // After commit, and never allowed to fail an edit that already succeeded.
   if (outcome.notify) {
-    try {
-      await sendApprovalNotification(outcome.notify.purchaseOrder, outcome.notify.approverId);
-    } catch (err) {
-      logError('handleUpdatePO: approval notification failed after commit', err);
+    for (const approverId of outcome.notify.approverIds) {
+      try {
+        await sendApprovalNotification(outcome.notify.purchaseOrder, approverId);
+      } catch (err) {
+        logError('handleUpdatePO: approval notification failed after commit', err);
+      }
     }
   }
 

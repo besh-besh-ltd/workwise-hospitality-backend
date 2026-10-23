@@ -44,6 +44,7 @@ const formatRoundDeadlineIst = (endDate) => {
 };
 import { draftPO, buildAuthoritativePOPayload } from '../po/purchaseOrderController.js';
 import { notifyDraftCreated } from '../../services/po/poInitiateNotifier.js';
+import { PoDecisionError } from '../../services/po/poDecisionError.js';
 import { buildDraftedPos } from '../../models/po/poInitiateGuide.js';
 import { initiatePurchaseOrder } from '../../models/purchaseOrderModel.js';
 import {
@@ -3276,6 +3277,11 @@ const NegotiationController = {
           : 'Approval recorded. Waiting for other approvers.'
       });
     } catch (error) {
+      // An award refused because the product's PO is on hold: its own status
+      // and code, the same body as every PO hold refusal. Nothing was approved.
+      if (error instanceof PoDecisionError) {
+        return res.status(error.httpStatus || 409).json({ status: 0, message: error.message, code: error.code });
+      }
       logError(error);
       return formatErrorResponse(res, error);
     }
