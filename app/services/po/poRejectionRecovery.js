@@ -27,6 +27,8 @@
  * vendor). A vendor rejection is the only writer whose changed_by is the
  * vendor itself; the latest such row wins.
  */
+import db from '../../config/dbConn.js';
+import { recordLifecycleEvent } from '../../models/generalModel.js';
 import { evaluateVendorTechnicalQualification } from '../technicalQualificationService.js';
 import { coversProductSql } from '../../models/negotiationModel.js';
 import { lockMrHotelLedgerRows } from '../callOffPoService.js';
@@ -432,6 +434,107 @@ export async function restoreAward(t, po, actorUserId) {
   });
 }
 
+// Same ownership test acceptPO / rejectPO apply: the PO's finalized vendor must
+// be the calling user.
+function assertOwnPo(po, vendorUserId) {
+  if (!po) throw new RecoveryError(404, 'NOT_FOUND', 'Purchase order not found.');
+  if (po.finalized_vendor_id !== vendorUserId) {
+    throw new RecoveryError(403, 'NOT_YOUR_PO', 'You are not the assigned vendor for this PO.');
+  }
+}
+
+/**
+ * What the vendor's "Rejected by mistake? Accept this order instead." panel
+ * needs: is it available, until when, and if not, why. Read only.
+ *
+ * @returns {Promise<{available:boolean, deadline:string|null, blockers:string[]}>}
+ */
+export async function getVendorUndoState(poId, vendorUserId) {
+  return db.task(async (t) => {
+    const id = Number(poId);
+    const po = Number.isSafeInteger(id) && id > 0
+      ? await t.oneOrNone(`SELECT * FROM tbl_rfq_purchase_order WHERE id = $1`, [id])
+      : null;
+    assertOwnPo(po, vendorUserId);
+    const blockers = await findRecoveryBlockers(t, po);
+    if (po.status !== PO_STATUSES.REJECTED_BY_VENDOR) {
+      return { available: false, deadline: null, blockers };
+    }
+    const win = await undoWindow(t, po);
+    if (!win.open) blockers.push(BLOCKERS.UNDO_WINDOW_EXPIRED);
+    return { available: blockers.length === 0, deadline: win.deadline, blockers };
+  });
+}
+
+/**
+ * The vendor takes a rejection back: restore the award and accept the PO, in
+ * one transaction. The end state is a normal accept's (status approved,
+ * vendor_action_at now, PO_ACCEPTED_BY_VENDOR lifecycle row) plus a
+ * PO_REJECTION_WITHDRAWN row recording what was undone.
+ *
+ * @returns {Promise<{po: object, callOff: null|{raised_by:number|null, mr_id:number|null, mr_number:string|null}}>}
+ */
+export async function withdrawRejectionByVendor(poId, vendorUserId) {
+  return db.tx(async (t) => {
+    const po = await lockPo(t, poId);
+    assertOwnPo(po, vendorUserId);
+
+    const blockers = await findRecoveryBlockers(t, po);
+    if (po.status === PO_STATUSES.REJECTED_BY_VENDOR) {
+      const win = await undoWindow(t, po);
+      if (!win.open) blockers.push(BLOCKERS.UNDO_WINDOW_EXPIRED);
+    }
+    if (blockers.length) throw new RecoveryError(409, blockers[0]);
+
+    await restoreAward(t, po, vendorUserId);
+
+    await t.none(
+      `UPDATE tbl_rfq_purchase_order
+          SET status = 'approved', vendor_rejection_reason = NULL,
+              vendor_action_at = NOW(), updated_at = NOW()
+        WHERE id = $1`,
+      [po.id]
+    );
+
+    await recordLifecycleEvent({
+      entity_type: 'PO',
+      entity_id: po.id,
+      stage: 'PO_REJECTION_WITHDRAWN',
+      action: 'WITHDRAW_REJECTION',
+      performed_by: vendorUserId,
+      metadata: {
+        rfq_id: po.rfq_id,
+        po_number: po.po_number,
+        previous_rejection_reason: po.vendor_rejection_reason ?? null,
+        previous_rejected_at: po.vendor_action_at ?? null,
+      },
+      txContext: t,
+    });
+    await recordLifecycleEvent({
+      entity_type: 'PO',
+      entity_id: po.id,
+      stage: 'PO_ACCEPTED_BY_VENDOR',
+      action: 'ACCEPT',
+      performed_by: vendorUserId,
+      metadata: { rfq_id: po.rfq_id, po_number: po.po_number },
+      txContext: t,
+    });
+
+    let callOff = null;
+    if (po.is_call_off) {
+      const mrId = po.source_mr_id
+        ?? (await t.oneOrNone(`SELECT mr_id FROM tbl_arc_callof_po WHERE po_id = $1 ORDER BY id LIMIT 1`, [po.id]))?.mr_id
+        ?? null;
+      const mr = mrId
+        ? await t.oneOrNone(`SELECT id, mr_number, raised_by FROM tbl_material_requisition WHERE id = $1`, [mrId])
+        : null;
+      callOff = { raised_by: mr?.raised_by ?? null, mr_id: mr?.id ?? null, mr_number: mr?.mr_number ?? null };
+    }
+
+    return { po: { ...po, status: 'approved' }, callOff };
+  });
+}
+
 export default {
   UNDO_WINDOW_HOURS,
   BLOCKERS,
@@ -441,4 +544,6 @@ export default {
   findRecoveryBlockers,
   undoWindow,
   restoreAward,
+  getVendorUndoState,
+  withdrawRejectionByVendor,
 };

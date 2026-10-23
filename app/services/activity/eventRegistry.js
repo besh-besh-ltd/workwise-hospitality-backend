@@ -277,6 +277,12 @@ export const EVENTS = [
     summary: (c) => `${c.actor} rejected purchase order ${c.entityLabel}`,
   }),
   e({
+    method: 'POST', path: '/po/vendor/:po_id/withdraw-rejection', key: 'po_rejection_withdrawn',
+    category: CATEGORIES.ORDERS, severity: 'critical',
+    entity: { type: 'PO', id: P('po_id') }, scope: SCOPE.entity('PO'),
+    summary: (c) => `${c.actor} withdrew their rejection and accepted purchase order ${c.entityLabel}`,
+  }),
+  e({
     method: 'POST', path: '/po/markGRN', key: 'po_grn_recorded',
     category: CATEGORIES.RECEIPT, severity: 'critical',
     entity: { type: 'PO', id: B('po_id') }, scope: SCOPE.entity('PO'),
