@@ -10,6 +10,7 @@ import { httpClient } from "../helpers/http.js";
 import { db } from "../setup/db.js";
 import { IDS } from "../fixtures/ids.js";
 import { makeRFQ } from "../factories/rfq.js";
+import { stampAdmin } from "../helpers/auth.js";
 
 const HC_A = IDS.hospitality.A;
 const HC_B = IDS.hospitality.B;
@@ -126,8 +127,15 @@ describe("Negotiation createRound / submit-for-approval — hardening", () => {
   });
 
   test("a vendor token cannot create a round", async () => {
-    const res = await vendor.post("/api/v1/negotiation/rounds").send(body(rfqA));
-    expect(res.status).toBe(403);
-    expect(res.body).toEqual({ message: "Insufficient permissions" });
+    // Fixture users carry user_type NULL, which acl() refuses on its own. Make
+    // the vendor a real vendor (3) so this test pins the route ACL itself.
+    const prev = await stampAdmin(IDS.users.vendor_alpha, 3);
+    try {
+      const res = await vendor.post("/api/v1/negotiation/rounds").send(body(rfqA));
+      expect(res.status).toBe(403);
+      expect(res.body).toEqual({ message: "Insufficient permissions" });
+    } finally {
+      await db.none(`UPDATE tbl_users SET user_type = $2 WHERE id = $1`, [IDS.users.vendor_alpha, prev]);
+    }
   });
 });
