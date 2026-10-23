@@ -48,6 +48,7 @@ import {
   dispatchPropagationEmails,
   roleStepPermissionVerdict
 } from '../../services/approvalPropagationService.js';
+import { lockPosOfInstances } from '../../services/po/poHold.js';
 import { AVAILABLE_HIERARCHY_TYPES } from '../../util/constants.js';
 import { initiatePurchaseOrder } from '../../models/purchaseOrderModel.js';
 import db from '../../config/dbConn.js';
@@ -956,6 +957,15 @@ const hospitalityApprovalController = {
         // - If propagation throws, the policy mutation rolls back too, so we
         //   never leave a half-applied state ("policy saved but propagation failed").
         const txResult = await db.tx(async t => {
+          // The PO rows of this policy's pending approvals come FIRST, in PO id
+          // order, before the policy row and before deletePolicySteps (whose
+          // ON DELETE SET NULL locks the instance step rows). Every PO decision
+          // locks the PO, then its approval; taking either of those here before
+          // the PO would invert that order and can deadlock with an approver
+          // acting on one of these POs. propagatePolicyChangeToInstances takes
+          // the same locks again later; a row lock already held is free.
+          await lockPosOfInstances(t, { policyId: id });
+
           // Acquire row-level lock on the policy. Any concurrent save against
           // the same policy will block here until this tx commits/rolls back.
           await t.oneOrNone('SELECT id FROM tbl_approval_policies WHERE id = $1 FOR UPDATE', [id]);

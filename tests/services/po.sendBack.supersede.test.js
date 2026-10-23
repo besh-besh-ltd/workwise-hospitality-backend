@@ -6,8 +6,14 @@
 //
 //   the PO is edited (approval restarts at step 1)  SUPERSEDED  PO_AMENDED_RESTARTED
 //   the RFQ is closed                               CLOSED      RFQ_CLOSED
-//   a policy / membership change moves or ends it   SUPERSEDED  PO_SUPERSEDED
+//   a policy edit removes, reshapes or moves past   SUPERSEDED  PO_SUPERSEDED
+//     the held step
+//   the held step's role loses approve              SUPERSEDED  PO_SUPERSEDED
+//   the held step loses its last approver           SUPERSEDED  PO_SUPERSEDED
 //   the approval is cancelled                       SUPERSEDED  PO_SUPERSEDED
+//
+// A policy save locks the policy's pending POs before anything else, like
+// every PO decision, so the two wait for each other instead of deadlocking.
 //
 // The person asked is told after commit. Re-finalizing (or approving the award
 // of) a product whose PO is held is refused: it would cancel the held PO. The
@@ -48,6 +54,7 @@ const FIXTURE_PO_POLICY = IDS.policies.A1_P1_PO;
 const POLICY_ID = 65861;
 const ROLE_HOLD = 89361; // the L2 role: awarding read + approve, held by APPROVER_A and APPROVER_B
 const ROLE_L3 = 89362; //   makes L3_APPROVER eligible for a USER step (awarding read + approve)
+const HOLD_ROLE_TITLE = "TEST PO hold step";
 const SUITE_USERS = [L3_APPROVER];
 const userBackup = new Map();
 
@@ -84,6 +91,17 @@ async function resetPolicy() {
   }
 }
 
+/** Give the hold role back awarding read + approve (idempotent). */
+async function restoreHoldRolePermissions() {
+  await db.none(
+    `INSERT INTO tbl_role_permissions (role_id, permission_id)
+     SELECT $1, p.id FROM tbl_permissions p
+      WHERE p.resource::text = 'awarding' AND p.action::text IN ('read', 'approve')
+        AND NOT EXISTS (SELECT 1 FROM tbl_role_permissions rp WHERE rp.role_id = $1 AND rp.permission_id = p.id)`,
+    [ROLE_HOLD]
+  );
+}
+
 async function grantRole(roleId, userIds) {
   for (const u of userIds) {
     await db.none(
@@ -101,9 +119,11 @@ beforeAll(async () => {
   }
   await db.none(`UPDATE tbl_users SET user_type = 2, status = 1 WHERE id = ANY($1::int[])`, [SUITE_USERS]);
 
-  for (const [id, title] of [[ROLE_HOLD, "TEST PO hold step"], [ROLE_L3, "TEST PO last step"]]) {
-    await db.none(`INSERT INTO tbl_roles (id, title, description, created_by) VALUES ($1, $2, 'test-only', NULL)
-                   ON CONFLICT (id) DO NOTHING`, [id, title]);
+  // The hold role is INITIATOR's own, so INITIATOR may edit its permissions
+  // through the role endpoint (system roles, created_by NULL, cannot be edited).
+  for (const [id, title, owner] of [[ROLE_HOLD, HOLD_ROLE_TITLE, S.INITIATOR], [ROLE_L3, "TEST PO last step", null]]) {
+    await db.none(`INSERT INTO tbl_roles (id, title, description, created_by) VALUES ($1, $2, 'test-only', $3)
+                   ON CONFLICT (id) DO UPDATE SET created_by = EXCLUDED.created_by`, [id, title, owner]);
     await db.none(
       `INSERT INTO tbl_role_permissions (role_id, permission_id)
        SELECT $1, p.id FROM tbl_permissions p
@@ -132,6 +152,7 @@ afterEach(async () => {
   await clearChangeLogs();
   await world.cleanup();
   await resetPolicy();
+  await restoreHoldRolePermissions();
 });
 
 afterAll(async () => {
@@ -174,6 +195,22 @@ const OPEN_ON_DEAD_INSTANCE = `
     FROM tbl_po_send_backs sb
     JOIN tbl_approval_instances ai ON ai.id = sb.approval_instance_id
    WHERE sb.status = 'OPEN' AND ai.status <> 'PENDING'`;
+
+// Nor on a step the approval is no longer waiting on: retired, decided,
+// gone, or no longer current. Scoped to this suite's approvals, since other
+// suites in the shard write hold rows straight into the table.
+const OPEN_ON_DEAD_STEP = `
+  SELECT count(*)::int AS n
+    FROM tbl_po_send_backs sb
+    JOIN tbl_approval_instances ai ON ai.id = sb.approval_instance_id
+    LEFT JOIN tbl_approval_instance_steps st ON st.id = sb.approval_instance_step_id
+   WHERE sb.status = 'OPEN' AND ai.approval_policy_id = ${POLICY_ID}
+     AND (ai.status <> 'PENDING' OR st.id IS NULL OR st.status <> 'PENDING' OR st.step_order <> ai.current_step)`;
+
+async function expectNoHoldOutlivesItsStep() {
+  expect((await db.one(OPEN_ON_DEAD_INSTANCE)).n).toBe(0);
+  expect((await db.one(OPEN_ON_DEAD_STEP)).n).toBe(0);
+}
 
 const holdRow = (id) =>
   db.one(`SELECT id, status, resolution, closed_at IS NOT NULL AS closed, reminded_at FROM tbl_po_send_backs WHERE id = $1`, [id]);
@@ -257,7 +294,8 @@ async function asCompanyAdmin(fn) {
   }
 }
 
-const removeHoldStepFromPolicy = () =>
+/** The admin saves the suite policy with `steps`, confirming the impact on pending approvals. */
+const savePolicy = (steps) =>
   asCompanyAdmin((admin) => admin.post("/api/v1/general/hospitality/approval/policies").send({
     id: POLICY_ID,
     entity_type: "PO",
@@ -266,8 +304,82 @@ const removeHoldStepFromPolicy = () =>
     process_id: IDS.processes.A_P1,
     is_active: true,
     confirmed_approval_impact: true,
-    steps: [ACTIVE_POLICY_STEPS[0], { ...ACTIVE_POLICY_STEPS[2], step_order: 2 }],
+    steps,
   }));
+
+const removeHoldStepFromPolicy = () =>
+  savePolicy([ACTIVE_POLICY_STEPS[0], { ...ACTIVE_POLICY_STEPS[2], step_order: 2 }]);
+
+/** Same three levels, same people; only the held level's decision rule changes. */
+const reshapeHoldStep = (decision_rule = "ALL") =>
+  savePolicy(ACTIVE_POLICY_STEPS.map((s) => (s.step_order === 2 ? { ...s, decision_rule } : s)));
+
+/**
+ * The hold role's owner (INITIATOR) edits it through the role endpoint and
+ * keeps only awarding.read: the role can no longer approve a PO.
+ */
+async function stripApproveFromHoldRole() {
+  const read = await db.any(
+    `SELECT id FROM tbl_permissions WHERE resource::text = 'awarding' AND action::text = 'read' ORDER BY id`
+  );
+  return (await world.client(S.INITIATOR)).put(`/api/v1/rbac/roles/${ROLE_HOLD}`).send({
+    title: HOLD_ROLE_TITLE, description: "test-only", permission_ids: read.map((r) => r.id),
+  });
+}
+
+/** A user's role scopes, departments and hotel mappings, to put back after an admin edit. */
+async function snapshotUser(userId) {
+  return {
+    userId,
+    scopes: await db.any(
+      `SELECT role_id, company_id, hotel_id, department_id, process_id FROM tbl_user_role_scopes WHERE user_id = $1 ORDER BY id`,
+      [userId]
+    ),
+    depts: (await db.any(`SELECT department_id FROM tbl_user_department WHERE user_id = $1`, [userId]))
+      .map((r) => r.department_id),
+    mappings: await db.any(
+      `SELECT hospitality_company_id, hospitality_hotel_id, mapping_type FROM tbl_hospitality_user_mappings WHERE user_id = $1`,
+      [userId]
+    ),
+  };
+}
+
+async function restoreUser({ userId, scopes, depts, mappings }) {
+  await db.none(`DELETE FROM tbl_user_role_scopes WHERE user_id = $1`, [userId]);
+  for (const s of scopes) {
+    await db.none(
+      `INSERT INTO tbl_user_role_scopes (user_id, role_id, company_id, hotel_id, department_id, process_id)
+       VALUES ($1, $2, $3, $4, $5, $6)`,
+      [userId, s.role_id, s.company_id, s.hotel_id, s.department_id, s.process_id]
+    );
+  }
+  await db.none(`DELETE FROM tbl_user_department WHERE user_id = $1`, [userId]);
+  for (const d of depts) {
+    await db.none(`INSERT INTO tbl_user_department (user_id, department_id) VALUES ($1, $2)`, [userId, d]);
+  }
+  await db.none(`DELETE FROM tbl_hospitality_user_mappings WHERE user_id = $1`, [userId]);
+  for (const m of mappings) {
+    await db.none(
+      `INSERT INTO tbl_hospitality_user_mappings (user_id, hospitality_company_id, hospitality_hotel_id, mapping_type)
+       VALUES ($1, $2, $3, $4)`,
+      [userId, m.hospitality_company_id, m.hospitality_hotel_id, m.mapping_type]
+    );
+  }
+}
+
+/** The admin takes the hold role away from the user in `snap` (user edit endpoint). */
+const dropHoldRole = (snap) =>
+  asCompanyAdmin((admin) => admin.put("/api/v1/users/update-user-detail").send({
+    user_id: snap.userId,
+    department_ids: snap.depts,
+    confirmed_approval_impact: true,
+    roles: snap.scopes.filter((s) => s.role_id !== ROLE_HOLD).map((s) => ({
+      role_id: s.role_id, company_id: s.company_id, hotel_id: s.hotel_id,
+      department_id: s.department_id, process_id: s.process_id,
+    })),
+  }));
+
+const BOTH_REMOVED = [[S.APPROVER_A, "REMOVED"], [S.APPROVER_B, "REMOVED"]].sort((a, b) => a[0] - b[0]);
 
 const cancelApproval = async (instanceId) =>
   (await world.client(S.INITIATOR)).post("/api/v1/general/hospitality/approval/cancel")
@@ -340,7 +452,7 @@ describe("a hold never outlives its approval", () => {
     expect(thread.body.data.map((s) => [s.id, s.status, s.resolution]))
       .toEqual([[h.sendBackId, "SUPERSEDED", "PO_AMENDED_RESTARTED"]]);
     expect((await poStage(h.rfq.id)).byId(h.poId).hold).toBeNull();
-    expect((await db.one(OPEN_ON_DEAD_INSTANCE)).n).toBe(0);
+    await expectNoHoldOutlivesItsStep();
   });
 
   it("closing the RFQ closes the hold", async () => {
@@ -357,7 +469,7 @@ describe("a hold never outlives its approval", () => {
     const told = await notificationsFor(h.poId, "po_send_back_closed");
     expect(told.map((n) => n.recipient_user_id)).toEqual([S.APPROVER_B]);
     expect(told[0].message).toContain(closedCopy((await poRow(h.poId)).po_number, "the RFQ was closed"));
-    expect((await db.one(OPEN_ON_DEAD_INSTANCE)).n).toBe(0);
+    await expectNoHoldOutlivesItsStep();
   });
 
   it("re-finalizing a product on a held PO is refused", async () => {
@@ -444,27 +556,184 @@ describe("a hold never outlives its approval", () => {
     expect(res.status).toBe(200);
     expect(await instanceRow(h.instanceId)).toMatchObject({ status: "CANCELLED" });
     expect(await holdRow(h.sendBackId)).toMatchObject({ status: "SUPERSEDED", resolution: "PO_SUPERSEDED", closed: true });
-    expect((await db.one(OPEN_ON_DEAD_INSTANCE)).n).toBe(0);
+    await expectNoHoldOutlivesItsStep();
   });
 
-  it("no OPEN hold survives on a non-PENDING instance", async () => {
+  it("a role that can no longer approve retires the held step, and the hold with it", async () => {
+    const h = await heldAtStep2();
+    const res = await stripApproveFromHoldRole();
+    expect(res.status).toBe(200);
+    expect(res.body.status).toBe(true);
+
+    // The held level is retired and the approval moves on to L3.
+    expect(await approversAt(h.instanceId, 2)).toEqual(BOTH_REMOVED);
+    expect(await instanceRow(h.instanceId)).toMatchObject({ status: "PENDING", current_step: 3 });
+    expect(await holdRow(h.sendBackId)).toMatchObject({ status: "SUPERSEDED", resolution: "PO_SUPERSEDED", closed: true });
+    await expectNoHoldOutlivesItsStep();
+
+    await drainPoSendBackNotifications();
+    const told = await notificationsFor(h.poId, "po_send_back_closed");
+    expect(told.map((n) => n.recipient_user_id)).toEqual([S.CREATOR]);
+    expect(told[0].message).toContain(closedCopy((await poRow(h.poId)).po_number, "the approval was restarted"));
+
+    expect((await world.approve(L3_APPROVER, h.poId)).status).toBe(200);
+    expect(await instanceRow(h.instanceId)).toMatchObject({ status: "APPROVED" });
+  });
+
+  it("removing the last approvers of the held step supersedes the hold", async () => {
+    const h = await heldAtStep2();
+    const a = await snapshotUser(S.APPROVER_A);
+    const b = await snapshotUser(S.APPROVER_B);
+    try {
+      // One approver left on the step: it is still current, and so is the hold.
+      expect((await dropHoldRole(a)).status).toBe(200);
+      expect(await instanceRow(h.instanceId)).toMatchObject({ status: "PENDING", current_step: 2 });
+      expect(await holdRow(h.sendBackId)).toMatchObject({ status: "OPEN" });
+
+      // Nobody left on it: the step is overtaken and the approval moves to L3.
+      expect((await dropHoldRole(b)).status).toBe(200);
+      expect(await approversAt(h.instanceId, 2)).toEqual(BOTH_REMOVED);
+      expect(await instanceRow(h.instanceId)).toMatchObject({ status: "PENDING", current_step: 3 });
+      expect(await holdRow(h.sendBackId)).toMatchObject({ status: "SUPERSEDED", resolution: "PO_SUPERSEDED", closed: true });
+      await expectNoHoldOutlivesItsStep();
+
+      await drainPoSendBackNotifications();
+      const told = await notificationsFor(h.poId, "po_send_back_closed");
+      expect(told.map((n) => n.recipient_user_id)).toEqual([S.CREATOR]);
+      expect(told[0].message).toContain(closedCopy((await poRow(h.poId)).po_number, "the approval was restarted"));
+
+      expect((await world.approve(L3_APPROVER, h.poId)).status).toBe(200);
+      expect(await instanceRow(h.instanceId)).toMatchObject({ status: "APPROVED" });
+    } finally {
+      await restoreUser(a);
+      await restoreUser(b);
+    }
+  });
+
+  it("changing the held step's decision rule supersedes the hold", async () => {
+    // Same step, same people, still current: but the question was asked under
+    // a rule that no longer applies, so the hold does not carry over.
+    const h = await heldAtStep2();
+    const res = await reshapeHoldStep("ALL");
+    expect(res.status).toBe(200);
+    expect(res.body.status).toBe(1);
+
+    expect(await instanceRow(h.instanceId)).toMatchObject({ status: "PENDING", current_step: 2 });
+    expect(await holdRow(h.sendBackId)).toMatchObject({ status: "SUPERSEDED", resolution: "PO_SUPERSEDED", closed: true });
+
+    await drainPoSendBackNotifications();
+    const told = await notificationsFor(h.poId, "po_send_back_closed");
+    expect(told.map((n) => n.recipient_user_id)).toEqual([S.CREATOR]);
+
+    // Nothing holds the step any more, and under ALL one approval does not decide it.
+    expect((await world.approve(S.APPROVER_A, h.poId)).status).toBe(200);
+    expect(await instanceRow(h.instanceId)).toMatchObject({ status: "PENDING", current_step: 2 });
+    expect((await world.approve(S.APPROVER_B, h.poId)).status).toBe(200);
+    expect(await instanceRow(h.instanceId)).toMatchObject({ status: "PENDING", current_step: 3 });
+  });
+
+  it("a policy save waits for a PO being decided before it takes anything the decision needs", async () => {
+    // A decision locks the PO, then its approval, then the approval's steps.
+    // A policy save that took the policy row and the approval's steps (its
+    // policy-step delete nulls their link) and only then waited for the PO
+    // would deadlock with it. Here an approver holds the PO, the save starts,
+    // and what the approver needs next must still be free.
+    const h = await heldAtStep2();
+    const freeOrHeld = (t, sql, params) =>
+      t.tx((sp) => sp.any(sql, params)).then(
+        () => "free",
+        (e) => { if (e.code === "55P03") return "held"; throw e; }
+      );
+
+    let save = null;
+    let seen;
+    try {
+      seen = await db.tx(async (t) => {
+        const { pid } = await t.one(`SELECT pg_backend_pid() AS pid`);
+        await t.one(`SELECT id FROM tbl_rfq_purchase_order WHERE id = $1 FOR UPDATE`, [h.poId]);
+        save = reshapeHoldStep("ALL");
+        const waiting = await eventually(
+          () => db.any(`SELECT pid, query FROM pg_stat_activity WHERE $1 = ANY(pg_blocking_pids(pid))`, [pid]),
+          (rows) => rows.length > 0
+        );
+        return {
+          waiting,
+          locks: {
+            policy: await freeOrHeld(t, `SELECT id FROM tbl_approval_policies WHERE id = $1 FOR UPDATE NOWAIT`, [POLICY_ID]),
+            approval: await freeOrHeld(t, `SELECT id FROM tbl_approval_instances WHERE id = $1 FOR UPDATE NOWAIT`, [h.instanceId]),
+            steps: await freeOrHeld(t, `SELECT id FROM tbl_approval_instance_steps WHERE approval_instance_id = $1 FOR UPDATE NOWAIT`, [h.instanceId]),
+          },
+        };
+      });
+    } finally {
+      if (save) save = await save; // the approver has let go: the save runs to the end
+    }
+
+    // The save waited on the PO row, holding neither the policy nor anything of the approval.
+    expect(seen.waiting).toHaveLength(1);
+    expect(seen.waiting[0].query).toMatch(/FROM tbl_rfq_purchase_order[\s\S]*FOR UPDATE OF po/);
+    expect(seen.locks).toEqual({ policy: "free", approval: "free", steps: "free" });
+
+    expect(save.status).toBe(200);
+    expect(save.body.status).toBe(1);
+    expect(await holdRow(h.sendBackId)).toMatchObject({ status: "SUPERSEDED", resolution: "PO_SUPERSEDED" });
+  });
+
+  it("no OPEN hold survives its step, on any path", async () => {
+    // Each hold is checked as soon as its own path has run: a later global
+    // path would close a hold an earlier one wrongly left open, hiding it.
+    const superseded = async (h) =>
+      expect(await holdRow(h.sendBackId)).toMatchObject({ status: "SUPERSEDED", resolution: "PO_SUPERSEDED", closed: true });
+
+    // The targeted paths, together.
     const edited = await heldAtStep2();
     const closed = await heldAtStep2({ target: "PO_INITIATOR" });
-    const propagated = await heldAtStep2();
     const cancelled = await heldAtStep2();
-
     expect((await editPo(S.APPROVER_B, edited.poId)).status).toBe(200);
     expect((await closeRfq(closed.rfq.id)).status).toBe(200);
     expect((await cancelApproval(cancelled.instanceId)).status).toBe(200);
-    expect((await removeHoldStepFromPolicy()).status).toBe(200);
+    await expectNoHoldOutlivesItsStep();
+    expect(await holdRow(edited.sendBackId)).toMatchObject({ status: "SUPERSEDED", resolution: "PO_AMENDED_RESTARTED", closed: true });
+    expect(await holdRow(closed.sendBackId)).toMatchObject({ status: "CLOSED", resolution: "RFQ_CLOSED", closed: true });
+    await superseded(cancelled);
 
-    expect((await db.one(OPEN_ON_DEAD_INSTANCE)).n).toBe(0);
-    expect(await holdRow(edited.sendBackId)).toMatchObject({ status: "SUPERSEDED", resolution: "PO_AMENDED_RESTARTED" });
-    expect(await holdRow(closed.sendBackId)).toMatchObject({ status: "CLOSED", resolution: "RFQ_CLOSED" });
-    expect(await holdRow(propagated.sendBackId)).toMatchObject({ status: "SUPERSEDED", resolution: "PO_SUPERSEDED" });
-    expect(await holdRow(cancelled.sendBackId)).toMatchObject({ status: "SUPERSEDED", resolution: "PO_SUPERSEDED" });
-    // Every hold the four POs ever had is closed.
-    for (const h of [edited, closed, propagated, cancelled]) {
+    // The global paths, one at a time on a freshly held PO: each touches every
+    // pending approval of the policy, so the setup is put back in between.
+    const propagated = await heldAtStep2();
+    expect((await removeHoldStepFromPolicy()).status).toBe(200);
+    await expectNoHoldOutlivesItsStep();
+    await superseded(propagated);
+    await resetPolicy();
+
+    const reshaped = await heldAtStep2();
+    expect((await reshapeHoldStep("ALL")).status).toBe(200);
+    await expectNoHoldOutlivesItsStep();
+    await superseded(reshaped);
+    await resetPolicy();
+
+    const roleStripped = await heldAtStep2();
+    expect((await stripApproveFromHoldRole()).status).toBe(200);
+    await expectNoHoldOutlivesItsStep();
+    await superseded(roleStripped);
+    await restoreHoldRolePermissions();
+
+    const unstaffed = await heldAtStep2();
+    const a = await snapshotUser(S.APPROVER_A);
+    const b = await snapshotUser(S.APPROVER_B);
+    try {
+      expect((await dropHoldRole(a)).status).toBe(200);
+      await expectNoHoldOutlivesItsStep();
+      expect(await holdRow(unstaffed.sendBackId)).toMatchObject({ status: "OPEN" }); // B is still on the step
+      expect((await dropHoldRole(b)).status).toBe(200);
+      await expectNoHoldOutlivesItsStep();
+      await superseded(unstaffed);
+    } finally {
+      await restoreUser(a);
+      await restoreUser(b);
+    }
+
+    // Every hold the seven POs ever had is closed.
+    for (const h of [edited, closed, cancelled, propagated, reshaped, roleStripped, unstaffed]) {
       expect((await sendBackRows(db, h.poId)).filter((r) => r.status === "OPEN")).toEqual([]);
     }
   });
@@ -475,26 +744,9 @@ describe("a hold never outlives its approval", () => {
     // The admin takes APPROVER_A's hold-step role away. Membership
     // revalidation removes A from L2; B is still on it, so the step and its
     // hold stay where they are.
-    const scopes = await db.any(
-      `SELECT role_id, company_id, hotel_id, department_id, process_id FROM tbl_user_role_scopes WHERE user_id = $1 ORDER BY id`,
-      [S.APPROVER_A]
-    );
-    const depts = (await db.any(`SELECT department_id FROM tbl_user_department WHERE user_id = $1`, [S.APPROVER_A]))
-      .map((r) => r.department_id);
-    const mappings = await db.any(
-      `SELECT hospitality_company_id, hospitality_hotel_id, mapping_type FROM tbl_hospitality_user_mappings WHERE user_id = $1`,
-      [S.APPROVER_A]
-    );
+    const a = await snapshotUser(S.APPROVER_A);
     try {
-      const res = await asCompanyAdmin((admin) => admin.put("/api/v1/users/update-user-detail").send({
-        user_id: S.APPROVER_A,
-        department_ids: depts,
-        confirmed_approval_impact: true,
-        roles: scopes.filter((s) => s.role_id !== ROLE_HOLD).map((s) => ({
-          role_id: s.role_id, company_id: s.company_id, hotel_id: s.hotel_id,
-          department_id: s.department_id, process_id: s.process_id,
-        })),
-      }));
+      const res = await dropHoldRole(a);
       expect(res.status).toBe(200);
       expect(await approversAt(h.instanceId, 2)).toEqual(
         [[S.APPROVER_A, "REMOVED"], [S.APPROVER_B, "PENDING"]].sort((a, b) => a[0] - b[0])
@@ -508,27 +760,7 @@ describe("a hold never outlives its approval", () => {
       expect((await world.approve(S.APPROVER_B, h.poId)).status).toBe(200);
       expect(await instanceRow(h.instanceId)).toMatchObject({ status: "PENDING", current_step: 3 });
     } finally {
-      // Put APPROVER_A back exactly as they were.
-      await db.none(`DELETE FROM tbl_user_role_scopes WHERE user_id = $1`, [S.APPROVER_A]);
-      for (const s of scopes) {
-        await db.none(
-          `INSERT INTO tbl_user_role_scopes (user_id, role_id, company_id, hotel_id, department_id, process_id)
-           VALUES ($1, $2, $3, $4, $5, $6)`,
-          [S.APPROVER_A, s.role_id, s.company_id, s.hotel_id, s.department_id, s.process_id]
-        );
-      }
-      await db.none(`DELETE FROM tbl_user_department WHERE user_id = $1`, [S.APPROVER_A]);
-      for (const d of depts) {
-        await db.none(`INSERT INTO tbl_user_department (user_id, department_id) VALUES ($1, $2)`, [S.APPROVER_A, d]);
-      }
-      await db.none(`DELETE FROM tbl_hospitality_user_mappings WHERE user_id = $1`, [S.APPROVER_A]);
-      for (const m of mappings) {
-        await db.none(
-          `INSERT INTO tbl_hospitality_user_mappings (user_id, hospitality_company_id, hospitality_hotel_id, mapping_type)
-           VALUES ($1, $2, $3, $4)`,
-          [S.APPROVER_A, m.hospitality_company_id, m.hospitality_hotel_id, m.mapping_type]
-        );
-      }
+      await restoreUser(a); // APPROVER_A exactly as they were
     }
   });
 
