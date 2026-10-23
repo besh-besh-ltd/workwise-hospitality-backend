@@ -1649,6 +1649,7 @@ const LIFECYCLE_LABELS = Object.freeze({
   AWAITING_PO: 'Awaiting PO',
   PO_APPROVAL: 'PO Approval',
   PO_VENDOR_REJECTED: 'PO Vendor Rejected',
+  PO_REJECTED: 'PO rejected by approver',
   APPROVED_COMPLETED: 'Completed',
 });
 const LIFECYCLE_ORDER = Object.keys(LIFECYCLE_LABELS);

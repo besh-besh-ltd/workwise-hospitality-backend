@@ -2,10 +2,10 @@ import db from "../../config/dbConn.js";
 import { logError } from "../../helper/common.js";
 import { logger } from '../../util/logger.js';
 import { removeMilestoneReminder, rescheduleMilestoneReminder, scheduleMilestoneReminder } from "../../helper/cronManager.js";
-import { executePoApprovalAtomically } from "../../services/poApprovalService.js";
+import { executePoApprovalAtomically, rejectPurchaseOrder, PoDecisionError } from "../../services/poApprovalService.js";
 import { writePoDocument, PoDocumentError } from "../../services/poDocumentService.js";
 import generalModel, { markPOStatusChange, getApprovalInstanceById, getApprovalInstanceDetails, recordLifecycleEvent, notifyNextApprovalStep } from "../../models/generalModel.js";
-import { createMilestone, createTask, deleteMilestone, deleteTask, getMilestonesByPOId, getPOByRFQId, getPODetailsById, getTasksByPOId, draftPurchaseOrder, updateMilestone, updateTask, initiatePurchaseOrder, updateGSTForPO, updateHSNCode, handleUpdatePO, handleRaiseInvoice, handleMarkDispatched, handleAddSiteRepresentative, handleMarkGRN, regeneratePODocument, mergeDraftPOs, assertPoAccess, assertPoInitiateAccess, assertRfqPoListingAccess, listPoInitiators, isAssignedPoApprover, getMilestoneParentPoId, getTaskParentPoId, PoAccessError, PoWritePermissionError } from "../../models/purchaseOrderModel.js";
+import { createMilestone, createTask, deleteMilestone, deleteTask, getMilestonesByPOId, getPOByRFQId, getPODetailsById, getTasksByPOId, draftPurchaseOrder, updateMilestone, updateTask, initiatePurchaseOrder, updateGSTForPO, updateHSNCode, handleUpdatePO, handleRaiseInvoice, handleMarkDispatched, handleAddSiteRepresentative, handleMarkGRN, regeneratePODocument, mergeDraftPOs, assertPoAccess, assertPoInitiateAccess, assertRfqPoListingAccess, listPoInitiators, isAssignedPoApprover, getMilestoneParentPoId, getTaskParentPoId, PoAccessError, PoWritePermissionError, PoFieldNotEditableError } from "../../models/purchaseOrderModel.js";
 import rfqModel from "../../models/rfqModel.js";
 import userModel from "../../models/userModel.js";
 import hospitalityModel from "../../models/hospitalityModel.js";
@@ -22,8 +22,7 @@ import { getPODetailFull } from "../../models/poDashboardModel.js";
 import { deriveScope } from "./poDashboardController.js";
 import { handleCallOffRejection, notifyCallOffRejected } from "../../services/callOffPoService.js";
 import { deferJson, isDeferred, sendDeferred } from "../../helper/deferredResponse.js";
-import { dispatch as dispatchNotification } from "../../services/notificationService.js";
-import { buyerPoDetail } from "../../services/notificationLinks.js";
+import { poFieldsFor } from "../../services/po/buyerOnlyPoFields.js";
 
 // Tiny tagged-error class for controllers that need to map a thrown
 // failure mode to a specific HTTP status code (instead of the historic
@@ -126,6 +125,8 @@ export const getPOByRFQ = async (req, res) => {
         }
 
         const result = await getPOByRFQId(rfq_id, id, user_type, page, limit, filters);
+        // Raw PO rows: a vendor's Order Book must not carry buyer-only fields.
+        if (result && Array.isArray(result.data)) result.data = poFieldsFor(req.user, result.data);
 
         return res.json(result);
 
@@ -152,7 +153,10 @@ export const getPODetails = async (req, res) => {
         // token and vendor paths working.
         if (!(await guardPo(req, res, po_id))) return;
 
-        const result = await getPODetailsById(po_id, id);
+        // Vendors and GRN token users get the row without buyer-only fields
+        // (replaces_po_id: the rejected PO this one re-awards, often another
+        // vendor's).
+        const result = poFieldsFor(req.user, await getPODetailsById(po_id, id));
 
         // Additively merge the new contract-shaped detail-full object under a
         // `detail` key so the new PO Detail page can consume the structured
@@ -164,7 +168,7 @@ export const getPODetails = async (req, res) => {
           try {
             const scope = await deriveScope(req);
             if (scope.hospitalityCompanyIds === null || (Array.isArray(scope.hospitalityCompanyIds) && scope.hospitalityCompanyIds.length > 0) || scope.companyId) {
-              detail = await getPODetailFull(po_id, scope);
+              detail = await getPODetailFull(po_id, scope, req.user);
             }
           } catch (augErr) {
             // Never fail the legacy response because of the augmentation.
@@ -256,6 +260,14 @@ export const updatePO = async (req, res) => {
       updated,
     });
   } catch (error) {
+      if (error instanceof PoFieldNotEditableError) {
+        return res.status(400).json({
+          status: 0,
+          message: error.message,
+          code: error.code,
+          field: error.field,
+        });
+      }
       logError(error);
       return res.status(500).json({
           status: 0,
@@ -581,7 +593,7 @@ export const mergePODrafts = async (req, res) => {
 export const approvePO = async (req, res) => {
   try {
     const { po_id } = req.params;
-    const { decision, remarks = '' } = req.body;
+    const { decision, remarks = '', reason_category, route } = req.body;
     const { id: userId, company_id } = req.user;
 
     if(!decision || !(Object.values(APPROVAL_DECISIONS).includes(decision))) {
@@ -636,6 +648,60 @@ export const approvePO = async (req, res) => {
     // cannot be produced now rolls the approval back and the approver is asked
     // to try again, which is the guarantee the client asked for.
     if (po.approval_instance_id) {
+      // ── REJECT ──────────────────────────────────────────────────────────
+      // One atomic rejection shared with the generic approval card: decision,
+      // status, de-finalization, the reason and the lifecycle row commit
+      // together, and the people who can act are told after COMMIT. An old
+      // client that sends only {decision, remarks} is stored as OTHER and
+      // COMMERCIAL (re-award).
+      if (decision !== 'approved') {
+        try {
+          const out = await rejectPurchaseOrder({
+            poId: Number(po_id),
+            approvalInstanceId: po.approval_instance_id,
+            user: req.user,
+            comment: remarks || '',
+            reason_category,
+            route,
+          });
+          const cancelled = out.route === 'CANCEL';
+          return res.status(200).json({
+            status: 1,
+            message: out.alreadyCompleted
+              ? 'This purchase order was already decided. Nothing changed.'
+              : cancelled
+              ? 'Purchase order cancelled as not needed.'
+              : 'Purchase order rejected. It is back in commercial evaluation for re-award.',
+            data: {
+              instance_status: out.result.instance_status,
+              step_status: out.result.status,
+              approval_type: 'new',
+              route: out.route,
+              reason_category: out.reasonCategory,
+              send_back_id: out.sendBackId,
+              already_completed: !!out.alreadyCompleted,
+              // True only when the service ran nothing (an approver's retry):
+              // the activity trail skips it (R26).
+              no_op: out.result?.no_op === true,
+            },
+          });
+        } catch (err) {
+          if (err instanceof PoDecisionError) {
+            return res.status(err.httpStatus).json({ status: 0, message: err.message, code: err.code });
+          }
+          // Rolled back: nothing about the rejection was recorded. The engine's
+          // own refusals ("not an approver for this step", ...) land here too,
+          // so its message is passed on, as this endpoint always did.
+          logError(`PO ${po_id} rejection rolled back`, err);
+          return res.status(500).json({
+            status: 0,
+            message: `The rejection was not recorded, so nothing has changed. ${err.message || ''}`.trim(),
+            code: 'PO_REJECTION_FAILED',
+          });
+        }
+      }
+
+      // ── APPROVE ─────────────────────────────────────────────────────────
       let actionResult;
       try {
         actionResult = await executePoApprovalAtomically(
@@ -643,7 +709,7 @@ export const approvePO = async (req, res) => {
             po_id: Number(po_id),
             approval_instance_id: po.approval_instance_id,
             approver_user_id: userId,
-            action: decision === 'approved' ? 'APPROVE' : 'REJECT',
+            action: 'APPROVE',
             comment: remarks || '',
           },
           {
@@ -656,19 +722,11 @@ export const approvePO = async (req, res) => {
             postAction: async (tx, result) => {
               if (result.instance_status === 'APPROVED') {
                 await handlePOPostApproval(po.approval_instance_id, userId, { txContext: tx });
-              } else if (result.instance_status === 'REJECTED') {
-                await tx.none(`
-                  UPDATE tbl_rfq_purchase_order SET status = 'rejected', updated_at = NOW() WHERE id = $1
-                `, [po_id]);
-                await handlePORejection(po, userId, tx);
               }
             },
 
             afterCommit: async (result) => {
               await notifyNextApprovalStep(po.approval_instance_id, result);
-              if (result.instance_status === 'REJECTED') {
-                await notifyPoSentBack(po_id, userId, remarks);
-              }
             },
           }
         );
@@ -681,6 +739,13 @@ export const approvePO = async (req, res) => {
         // problem or a dead connection also lands here, and telling someone to
         // approve again when the real problem is that they cannot would just be
         // a different kind of misleading.
+        // A refused approval (R25): the approval already concluded, is not the
+        // PO's current one, or the PO is no longer pending approval. Nothing
+        // changed; same shape as a refused rejection above.
+        if (err instanceof PoDecisionError) {
+          return res.status(err.httpStatus).json({ status: 0, message: err.message, code: err.code });
+        }
+
         logError(`PO ${po_id} approval rolled back`, err);
 
         if (err instanceof PoDocumentError) {
@@ -698,17 +763,18 @@ export const approvePO = async (req, res) => {
 
       return res.status(200).json({
         status: 1,
-        message:
-          actionResult.instance_status === 'APPROVED'
+        message: actionResult.already_completed
+          ? 'You already approved this purchase order. Nothing changed.'
+          : actionResult.instance_status === 'APPROVED'
             ? 'Purchase order approved and finalized.'
-            : actionResult.instance_status === 'REJECTED'
-            ? 'Purchase order rejected successfully.'
             : 'Approval action recorded, waiting for more approvers.',
         data: {
           instance_status: actionResult.instance_status,
           step_status: actionResult.status,
           next_step: actionResult.next_step,
           approval_type: 'new',
+          already_completed: !!actionResult.already_completed,
+          no_op: actionResult.no_op === true, // nothing ran; no activity row (R26)
         },
       });
     }
@@ -807,58 +873,6 @@ export const approvePO = async (req, res) => {
   }
 };
 
-/**
- * Send a rejected purchase order back to the person who can actually amend it.
- *
- * The reject dialog has always promised this — "will be rejected and returned
- * to the initiator" — and nothing did it. Production carries 46 rejected PO
- * approvals and exactly ONE PO that was ever resubmitted.
- *
- * Addressed to `tbl_rfq_purchase_order.initiated_by`, NOT to the approval
- * instance's `initiated_by`. Those are two different people: the second is
- * whoever pressed Initiate, the first is whoever created the draft — and
- * handleUpdatePO authorises only the first to edit it. The generic
- * approval-outcome notice (approvalActionService.notifyApprovalOutcome) still
- * tells the approval's initiator separately; this one tells the person with
- * work to do.
- *
- * Post-commit and never throws: a notification must not make a committed
- * rejection look like it failed.
- */
-export const notifyPoSentBack = async (po_id, rejectedBy, comment) => {
-  try {
-    const po = await db.oneOrNone(
-      `SELECT po.id, po.po_number, po.initiated_by, po.rfq_id, r.rfq_no
-         FROM tbl_rfq_purchase_order po
-         LEFT JOIN tbl_rfq r ON r.id = po.rfq_id
-        WHERE po.id = $1`,
-      [po_id]
-    );
-    if (!po || !po.initiated_by) return;
-    // They just rejected it themselves — a "sent back to you" from yourself is
-    // noise, and mirrors the same guard in notifyApprovalOutcome.
-    if (Number(po.initiated_by) === Number(rejectedBy)) return;
-
-    const label = `PO #${po.po_number || po.id}`;
-    await dispatchNotification({
-      userIds: [Number(po.initiated_by)],
-      senderUserId: rejectedBy || null,
-      category: 'po',
-      type: 'po_sent_back',
-      title: `Sent back to you: ${label}`,
-      body: comment
-        ? `${label} was rejected and returned to you to amend and resubmit — "${comment}"`
-        : `${label} was rejected and returned to you to amend and resubmit.`,
-      data: { po_id: po.id, rfq_id: po.rfq_id, rfq_no: po.rfq_no || null },
-      // Relative on purpose (rule 1 of notificationLinks): the stored row
-      // resolves against whichever origin the reader is on.
-      actionUrl: buyerPoDetail(po.id),
-    });
-  } catch (err) {
-    logError('PO sent-back notification failed', err);
-  }
-};
-
 export const handlePORejection = async (purchaseOrder, rejectedBy, t) => {
   try {
     if(!purchaseOrder) throw new Error("Purchase order is required to handle Reject Case")
@@ -941,8 +955,12 @@ export const handlePORejection = async (purchaseOrder, rejectedBy, t) => {
       }
     }
   } catch (error) {
-    logError(error);
-    return false;
+    // Rethrown, never swallowed: this runs inside the caller's transaction, and
+    // a failed statement has already aborted it. Returning normally let the
+    // caller report success while Postgres quietly turned its COMMIT into a
+    // ROLLBACK.
+    logError('PO rejection de-finalization failed', error);
+    throw error;
   }
 };
 
@@ -1115,53 +1133,48 @@ export const handlePOPostApproval = async (approval_instance_id, approver_user_i
 };
 
 /**
- * Instance-based wrapper around handlePORejection for use by the centralized
- * approval action service. The original handlePORejection takes a pre-loaded
- * PO object and a transaction context (because it's called from inside the
- * dedicated approvePO endpoint's transaction). This wrapper loads the PO row
- * from the approval instance, updates the PO status to 'rejected', and then
- * delegates the finalization-history cleanup to handlePORejection.
+ * The status flip and vendor de-finalization of a REJECTED PO approval, on the
+ * caller's transaction.
  *
- * Called by approvalActionService.executeApprovalAction whenever a PO
- * approval instance is rejected through any surface (generic action endpoint,
- * lifecycle journey, etc.).
+ * Called only by poApprovalService.executePoRejectionAtomically, after the
+ * REJECT decision was recorded on the same transaction. It used to open its own
+ * `db.tx` and run post-commit, so the decision and the de-finalization could
+ * commit separately, and its catch swallowed failures: a rejection could stand
+ * with the vendor still finalized and the caller told it had worked.
+ *
+ * Throws on any failure; the caller's transaction rolls everything back.
+ * Sends nothing: notifications are the caller's, after COMMIT.
  *
  * @param {number} approval_instance_id
  * @param {number} approver_user_id
- * @param {Object} [ctx]
- * @param {Object} [ctx.instance] - pre-loaded approval instance, optional
+ * @param {Object} ctx
+ * @param {Object} ctx.txContext - required; the transaction the decision is on
+ * @param {'rejected'|'cancelled'} [ctx.poStatus='rejected']
  */
 export const handlePORejectionByInstance = async (approval_instance_id, approver_user_id, ctx = {}) => {
-  try {
-    const instance = ctx.instance || await getApprovalInstanceById(approval_instance_id, 'PO');
-    if (!instance || instance.entity_type !== 'PO' || instance.status !== 'REJECTED') {
-      return;
-    }
+  const t = ctx.txContext;
+  if (!t) throw new Error('handlePORejectionByInstance requires the caller\'s transaction (ctx.txContext)');
+  const poStatus = ctx.poStatus || 'rejected';
+  if (!['rejected', 'cancelled'].includes(poStatus)) throw new Error(`Unsupported rejected PO status: ${poStatus}`);
 
-    const po_id = instance.entity_id;
-
-    await db.tx(async (t) => {
-      const purchaseOrder = await t.oneOrNone(`
-        SELECT id, approval_instance_id, status, rfq_id, finalized_vendor_id, rfq_product_id
-        FROM tbl_rfq_purchase_order WHERE id = $1
-      `, [po_id]);
-
-      if (!purchaseOrder) {
-        logger.error(`PO ${po_id} not found for rejected approval instance ${approval_instance_id}`);
-        return;
-      }
-
-      await t.none(`
-        UPDATE tbl_rfq_purchase_order SET status = 'rejected', updated_at = NOW() WHERE id = $1
-      `, [po_id]);
-
-      await handlePORejection(purchaseOrder, approver_user_id, t);
-    });
-    // Post-commit: the tx above owns the state change, this only tells someone.
-    await notifyPoSentBack(po_id, approver_user_id, ctx.comment);
-  } catch (error) {
-    logError('Error handling PO rejection by instance', error);
+  const instance = await getApprovalInstanceById(approval_instance_id, 'PO', t);
+  if (!instance || instance.entity_type !== 'PO' || instance.status !== 'REJECTED') {
+    throw new Error(`Approval instance ${approval_instance_id} is not a rejected PO approval`);
   }
+
+  const purchaseOrder = await t.oneOrNone(`
+    SELECT id, approval_instance_id, status, rfq_id, finalized_vendor_id, rfq_product_id
+    FROM tbl_rfq_purchase_order WHERE id = $1
+  `, [instance.entity_id]);
+  if (!purchaseOrder) {
+    throw new Error(`PO ${instance.entity_id} not found for rejected approval instance ${approval_instance_id}`);
+  }
+
+  await t.none(`
+    UPDATE tbl_rfq_purchase_order SET status = $2, updated_at = NOW() WHERE id = $1
+  `, [purchaseOrder.id, poStatus]);
+
+  await handlePORejection(purchaseOrder, approver_user_id, t);
 };
 
 /**

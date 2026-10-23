@@ -63,8 +63,9 @@ import {
 import moment from 'moment-timezone';
 import { deleteSchedule } from '../../helper/createSchedule.js';
 import { scheduleRfqPublish } from '../../helper/cronManager.js';
+import { notifyDraftCreated } from '../../services/po/poInitiateNotifier.js';
 import { draftPO, buildAuthoritativePOPayload } from '../po/purchaseOrderController.js';
-import { autoInitiateRFQPOs } from '../../models/purchaseOrderModel.js';
+import { autoInitiateRFQPOs, assertRfqPoListingAccess, PoAccessError } from '../../models/purchaseOrderModel.js';
 import { sendApprovalNotification } from '../po/purchaseOrderEmails.js';
 import UsersController from '../users/usersController.js';
 import { summaries } from '../../util/constants.js';
@@ -96,6 +97,10 @@ import { quoteGateApplies, assertOrgMayQuote, assertOrgMayClarify, memberRfqAssi
 import { lockLiveRfqAssignments, propagateRoutedCopiesLocked } from '../../services/vendorNetwork/subjects/rfqRoutedCopies.js';
 import { directInviteIdsForLine } from '../../services/vendorNetwork/directInvites.js';
 import { NetworkHttpError } from '../../services/vendorNetwork/guards.js';
+import { poFieldsFor, isVendorOrTokenViewer } from '../../services/po/buyerOnlyPoFields.js';
+import { closeOpenHoldTx, assertProductNotOnHeldPo } from '../../services/po/poHold.js';
+import { PoDecisionError } from '../../services/po/poDecisionError.js';
+import { quoteInSentence } from '../../helper/quoteInSentence.js';
 
 /** A Vendor Networks quote-gate refusal as its HTTP answer body. */
 const networkRefusalBody = (err) => ({ status: 0, message: err.message, ...(err.reason ? { reason: err.reason } : {}) });
@@ -8625,7 +8630,7 @@ const rfqController = {
       // sends the buyer to the edit/create flow instead of the stage page.
       const summaryP = (Number(rfq.status) === 0)
         ? Promise.resolve(null)
-        : rfqModel.getLifecycleSummary(rfqId, userId, { rfqRow });
+        : rfqModel.getLifecycleSummary(rfqId, userId, { rfqRow, user: req.user });
 
       // RFQ-scoped permissions (mirror ARC getLifecycle: rbac returns rows).
       const [permissions, summary] = await Promise.all([permissionsP, summaryP]);
@@ -8769,11 +8774,24 @@ const rfqController = {
         const lifecycleMap = await rfqModel.computeLifecycleStages([parseInt(rfqData.id)]);
         rfqData.lifecycle_stage = lifecycleMap[parseInt(rfqData.id)] || null;
 
+        // PO_REJECTED is internal: an approver turned a PO down. For a vendor
+        // or token user the RFQ is back in commercial evaluation, which is
+        // what is true for them; who evaluates is not theirs to read.
+        if (rfqData.lifecycle_stage === 'PO_REJECTED' && isVendorOrTokenViewer(req.user)) {
+          rfqData.lifecycle_stage = 'COMMERCIAL_EVALUATION';
+          rfqData.action_holders = null;
+          return;
+        }
+
         // Enrich with action holders (who can act at current lifecycle stage)
         if (rfqData.lifecycle_stage) {
           try {
             const actionHoldersMap = await rfqModel.getActionHoldersForRFQs([rfqData], lifecycleMap);
-            rfqData.action_holders = actionHoldersMap[parseInt(rfqData.id)] || null;
+            const holders = actionHoldersMap[parseInt(rfqData.id)] || null;
+            // This route also serves vendors (JWT and emailed-link token). The
+            // people asked for information on a held PO are buyer-internal:
+            // a vendor never learns that a PO is on hold.
+            rfqData.action_holders = holders?.kind === 'response' && isVendorOrTokenViewer(req.user) ? null : holders;
           } catch (err) {
             logError('Error fetching action holders for RFQ detail', err);
             rfqData.action_holders = null;
@@ -8803,14 +8821,22 @@ const rfqController = {
       // RFQ. Used by Quote Compare to surface why the vendor was de-finalized.
       // - rejection_type='vendor':   PO row status='rejected_by_vendor'.
       //   Reason from po.vendor_rejection_reason; rejected_by = the vendor.
-      // - rejection_type='approver': PO row status='rejected'. Reason and
+      // - rejection_type='approver': PO row status='rejected', or 'cancelled'
+      //   by an approver as not needed (route 'CANCEL'). Reason and
       //   rejecter pulled from the matching tbl_approval_actions REJECT row,
       //   joined via the PO's approval_instance_id.
       // Shared with the RFQ listing card (rfqModel.getLivePoRejectionsForRfqs)
       // so the re-award modal and the card cannot disagree about what counts.
-      const rejectionsP = Promise.resolve()
-        .then(() => rfqModel.getLivePoRejectionsForRfqs([rfqData.id]))
-        .catch((err) => { logError('Error fetching PO rejections for RFQ', err); return []; });
+      //
+      // BUYERS ONLY. This route also serves vendors (JWT and emailed-link
+      // token), and the rows name every vendor whose PO was rejected, why,
+      // and by whom. A vendor gets an empty list, and the query is not run.
+      const buyerOnlyHidden = isVendorOrTokenViewer(req.user);
+      const rejectionsP = buyerOnlyHidden
+        ? null
+        : Promise.resolve()
+          .then(() => rfqModel.getLivePoRejectionsForRfqs([rfqData.id]))
+          .catch((err) => { logError('Error fetching PO rejections for RFQ', err); return []; });
 
       // Attach close reason when RFQ is closed
       const closeCommentP = (rfqData && String(rfqData.status) === '2')
@@ -8844,7 +8870,7 @@ const rfqController = {
         rfqData.commercial_evaluators = [];
         rfqData.po_initiators = [];
       }
-      rfqData.vendor_rejections = rejections;
+      rfqData.vendor_rejections = buyerOnlyHidden ? [] : rejections;
       if (closeCommentP) rfqData.close_comment = closeComment;
 
       // Add tender payment status for vendor viewers (sourced from main query)
@@ -9189,7 +9215,7 @@ const rfqController = {
         AWAITING_QUOTES: 'ongoing', TECHNICAL_AWAITING_QUOTES: 'ongoing', TECHNICAL_EVALUATING: 'ongoing',
         TECHNICAL_APPROVING: 'ongoing', TECHNICAL_REJECTED: 'ongoing', RFQ_STUCK_TECHNICAL: 'ongoing',
         RFQ_STUCK_COMMERCIAL: 'ongoing', COMMERCIAL_EVALUATION: 'ongoing', NEGOTIATION_ONGOING: 'ongoing',
-        QUOTATION_APPROVAL: 'ongoing', AWAITING_PO: 'ongoing', PO_APPROVAL: 'ongoing', PO_VENDOR_REJECTED: 'ongoing',
+        QUOTATION_APPROVAL: 'ongoing', AWAITING_PO: 'ongoing', PO_APPROVAL: 'ongoing', PO_VENDOR_REJECTED: 'ongoing', PO_REJECTED: 'ongoing',
         APPROVED_COMPLETED: 'approved',
       };
       const statusKey = (r) => {
@@ -9266,6 +9292,12 @@ const rfqController = {
         }
         for (const p of (personalMap[parseInt(r.id)] || [])) {
           reasons.push({ kind: 'response', code: p.code, label: p.label, count: p.count ?? 1 });
+        }
+        // Every live PO on the RFQ is held and this user is the one asked:
+        // theirs is an answer, never an approval (they are not offered Approve
+        // below either: that needs type 'approval').
+        if (inHolders && holderKind === 'response') {
+          reasons.push({ kind: 'response', code: 'PO_INFO_REQUEST', label: holders.label || 'Asked for information', count: 1 });
         }
         if (inHolders && holderKind === 'evaluation') {
           reasons.push({
@@ -9388,12 +9420,17 @@ const rfqController = {
 
       // 8a. Heavy per-card columns (flags, counts, vendors json, can_edit),
       //     for this page only, in the same round trip as the 8b rejections.
+      // The rejection marker names vendors and approvers' reasons: buyers
+      // only. The route admits any signed-in user and a vendor's scope matches
+      // no rows today, but the marker does not rely on that.
       const [cardDetails, pageRejections] = await Promise.all([
         rfqModel.getRfqListViewCardDetails(pageRows.map((r) => r.id), user_id),
-        rfqModel.getLivePoRejectionsForRfqs(pageRows.map((r) => r.id)).catch((rejErr) => {
-          logError('getRfqListView: could not load PO rejections for the page', rejErr);
-          return [];
-        }),
+        isVendorOrTokenViewer(req.user)
+          ? []
+          : rfqModel.getLivePoRejectionsForRfqs(pageRows.map((r) => r.id)).catch((rejErr) => {
+            logError('getRfqListView: could not load PO rejections for the page', rejErr);
+            return [];
+          }),
       ]);
       for (const r of pageRows) Object.assign(r, cardDetails[Number(r.id)] || {});
 
@@ -9422,8 +9459,12 @@ const rfqController = {
         if (!entry?.latest) return null;
         const r = entry.latest;
         return {
+          po_id: r.po_id,
           po_number: r.po_number,
           rejection_type: r.rejection_type,
+          reason_category: r.reason_category ?? null,
+          // 'CANCEL': cancelled as not needed, nothing to re-award.
+          route: r.route ?? null,
           rejected_by_name: r.rejected_by_name,
           rejected_at: r.rejected_at,
           rejection_reason: r.rejection_reason,
@@ -11125,6 +11166,18 @@ const rfqController = {
 
       // Update RFQ status to CLOSED (2) and cancel ALL pending approvals tied to this RFQ.
       await db.tx(async t => {
+        // The RFQ's pending POs first, in id order, before any approval
+        // instance: the lock order every PO decision and hold uses (PO, then
+        // its instance). A hold cannot open or answer under us, and the holds
+        // closed below are closed on POs this transaction owns.
+        await t.any(
+          `SELECT id FROM tbl_rfq_purchase_order
+            WHERE rfq_id = $1 AND status = 'pending_approval'
+            ORDER BY id
+            FOR UPDATE`,
+          [rfq_id]
+        );
+
         await t.none(
           'UPDATE tbl_rfq SET status = 2, updated_by = $1 WHERE id = $2',
           [id, rfq_id]
@@ -11233,6 +11286,14 @@ const rfqController = {
                 WHERE id = $1 AND status = 'pending_approval'`,
               [instance.entity_id]
             );
+            // Nobody will answer for an approval that no longer exists: the
+            // hold closes with it, and the person asked is told after commit.
+            await closeOpenHoldTx(t, {
+              poId: Number(instance.entity_id),
+              status: 'CLOSED',
+              resolution: 'RFQ_CLOSED',
+              actorId: id,
+            });
           }
 
           cancelledInstances.push({
@@ -11771,12 +11832,34 @@ const rfqController = {
     }
   },
 
+  /**
+   * GET /rfq/get-existing-po?rfq_id=&vendor_id= — a vendor's draft POs on one RFQ.
+   *
+   * No frontend calls this (2026-10-22). It used to admit any signed-in user and
+   * return raw draft rows for whatever rfq_id and vendor_id the query named: a
+   * cross-tenant read. Now buyer-only (acl([2, 8]) on the route) and gated on
+   * the RFQ with the same fail-closed check GET /po/rfq/:rfq_id uses, so an
+   * RFQ outside the caller's scope (or no RFQ at all) is a 404 that does not
+   * reveal whether it exists. vendor_id only narrows the rows of an RFQ the
+   * caller can already read.
+   */
   getExistingPO: async (req, res) => {
     try {
       const { vendor_id, rfq_id } = req.query;
       const user = req.user;
 
-      const existingPOS = await rfqModel.getDraftPOByVendor(vendor_id, rfq_id, user);
+      try {
+        await assertRfqPoListingAccess(user, rfq_id);
+      } catch (gateErr) {
+        if (gateErr instanceof PoAccessError) {
+          return res.status(gateErr.status).json({ status: 2, message: gateErr.message, code: gateErr.code });
+        }
+        throw gateErr;
+      }
+
+      // Raw draft PO rows (SELECT PO.*). Buyers only reach here; the strip is
+      // a no-op for them and stays as a second line of defence.
+      const existingPOS = poFieldsFor(user, await rfqModel.getDraftPOByVendor(vendor_id, rfq_id, user));
 
       return res.json({
         status: 1, 
@@ -11910,6 +11993,15 @@ const rfqController = {
         // return 09 Conflict status code if vendor already exist for same product + variant,
 
         const response = await db.tx(async (t) => {
+          // A product on a PO that is on hold (an approver waiting on an
+          // answer) cannot be re-awarded: the re-draft would cancel that PO
+          // under them. Checked here, inside the transaction, after locking
+          // every pending-approval PO that carries the product, so no hold can
+          // open between the check and the draft. 409 PO_ON_HOLD.
+          if (rfqProductForNego) {
+            await assertProductNotOnHeldPo(t, { rfqProductId: rfqProductForNego.id, lock: true });
+          }
+
           // const userInHierarchy = t.oneOrNone(
           //   `SELECT * FROM tbl_approval_hierarchy
           //   WHERE company_id = $1 AND user_id = $2 AND hierarchy_type = $3 AND is_active = true`,
@@ -12372,6 +12464,8 @@ const rfqController = {
         // approvals), batch-initiate every draft PO spawned by this RFQ
         // now that the finalize transaction has committed. Wrapped in
         // try/catch so a failure here never breaks the finalize response.
+        // Post-commit: tell the initiators, only if this finalize CREATED the draft.
+        if (response.result?.created && response.result?.po_id) void notifyDraftCreated(response.result.po_id);
         let auto_initiate_summary = null;
         if (response.result?.should_auto_initiate && response.result?.rfq_id) {
           try {
@@ -12414,6 +12508,11 @@ const rfqController = {
           .end();
       }
     } catch (error) {
+      // A refused award (a product on a held PO) answers with its own status
+      // and code, the same body as every PO hold refusal.
+      if (error instanceof PoDecisionError) {
+        return res.status(error.httpStatus || 409).json({ status: 0, message: error.message, code: error.code });
+      }
       logError(error);
       res
         .status(400)
@@ -18438,7 +18537,8 @@ getClauses: async (req, res) => {
           category: 'clarification',
           type: 'clarification_raised',
           title: `Clarification raised on RFQ #${rfq.rfq_no}`,
-          body: `${vendorName?.name || 'A vendor'} asked: "${subject}". Quoting is paused for all vendors until you close it.`,
+          // The subject is usually a question: quoted so it keeps its own "?".
+          body: `${vendorName?.name || 'A vendor'} asked:${quoteInSentence(subject)} Quoting is paused for all vendors until you close it.`,
           data: { rfq_id: rfq.id, clarification_id: clarification.id },
           actionUrl: buyerClarifications(rfq.id) || buyerRfqDetail(rfq.id)
         });

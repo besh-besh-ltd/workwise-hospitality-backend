@@ -39,6 +39,7 @@ import {
   sendWorkbook,
   datedFilename,
 } from "./reports/excelKit.js";
+import { buildVendorPoReference } from "../helper/poReference.js";
 
 // These four used to be private to this file. The Reports module needs the
 // same IST mechanics and the same streaming contract, so they now live in
@@ -335,6 +336,7 @@ const VENDOR_COLUMNS = [
   { header: "PO #", key: "po_number", width: 20 },
   { header: "Status", key: "status", width: 18 },
   { header: "Order type", key: "type", width: 16 },
+  { header: "RFQ / Contract", key: "reference", width: 46 },
   { header: "Buyer", key: "buyer_name", width: 32 },
   { header: "Hotel", key: "hotel_name", width: 28 },
   { header: "Value (₹)", key: "total_value", width: 16, numFmt: MONEY, align: "right" },
@@ -351,6 +353,7 @@ export function buildVendorOrdersWorkbook({ rows, filters = [], generatedBy, tru
       po_number: p.po_number || `#${p.id}`,
       status: VENDOR_STATUS_LABELS[p.status] || (p.status ? String(p.status) : ""),
       type: p.is_call_off ? "Released Order" : "RFQ",
+      reference: buildVendorPoReference(p),
       buyer_name: p.buyer_name || "",
       hotel_name: p.hotel_name || "",
       total_value: p.total_value ?? null,

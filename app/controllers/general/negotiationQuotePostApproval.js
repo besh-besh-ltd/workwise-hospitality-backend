@@ -4,6 +4,7 @@ import {
   resetQuoteFinalizationForSendback,
 } from '../../models/generalModel.js';
 import { logError } from '../../helper/common.js';
+import { notifyDraftCreated } from '../../services/po/poInitiateNotifier.js';
 import { draftPO, buildAuthoritativePOPayload } from '../po/purchaseOrderController.js';
 import { autoInitiateRFQPOs } from '../../models/purchaseOrderModel.js';
 import rfqModel from '../../models/rfqModel.js';
@@ -70,6 +71,8 @@ export const handleNegotiationQuotePostApproval = async (approval_instance_id, a
           txContext: t
         });
       });
+      // Post-commit: tell the initiators, only if this call CREATED the draft.
+      if (txResult?.created && txResult?.po_id) void notifyDraftCreated(txResult.po_id);
       // Post-commit auto-initiate. The approver's action just landed the
       // final piece of the award puzzle; if the RFQ is now fully
       // awarded, batch-initiate all its draft POs.

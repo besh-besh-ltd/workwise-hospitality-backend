@@ -11,7 +11,7 @@ import { pgp } from './app/config/dbConn.js';
 // env config
 dotenv.config();
 
-import { rescheduleAllMilestoneReminders, rescheduleAllRfqPublishJobs, startVendorAcceptanceReminderCron, rescheduleAllNegotiationRoundExpirations, rescheduleAllArcNegotiationRoundExpirations, startRfqStuckPublishWatchdog, startNegotiationRoundClosureSweeper, startPoDocumentWatchdog, startVendorRoutingSweep } from './app/helper/cronManager.js';
+import { rescheduleAllMilestoneReminders, rescheduleAllRfqPublishJobs, startVendorAcceptanceReminderCron, rescheduleAllNegotiationRoundExpirations, rescheduleAllArcNegotiationRoundExpirations, startRfqStuckPublishWatchdog, startNegotiationRoundClosureSweeper, startPoDocumentWatchdog, startVendorRoutingSweep, startPoInitiateReminderCron } from './app/helper/cronManager.js';
 import { startArcAmendmentLifecycleCron } from './app/services/arcAmendmentLifecycleService.js';
 import { logger } from './app/util/logger.js';
 
@@ -24,6 +24,7 @@ const app = createApp();
 rescheduleAllMilestoneReminders();
 rescheduleAllRfqPublishJobs();
 startVendorAcceptanceReminderCron();
+startPoInitiateReminderCron();
 rescheduleAllNegotiationRoundExpirations();
 // Backstop for the one-shot in-memory jobs above, which are lost on any restart.
 startNegotiationRoundClosureSweeper();

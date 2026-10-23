@@ -63,6 +63,7 @@ import { ROLE_IDS } from "../fixtures/users.js";
 import { makeRFQ } from "../factories/rfq.js";
 import { httpClient } from "../helpers/http.js";
 import { grantRoleScope, revokeRoleScopes } from "../helpers/roleScope.js";
+import { drainPoRejectedNotifications } from "../../app/services/po/poRejectionNotifier.js";
 
 const READ_ONLY = IDS.users.a1_proc_commApp; // awarding.read only
 const CREATOR = IDS.users.a1_proc_buyer;     // rfq.read/boq.read only, PO.initiated_by
@@ -123,7 +124,10 @@ beforeEach(() => {
 });
 
 afterEach(async () => {
+  await drainPoRejectedNotifications();
   if (inserted.poIds.length) {
+    // A rejection records its reason here; the row references the PO and its approval.
+    await db.none(`DELETE FROM tbl_po_send_backs WHERE purchase_order_id = ANY($1::int[])`, [inserted.poIds]);
     const rows = await db.any(
       `SELECT approval_instance_id FROM tbl_rfq_purchase_order
         WHERE id = ANY($1::int[]) AND approval_instance_id IS NOT NULL`,
@@ -563,20 +567,23 @@ describe("the Action Required list agrees with the initiate gate", () => {
   });
 });
 
-// ── Sending a rejected PO back to the person who can amend it ───────────────
+// ── Telling the people who can act that a PO was rejected ───────────────────
 //
-// Client feedback item 7. The reject screen has always PROMISED this —
-// PODetail.js: "will be rejected and returned to the initiator" — and nothing
-// did it. Production carries 46 rejected PO approvals and exactly ONE PO that
-// was ever resubmitted; the rest simply stopped.
+// Client feedback item 7 first: the reject screen promised the PO would be
+// "returned to the initiator", and nothing told anyone. That fix sent a
+// "sent back to you: amend and resubmit" notice to the PO's originator.
 //
-// Two different people are involved and the code conflated them:
+// REVISED 2026-10-22 (client ticket T3). A rejected PO cannot be amended and
+// resubmitted: the rejection de-finalizes the vendor, so the product goes back
+// to commercial evaluation for re-award. The notice now says that, goes to the
+// RFQ creator, the PO creator and the commercial evaluators (here CREATOR is
+// both RFQ creator and PO creator, so exactly one notice), and links to Quote
+// Comparison. Who exactly, and the copy, are pinned in po.reject.reaward.test.js.
+//
+// Two different people are still involved and must not be conflated:
 //   tbl_approval_instances.initiated_by  — whoever pressed Initiate
-//   tbl_rfq_purchase_order.initiated_by  — whoever created the draft, and the
-//                                          ONLY person handleUpdatePO lets
-//                                          edit it
-// The generic approval-outcome notice goes to the first. The person who has to
-// act is the second.
+//   tbl_rfq_purchase_order.initiated_by  — whoever created the draft
+// The second is told; the first is not, by this notice.
 
 const notificationsFor = (userId, type) => db.any(
   `SELECT type, title, message, action_url, additional_data
@@ -604,12 +611,13 @@ async function initiateThenReject(po_id, comment = "Rates do not match the negot
   // (PODetail.decide → handlePOApproval({ decision, type, remarks })). The
   // generic /approval/action endpoint calls the same field `comment`.
   const res = await client.post(`/api/v1/po/approve/${po_id}`).send({ decision: "rejected", remarks: comment });
+  await drainPoRejectedNotifications();
   return { res, approverId: approver.uid };
 }
 
-describe("a rejected PO goes back to whoever can amend it", () => {
+describe("a rejected PO tells the people who can act on it", () => {
   beforeEach(async () => {
-    await db.none(`DELETE FROM tbl_notifications WHERE type = 'po_sent_back'`);
+    await db.none(`DELETE FROM tbl_notifications WHERE type IN ('po_rejected', 'po_sent_back')`);
   });
 
   it("notifies the PO's own originator, not only the approval's initiator", async () => {
@@ -619,36 +627,39 @@ describe("a rejected PO goes back to whoever can amend it", () => {
 
     expect(out.res.status).toBe(200);
 
-    // CREATOR is tbl_rfq_purchase_order.initiated_by (see makeDraftPo) and is
-    // the only person handleUpdatePO authorises to edit it.
-    const notes = await notificationsFor(CREATOR, "po_sent_back");
+    // CREATOR is tbl_rfq_purchase_order.initiated_by (see makeDraftPo) and the
+    // RFQ creator: told once.
+    const notes = await notificationsFor(CREATOR, "po_rejected");
     expect(notes.length).toBe(1);
+    // The old "amend and resubmit" notice is gone.
+    expect(await notificationsFor(CREATOR, "po_sent_back")).toHaveLength(0);
   });
 
-  it("tells them to amend and resubmit, and carries the reason", async () => {
+  it("says it is back in commercial evaluation, and carries the reason", async () => {
     const { po_id } = await makeDraftPo();
     const out = await initiateThenReject(po_id, "Freight is double the quote");
     if (!out) return;
 
-    const [note] = await notificationsFor(CREATOR, "po_sent_back");
-    expect(`${note.title} ${note.message}`).toMatch(/amend/i);
+    const [note] = await notificationsFor(CREATOR, "po_rejected");
+    expect(note.message).toMatch(/back in commercial evaluation for re-award/);
+    expect(note.message).not.toMatch(/amend/i);
     expect(note.message).toMatch(/Freight is double the quote/);
   });
 
-  it("deep-links to the purchase order, with a relative in-app url", async () => {
+  it("deep-links to quote comparison, with a relative in-app url", async () => {
     const { po_id } = await makeDraftPo();
     const out = await initiateThenReject(po_id);
     if (!out) return;
 
-    const [note] = await notificationsFor(CREATOR, "po_sent_back");
-    expect(note.action_url).toMatch(/purchase-order/);
+    const [note] = await notificationsFor(CREATOR, "po_rejected");
+    expect(note.action_url).toMatch(/quote-comparison/);
     // rule 1 of notificationLinks: an in-app row stays relative so it resolves
     // on local, staging and production alike.
     expect(note.action_url.startsWith("http")).toBe(false);
   });
 
   it("does not notify the originator when they are the one who rejected it", async () => {
-    // They already know; a "sent back to you" from yourself is noise.
+    // They already know; a notice from yourself is noise.
     const { po_id } = await makeDraftPo();
     await writerClient.post(`/api/v1/po/initiate/${po_id}`).send({});
     const inst = await db.one(
@@ -661,11 +672,12 @@ describe("a rejected PO goes back to whoever can amend it", () => {
           AND status = 'PENDING'`, [inst.id, CREATOR]);
     const client = await httpClient(CREATOR);
     await client.post(`/api/v1/po/approve/${po_id}`).send({ decision: "rejected", comment: "mine" });
+    await drainPoRejectedNotifications();
 
-    expect(await notificationsFor(CREATOR, "po_sent_back")).toHaveLength(0);
+    expect(await notificationsFor(CREATOR, "po_rejected")).toHaveLength(0);
   });
 
-  it("still marks the PO rejected — the send-back is additive", async () => {
+  it("still marks the PO rejected", async () => {
     const { po_id } = await makeDraftPo();
     const out = await initiateThenReject(po_id);
     if (!out) return;

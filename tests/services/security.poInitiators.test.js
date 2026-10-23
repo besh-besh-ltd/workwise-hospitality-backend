@@ -337,7 +337,7 @@ describe("a read-only user is given somewhere to go", () => {
 
     for (const i of res.body.data.initiators) {
       expect(Object.keys(i).sort()).toEqual(
-        ["email", "employee_code", "mobile", "name", "role_title", "user_id"]
+        ["email", "employee_code", "mobile", "name", "role_title", "scope_breadth", "user_id"]
       );
       expect(typeof i.user_id).toBe("number");
       expect(i.name).toBeTruthy();

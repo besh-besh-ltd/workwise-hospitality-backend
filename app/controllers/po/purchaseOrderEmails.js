@@ -1,3 +1,4 @@
+import { buildVendorPoReference, clampText } from "../../helper/poReference.js";
 import config from "../../config/app.config.js";
 import db from "../../config/dbConn.js";
 import { sendMail, logError } from "../../helper/common.js";
@@ -456,10 +457,14 @@ export const sendPOAcceptanceReminderToVendor = async (purchaseOrder, rfqDetails
     const computedTotal = products.reduce((sum, p) => sum + Number(p.total_price || 0), 0);
     const computedQuantity = products.reduce((sum, p) => sum + Number(p.quantity || 0), 0);
 
+    // Which RFQ / contract the order is for, so the vendor can tell orders
+    // apart from the inbox. Omitted entirely when nothing is known.
+    const reference = buildVendorPoReference({ ...rfqDetails, is_call_off: !!purchaseOrder.is_call_off });
+    const poLabel = reference ? `PO #${purchaseOrder.po_number} (${reference})` : `PO #${purchaseOrder.po_number}`;
     const subjects = {
-      1: `Gentle Reminder: PO #${purchaseOrder.po_number} awaiting your response`,
-      2: `Reminder: PO #${purchaseOrder.po_number} still requires your action`,
-      3: `Final Reminder: PO #${purchaseOrder.po_number} needs your immediate attention`,
+      1: `Gentle Reminder: ${poLabel} awaiting your response`,
+      2: `Reminder: ${poLabel} still requires your action`,
+      3: `Final Reminder: ${poLabel} needs your immediate attention`,
     };
 
     const tones = {
@@ -532,7 +537,8 @@ export const sendPOAcceptanceReminderToVendor = async (purchaseOrder, rfqDetails
       userIds: [vendor.id],
       category: 'po',
       type: `po_acceptance_reminder_${reminderNumber}`,
-      title: subjects[reminderNumber] || subjects[1],
+      // tbl_notifications.title is varchar(255): clamp so a long reference can never fail the insert.
+      title: clampText(subjects[reminderNumber] || subjects[1], 255),
       body: `PO #${purchaseOrder.po_number} still requires your action.`,
       data: { po_id: purchaseOrder.id, rfq_id: purchaseOrder.rfq_id, reminder: reminderNumber },
       actionUrl: linkPath
