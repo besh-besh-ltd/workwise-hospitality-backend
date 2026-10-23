@@ -1012,9 +1012,8 @@ const NegotiationController = {
         });
       }
 
-      // The caller must hold negotiation.create on this RFQ's tenant/hotel/
-      // department/process. (rfq.read is not enough, and negotiator roles do
-      // not carry it.)
+      // The caller needs rfq.read/boq.read OR negotiation.create on this RFQ's
+      // tenant/hotel/department/process scope.
       try {
         await assertRfqActionScope(user_id, 'negotiation.create', rfqData);
       } catch (err) {

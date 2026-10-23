@@ -16,41 +16,56 @@ const HC_B = IDS.hospitality.B;
 const A1 = IDS.hotels.A1;
 const B1 = IDS.hotels.B1;
 
+const ROLE_READ = 2; // Tender Creator: rfq.read, no negotiation.create
 const ROLE_NEG = 8; // Commercial Negotiator N1 — negotiation.create + quote-compare.create, no rfq.read
-const U_BUYER_A = 80961; // (HC_A, A1)
+const U_BUYER_A = 80991; // negotiator (HC_A, A1): negotiation.create, no rfq.read
+const U_READER_A = 80992; // rfq.read only (HC_A, A1)
 
+const PAST = new Date(Date.now() - 86_400_000).toISOString().replace("T", " ").slice(0, 19);
 const FUTURE = () => new Date(Date.now() + 5 * 86_400_000).toISOString();
 
 describe("Negotiation createRound / submit-for-approval — hardening", () => {
-  let buyerA, vendor, rfqB, rfqA;
+  let buyerA, readerA, vendor, rfqB, rfqA;
 
   beforeAll(async () => {
-    await db.none(
-      `INSERT INTO tbl_users (id, name, email, status, user_type, company_id, created_at, updated_at)
-       VALUES ($1, 'CR Sec Buyer A', 'negcreatesec.a@test.local', 1, 2, $2, now(), now())
-       ON CONFLICT (id) DO UPDATE SET user_type = 2, status = 1`,
-      [U_BUYER_A, IDS.companies.A]
-    );
-    await db.none(
-      `INSERT INTO tbl_hospitality_user_mappings
-         (user_id, hospitality_company_id, hospitality_hotel_id, mapping_type, created_by)
-       VALUES ($1, $2, $3, 1, $4)
-       ON CONFLICT ON CONSTRAINT uq_hospitality_user_mapping DO NOTHING`,
-      [U_BUYER_A, HC_A, A1, IDS.users.superAdmin]
-    );
-    await db.none(
-      `INSERT INTO tbl_user_role_scopes (user_id, role_id, company_id, hotel_id, department_id)
-       VALUES ($1, $2, $3, $4, NULL)`,
-      [U_BUYER_A, ROLE_NEG, HC_A, A1]
-    );
+    for (const [uid, roleId] of [[U_BUYER_A, ROLE_NEG], [U_READER_A, ROLE_READ]]) {
+      await db.none(
+        `INSERT INTO tbl_users (id, name, email, status, user_type, company_id, created_at, updated_at)
+         VALUES ($1, $2, $3, 1, 2, $4, now(), now())
+         ON CONFLICT (id) DO UPDATE SET user_type = 2, status = 1`,
+        [uid, `CR Sec ${uid}`, `negcreatesec.${uid}@test.local`, IDS.companies.A]
+      );
+      await db.none(
+        `INSERT INTO tbl_hospitality_user_mappings
+           (user_id, hospitality_company_id, hospitality_hotel_id, mapping_type, created_by)
+         VALUES ($1, $2, $3, 1, $4)
+         ON CONFLICT ON CONSTRAINT uq_hospitality_user_mapping DO NOTHING`,
+        [uid, HC_A, A1, IDS.users.superAdmin]
+      );
+      await db.none(
+        `INSERT INTO tbl_user_role_scopes (user_id, role_id, company_id, hotel_id, department_id)
+         VALUES ($1, $2, $3, $4, NULL)`,
+        [uid, roleId, HC_A, A1]
+      );
+    }
     rfqB = Number(
       (await makeRFQ(db, { createdBy: IDS.users.superAdmin, hospitality: HC_B, hotel: B1, title: "CRSEC-B" })).rfq_id
     );
     rfqA = Number(
-      (await makeRFQ(db, { createdBy: IDS.users.superAdmin, hospitality: HC_A, hotel: A1, title: "CRSEC-A" })).rfq_id
+      (await makeRFQ(db, { createdBy: IDS.users.superAdmin, hospitality: HC_A, hotel: A1, title: "CRSEC-A", bid_end_date: PAST })).rfq_id
     );
     buyerA = await httpClient(U_BUYER_A);
+    readerA = await httpClient(U_READER_A);
     vendor = await httpClient(IDS.users.vendor_alpha);
+  });
+
+  afterAll(async () => {
+    const users = [U_BUYER_A, U_READER_A];
+    await db.none(`DELETE FROM tbl_user_role_scopes WHERE user_id = ANY($1::int[])`, [users]);
+    await db.none(`DELETE FROM tbl_hospitality_user_mappings WHERE user_id = ANY($1::int[])`, [users]);
+    await db.none(`DELETE FROM tbl_users WHERE id = ANY($1::int[])`, [users]);
+    await db.none(`DELETE FROM tbl_negotiation_rounds WHERE rfq_id = ANY($1::int[])`, [[rfqA, rfqB]]);
+    await db.none(`DELETE FROM tbl_rfq WHERE id = ANY($1::int[])`, [[rfqA, rfqB]]);
   });
 
   const body = (rfq_id) => ({
@@ -81,10 +96,18 @@ describe("Negotiation createRound / submit-for-approval — hardening", () => {
     expect(after.n).toBe(before.n);
   });
 
-  test("an in-scope RFQ is not refused by the scope check", async () => {
+  test("a read-only buyer is refused on another tenant's RFQ with 403 and writes nothing", async () => {
+    const res = await readerA.post("/api/v1/negotiation/rounds").send(body(rfqB));
+    expect(res.status).toBe(403);
+    const n = await db.one(`SELECT count(*)::int AS n FROM tbl_negotiation_rounds WHERE rfq_id = $1`, [rfqB]);
+    expect(n.n).toBe(0);
+  });
+
+  test("an in-scope RFQ passes the scope check", async () => {
     const res = await buyerA.post("/api/v1/negotiation/rounds").send(body(rfqA));
-    expect(res.body.code).toBeUndefined();
-    expect(res.status).not.toBe(403);
+    // Past the scope check: the request now fails on the (deliberately absent) product.
+    expect(res.status).toBe(404);
+    expect(res.body).toEqual({ status: 2, message: "Product 1 not found in this RFQ" });
   });
 
   test("submit-for-approval rejects a non-integer rfq_id with 400", async () => {
@@ -105,5 +128,6 @@ describe("Negotiation createRound / submit-for-approval — hardening", () => {
   test("a vendor token cannot create a round", async () => {
     const res = await vendor.post("/api/v1/negotiation/rounds").send(body(rfqA));
     expect(res.status).toBe(403);
+    expect(res.body).toEqual({ message: "Insufficient permissions" });
   });
 });
