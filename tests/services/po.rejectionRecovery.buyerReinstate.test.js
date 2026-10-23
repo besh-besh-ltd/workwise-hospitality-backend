@@ -205,6 +205,29 @@ describe("buyer send-back — RFQ PO", () => {
     expect(internal.map((m) => m.to)).not.toContain("admin.a@test.local");
   });
 
+  it("the vendor-rejection notice and email lead to the PO page, with quote compare as the alternative", async () => {
+    sentMail.length = 0;
+    const s = await rejectedPo();
+    await settle();
+
+    const rows = await db.any(
+      `SELECT message, action_url FROM tbl_notifications
+        WHERE type = 'po_vendor_rejected' AND (additional_data->>'po_id') = $1`, [String(s.po_id)]);
+    expect(rows.length).toBeGreaterThan(0);
+    for (const r of rows) {
+      expect(r.action_url).toBe(`/dashboard/buyer/purchase-orders/${s.po_id}`);
+      expect(r.message).toMatch(/send it back to them from the PO page/);
+    }
+
+    const internal = sentMail.filter((m) => /PO Rejected by Vendor/.test(m.subject || ""));
+    expect(internal.length).toBeGreaterThan(0);
+    for (const m of internal) {
+      expect(m.html).toContain(`/dashboard/buyer/purchase-orders/${s.po_id}`);
+      expect(m.html).toContain("Go to Quote Compare");
+      expect(m.html).toContain(`/dashboard/buyer/quote-comparison`);
+    }
+  });
+
   it("a user without quote-compare.create gets 403 NOT_PERMITTED and nothing changes", async () => {
     const s = await rejectedPo();
     const { status, body } = await reinstate(s.po_id, NOTE, NO_QC);
