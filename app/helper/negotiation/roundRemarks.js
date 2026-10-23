@@ -24,3 +24,22 @@ export const stripInternalRoundFields = (round) => {
   const { creator_remarks, ...rest } = round; // eslint-disable-line no-unused-vars
   return rest;
 };
+
+// Remarks are untrusted text going into HTML mail: escape all five HTML
+// metacharacters first, then turn line breaks (CRLF, CR or LF) into <br>.
+export const escapeHtmlMultiline = (text) => {
+  if (text === undefined || text === null) return '';
+  return String(text)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;')
+    .replace(/\r\n|\r|\n/g, '<br>');
+};
+
+// The detail-list row shared by the approval-step and internal round emails.
+export const creatorRemarksRowHtml = (remarks) => {
+  if (typeof remarks !== 'string' || remarks.trim().length === 0) return '';
+  return `<li style="padding:4px 0;"><strong>Creator's remarks:</strong> ${escapeHtmlMultiline(remarks)}</li>`;
+};

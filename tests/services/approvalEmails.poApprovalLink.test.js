@@ -89,6 +89,6 @@ describe("PO approval email routing", () => {
   it("leaves RFQ-family identifiers and context unchanged", () => {
     const ctx = approvalStepEmailContext("NEGOTIATION_QUOTE", 5941, { rfq_id: 974, rfq_no: 536509, rfq_title: "Linen", product_name: "Towel" });
     expect(ctx.entityIdentifier).toBe(536509);
-    expect(ctx.extraContext).toEqual({ rfq_id: 974, rfq_title: "Linen", end_date: null, product_name: "Towel", company_name: "", hotel_name: "" });
+    expect(ctx.extraContext).toEqual({ rfq_id: 974, rfq_title: "Linen", end_date: null, product_name: "Towel", company_name: "", hotel_name: "", creator_remarks: null });
   });
 });

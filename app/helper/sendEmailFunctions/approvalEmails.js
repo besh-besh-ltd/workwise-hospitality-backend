@@ -1,6 +1,7 @@
 import config from "../../config/app.config.js";
 import { sendMail, logError } from "../common.js";
 import { generateEmailTemplate, emailButton } from "../notificationEmailLayout.js";
+import { creatorRemarksRowHtml } from "../negotiation/roundRemarks.js";
 import { logger } from '../../util/logger.js';
 import { dispatch as dispatchNotification, resolveRecipientUserIds } from "../../services/notificationService.js";
 import {
@@ -176,6 +177,7 @@ export const sendApprovalStepNotification = async ({
     const isNegotiationType = entityType === 'NEGOTIATION' || entityType === 'NEGOTIATION_QUOTE';
     const isNegotiationRound = entityType === 'NEGOTIATION';
     const rfqTitle = extraContext?.rfq_title || '';
+    const hasRemarks = (entityType === 'NEGOTIATION' || entityType === 'ARC_NEGOTIATION') && Boolean(extraContext?.creator_remarks);
     const productName = extraContext?.product_name || '';
     const companyName = extraContext?.company_name || '';
     const hotelName = extraContext?.hotel_name || '';
@@ -238,12 +240,14 @@ export const sendApprovalStepNotification = async ({
             ${isNegotiationRound && negotiationEndDateStr
               ? `<li style="padding:4px 0;"><strong>Negotiation End Date:</strong> ${negotiationEndDateStr} <span style="color:#64748B;">(Vendor to submit the revised quote before the mentioned date/time)</span></li>`
               : ''}
+            ${hasRemarks ? creatorRemarksRowHtml(extraContext.creator_remarks) : ''}
             <li style="padding:4px 0;"><strong>Initiated By:</strong> ${initiatorName || 'N/A'}</li>
           </ul>`
         : `<ul style="list-style:none; padding-left:0; margin-top:16px;">
             <li style="padding:4px 0;"><strong>Type:</strong> ${label}</li>
             <li style="padding:4px 0;"><strong>Identifier:</strong> #${entityIdentifier}</li>
             ${rfqTitle ? `<li style="padding:4px 0;"><strong>RFQ Title:</strong> ${rfqTitle}</li>` : ''}
+            ${hasRemarks ? creatorRemarksRowHtml(extraContext.creator_remarks) : ''}
             <li style="padding:4px 0;"><strong>Initiated By:</strong> ${initiatorName || 'N/A'}</li>
           </ul>`;
 
