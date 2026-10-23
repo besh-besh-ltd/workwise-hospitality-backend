@@ -91,6 +91,8 @@ describe("Negotiation createRound / submit-for-approval — hardening", () => {
     );
     const res = await buyerA.post("/api/v1/negotiation/rounds").send(body(rfqB));
     expect(res.status).toBe(403);
+    expect(res.body.data).toBeUndefined();
+    expect(res.body.message).toEqual(expect.stringMatching(/scope|permission|access/i));
     const after = await db.one(
       `SELECT count(*)::int AS n FROM tbl_negotiation_rounds WHERE rfq_id = $1`, [rfqB]
     );
@@ -100,6 +102,8 @@ describe("Negotiation createRound / submit-for-approval — hardening", () => {
   test("a read-only buyer is refused on another tenant's RFQ with 403 and writes nothing", async () => {
     const res = await readerA.post("/api/v1/negotiation/rounds").send(body(rfqB));
     expect(res.status).toBe(403);
+    expect(res.body.data).toBeUndefined();
+    expect(res.body.message).toEqual(expect.stringMatching(/scope|permission|access/i));
     const n = await db.one(`SELECT count(*)::int AS n FROM tbl_negotiation_rounds WHERE rfq_id = $1`, [rfqB]);
     expect(n.n).toBe(0);
   });
@@ -124,6 +128,8 @@ describe("Negotiation createRound / submit-for-approval — hardening", () => {
       rfq_id: rfqB, rfq_product_id: 1, quote_ids: [1],
     });
     expect(res.status).toBe(403);
+    expect(res.body.data).toBeUndefined();
+    expect(res.body.message).toEqual(expect.stringMatching(/scope|permission|access/i));
   });
 
   test("a vendor token cannot create a round", async () => {

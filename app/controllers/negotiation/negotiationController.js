@@ -17,7 +17,7 @@ import {
 } from '../../models/generalModel.js';
 import db, { pgp } from '../../config/dbConn.js';
 import { normalizeCreatorRemarks, stripInternalRoundFields } from '../../helper/negotiation/roundRemarks.js';
-import { assertCanReadParentRfq, assertUserHasScope, isAuthorizationError, sendScopeError } from '../../services/authorizationService.js';
+import { assertCanReadParentRfq, assertUserHasScope, isAuthorizationError } from '../../services/authorizationService.js';
 import { executeApprovalAction } from '../../services/approvalActionService.js';
 import { resolveHospitalityCompanyId, resolveHospitalityCompanyScope } from '../../helper/arc_v2/resolveHospitalityCompany.js';
 
@@ -89,12 +89,20 @@ const isMalformedRfqId = (raw, parsed) =>
 // permission but not rfq.read. Either one, within the RFQ's own tenant, hotel,
 // department and process, is enough; if neither holds, the read error is
 // returned.
+// Refusal for the RFQ-action scope checks. Same status/code/message as
+// sendScopeError, but without err.data, which carries the target RFQ's tenant
+// scope (company, hotel, department, process) that an out-of-scope caller must not see.
+const sendScopeRefusal = (res, err) =>
+  res.status(err.status).json({ status: 3, code: err.code, message: err.message });
+
 const assertRfqActionScope = async (userId, permission, rfqRow) => {
   try {
     await assertCanReadParentRfq(userId, rfqRow.id, db, { rfqRow });
   } catch (readErr) {
     if (!isAuthorizationError(readErr)) throw readErr;
     try {
+      // Callers must reject a NULL hospitality_company_id before calling this;
+      // unlike assertCanReadParentRfq, the fallback does not derive it from the hotel.
       await assertUserHasScope(userId, permission, {
         hospitality_company_id: rfqRow.hospitality_company_id,
         hotel_id: rfqRow.hotel_id,
@@ -1026,7 +1034,7 @@ const NegotiationController = {
       try {
         await assertRfqActionScope(user_id, 'negotiation.create', rfqData);
       } catch (err) {
-        if (isAuthorizationError(err)) return sendScopeError(res, err);
+        if (isAuthorizationError(err)) return sendScopeRefusal(res, err);
         throw err;
       }
 
@@ -1313,6 +1321,7 @@ const NegotiationController = {
             status: (updatedRound || round).status,
             vendor_ids: parsedVendorIds
           },
+          // Creator's internal note (audit trail only); must never be returned to vendors.
           remarks: creatorRemarks,
           txContext: t
         });
@@ -2671,7 +2680,7 @@ const NegotiationController = {
       try {
         await assertRfqActionScope(user_id, 'quote-compare.create', rfqData);
       } catch (err) {
-        if (isAuthorizationError(err)) return sendScopeError(res, err);
+        if (isAuthorizationError(err)) return sendScopeRefusal(res, err);
         throw err;
       }
 
