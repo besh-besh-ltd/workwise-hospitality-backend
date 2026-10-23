@@ -48,6 +48,28 @@ async function poStage(rfqId, who = S.INITIATOR) {
   return { current: res.body.data.current_status, phase: stage.phase, byId: (id) => pos.find((p) => Number(p.id) === Number(id)) };
 }
 
+/** The whole lifecycle payload, as `who` reads it. */
+async function lifecycleAs(rfqId, who) {
+  const res = await (await world.client(who)).get(`/api/v1/rfq/${rfqId}/lifecycle`);
+  expect(res.status).toBe(200);
+  expect(res.body.status).toBe(1);
+  return res.body.data;
+}
+const poOf = (lifecycle, poId) =>
+  (lifecycle.stages.find((s) => s.key === "purchase-order").phase.purchase_orders || []).find((p) => Number(p.id) === Number(poId));
+
+/** The RFQ list (first page of 100), as `who` sees it. */
+async function listView(who) {
+  const res = await (await world.client(who)).post("/api/v1/rfq/list-view").send({ page: 1, limit: 100 });
+  expect(res.status).toBe(200);
+  return res.body.data;
+}
+async function listRow(rfqId, who) {
+  const row = (await listView(who)).rows.find((x) => Number(x.id) === Number(rfqId));
+  expect(row).toBeDefined();
+  return row;
+}
+
 const ask = (who, poId, reason_category = "INFO_MISSING") =>
   world.sendBack(who, poId, { target_role: "RFQ_CREATOR", reason_category, comment: "Which floor is this for?" });
 
@@ -120,6 +142,110 @@ describe("RFQ lifecycle — a PO on hold", () => {
     expect(summary.status).toBe(403);
     expect(summary.body).toMatchObject({ status: 3, code: "PROCESS_NOT_IN_USER_SCOPE" });
     expect(summary.body).not.toHaveProperty("data.phases");
+  });
+
+  it("names the person asked, not the approvers, when the RFQ's only live PO is held", async () => {
+    // One PO, waiting at L2 on APPROVER_A or APPROVER_B (ANY). APPROVER_A asks
+    // the RFQ creator; APPROVER_B is the step's other approver and can read
+    // the RFQ.
+    const a = await world.poAtStep2();
+    const held = a.poId;
+    const { po_number: poNumber } = await db.one(`SELECT po_number FROM tbl_rfq_purchase_order WHERE id = $1`, [held]);
+    const target = { id: S.CREATOR, name: await world.nameOf(S.CREATOR) };
+    const sent = await ask(S.APPROVER_A, held);
+    expect(sent.status).toBe(201);
+
+    // Read by someone who is neither an approver nor the person asked: the
+    // work is with the person asked.
+    const view = await poStage(a.rfq.id);
+    expect(view.current).toBe("PO_APPROVAL");
+    const holders = view.phase.action_holders;
+    expect(holders).toMatchObject({ label: "Asked for information", kind: "response", decision_rule: null, step_id: null, instance_id: null });
+    expect(holders.type).not.toBe("approval");
+    expect(holders.users.map((u) => ({ id: u.id, name: u.name }))).toEqual([target]);
+    // The PO card names them as its current action taker.
+    expect(view.byId(held).current_actors).toEqual([{ user_id: target.id, name: target.name }]);
+    expect(view.byId(held).awaiting_me).toBe(false);
+
+    // The step's approver: not waiting on them, and the RFQ does not say it is.
+    const asApprover = await lifecycleAs(a.rfq.id, S.APPROVER_B);
+    const approversCard = poOf(asApprover, held);
+    expect(approversCard.awaiting_me).toBe(false);
+    expect(approversCard.current_actors).toEqual([{ user_id: target.id, name: target.name }]);
+    expect(asApprover.action).toMatchObject({ required: false, can_approve: false, label: null });
+
+    // The person asked is told what they were asked, never as an approver.
+    const asTarget = await lifecycleAs(a.rfq.id, S.CREATOR);
+    expect(asTarget.action).toMatchObject({
+      required: true,
+      can_approve: false,
+      label: `You were asked for information on PO ${poNumber}`,
+    });
+
+    // The RFQ list says the same, and files it under "needs your response",
+    // not under approvals.
+    const row = await listRow(a.rfq.id, S.CREATOR);
+    expect(row.action_holders).toEqual(holders);
+    expect(row).toMatchObject({ is_pending_for_me: true, pending_kind: "response", can_approve: false, approval_instance_id: null });
+    expect(row.pending_reasons).toContainEqual(expect.objectContaining({ kind: "response", label: "Asked for information" }));
+    expect(row.pending_reasons.map((x) => x.kind)).not.toContain("approval");
+    const before = (await listView(S.CREATOR)).tab_counts.pending_breakdown;
+    expect((await world.respond(S.CREATOR, sent.body.data.send_back.id, { response_text: "Third floor" })).status).toBe(200);
+    const after = (await listView(S.CREATOR)).tab_counts.pending_breakdown;
+    // Answering takes it off their response pile and puts nothing on their approvals.
+    expect(after.response).toBe(before.response - 1);
+    expect(after.approval).toBe(before.approval);
+
+    // Answered: the step's approvers are the ones to act again, as approvers.
+    const resumed = await poStage(a.rfq.id);
+    expect(resumed.phase.action_holders).toMatchObject({ label: "Pending Approvers", kind: "approval", type: "approval" });
+    const l2 = [S.APPROVER_A, S.APPROVER_B].sort((x, y) => x - y);
+    expect(resumed.phase.action_holders.users.map((u) => u.id).sort((x, y) => x - y)).toEqual(l2);
+    expect(resumed.byId(held).current_actors.map((x) => x.user_id).sort((x, y) => x - y)).toEqual(l2);
+    expect((await lifecycleAs(a.rfq.id, S.APPROVER_B)).action).toMatchObject({ required: true, can_approve: true });
+
+    // A vendor invited to the RFQ never learns a PO of theirs is held.
+    expect((await ask(S.APPROVER_A, held)).status).toBe(201);
+    const vendorView = await (await world.client(S.VENDOR_A)).get(`/api/v1/rfq/getRfqById/${a.rfq.id}`);
+    expect(vendorView.status).toBe(200);
+    expect(JSON.stringify(vendorView.body)).not.toMatch(/Asked for information|asked for information/);
+    const vendorHolders = vendorView.body.data?.action_holders?.users || [];
+    expect(vendorHolders.map((u) => Number(u.id))).not.toContain(S.CREATOR);
+  });
+
+  it("keeps the approvers of an unheld sibling PO as the RFQ's action holders", async () => {
+    // Two POs on one RFQ, both waiting at L2 on APPROVER_A or APPROVER_B.
+    const r = await pendingPos([S.VENDOR_A, S.VENDOR_B]);
+    for (const poId of r.poIds) {
+      const { approval_instance_id: inst } = await db.one(
+        `SELECT approval_instance_id FROM tbl_rfq_purchase_order WHERE id = $1`, [poId]);
+      await world.threeSteps(inst);
+      expect((await world.approve(S.PO_APPROVER, poId)).status).toBe(200);
+    }
+    const [held, other] = r.poIds;
+    expect((await ask(S.APPROVER_A, held)).status).toBe(201);
+    const targetName = await world.nameOf(S.CREATOR);
+    const l2 = [S.APPROVER_A, S.APPROVER_B].sort((x, y) => x - y);
+    const ids = (xs, key = "id") => xs.map((x) => x[key]).sort((x, y) => x - y);
+
+    const view = await poStage(r.rfq.id);
+    expect(view.phase.action_holders).toMatchObject({ label: "Pending Approvers", kind: "approval", type: "approval" });
+    expect(ids(view.phase.action_holders.users)).toEqual(l2);
+    expect(view.byId(held).current_actors).toEqual([{ user_id: S.CREATOR, name: targetName }]);
+    expect(ids(view.byId(other).current_actors, "user_id")).toEqual(l2);
+
+    // The approver still has the sibling to decide, and is told so.
+    const asApprover = await lifecycleAs(r.rfq.id, S.APPROVER_B);
+    expect(poOf(asApprover, other).awaiting_me).toBe(true);
+    expect(poOf(asApprover, held).awaiting_me).toBe(false);
+    const otherInstance = (await db.one(`SELECT approval_instance_id FROM tbl_rfq_purchase_order WHERE id = $1`, [other])).approval_instance_id;
+    expect(asApprover.action).toMatchObject({ required: true, can_approve: true, instance_id: otherInstance });
+
+    // The list matches the lifecycle; the person asked is not an approver here.
+    const row = await listRow(r.rfq.id, S.CREATOR);
+    expect(row.action_holders).toEqual(view.phase.action_holders);
+    expect(row.can_approve).toBe(false);
+    expect(row.pending_reasons.map((x) => x.kind)).not.toContain("approval");
   });
 
   it("approver pending count excludes the held PO; the target sees it under information_requests", async () => {

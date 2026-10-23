@@ -100,6 +100,7 @@ import { NetworkHttpError } from '../../services/vendorNetwork/guards.js';
 import { poFieldsFor, isVendorOrTokenViewer } from '../../services/po/buyerOnlyPoFields.js';
 import { closeOpenHoldTx, assertProductNotOnHeldPo } from '../../services/po/poHold.js';
 import { PoDecisionError } from '../../services/po/poDecisionError.js';
+import { quoteInSentence } from '../../helper/quoteInSentence.js';
 
 /** A Vendor Networks quote-gate refusal as its HTTP answer body. */
 const networkRefusalBody = (err) => ({ status: 0, message: err.message, ...(err.reason ? { reason: err.reason } : {}) });
@@ -8777,7 +8778,11 @@ const rfqController = {
         if (rfqData.lifecycle_stage) {
           try {
             const actionHoldersMap = await rfqModel.getActionHoldersForRFQs([rfqData], lifecycleMap);
-            rfqData.action_holders = actionHoldersMap[parseInt(rfqData.id)] || null;
+            const holders = actionHoldersMap[parseInt(rfqData.id)] || null;
+            // This route also serves vendors (JWT and emailed-link token). The
+            // people asked for information on a held PO are buyer-internal:
+            // a vendor never learns that a PO is on hold.
+            rfqData.action_holders = holders?.kind === 'response' && isVendorOrTokenViewer(req.user) ? null : holders;
           } catch (err) {
             logError('Error fetching action holders for RFQ detail', err);
             rfqData.action_holders = null;
@@ -9277,6 +9282,12 @@ const rfqController = {
         }
         for (const p of (personalMap[parseInt(r.id)] || [])) {
           reasons.push({ kind: 'response', code: p.code, label: p.label, count: p.count ?? 1 });
+        }
+        // Every live PO on the RFQ is held and this user is the one asked:
+        // theirs is an answer, never an approval (they are not offered Approve
+        // below either: that needs type 'approval').
+        if (inHolders && holderKind === 'response') {
+          reasons.push({ kind: 'response', code: 'PO_INFO_REQUEST', label: holders.label || 'Asked for information', count: 1 });
         }
         if (inHolders && holderKind === 'evaluation') {
           reasons.push({
@@ -18514,7 +18525,8 @@ getClauses: async (req, res) => {
           category: 'clarification',
           type: 'clarification_raised',
           title: `Clarification raised on RFQ #${rfq.rfq_no}`,
-          body: `${vendorName?.name || 'A vendor'} asked: "${subject}". Quoting is paused for all vendors until you close it.`,
+          // The subject is usually a question: quoted so it keeps its own "?".
+          body: `${vendorName?.name || 'A vendor'} asked:${quoteInSentence(subject)} Quoting is paused for all vendors until you close it.`,
           data: { rfq_id: rfq.id, clarification_id: clarification.id },
           actionUrl: buyerClarifications(rfq.id) || buyerRfqDetail(rfq.id)
         });

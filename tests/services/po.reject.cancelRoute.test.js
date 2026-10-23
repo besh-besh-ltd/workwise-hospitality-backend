@@ -102,4 +102,19 @@ describe("rejecting a PO as not needed", () => {
     const mails = sentMails.filter((m) => /cancelled by/i.test(m.subject || ""));
     expect(mails.map((m) => m.to)).toContain(creatorEmail);
   });
+
+  it("quotes a comment that already ends a sentence without a second full stop", async () => {
+    const a = await world.pendingPo();
+    const res = await world.rejectOnPoPage(a.poId, { remarks: "The outlet refurbishment was dropped!", reason_category: "NOT_REQUIRED" });
+    expect(res.status).toBe(200);
+    await drainPoRejectedNotifications();
+
+    const notes = await db.any(
+      `SELECT message FROM tbl_notifications WHERE (additional_data->>'po_id')::int = $1 AND type = 'po_cancelled'`, [a.poId]);
+    expect(notes.length).toBeGreaterThan(0);
+    for (const n of notes) {
+      expect(n.message).toContain(`Not needed any more. "The outlet refurbishment was dropped!" It was cancelled as not needed.`);
+      expect(n.message).not.toMatch(/[.!?]"\./);
+    }
+  });
 });

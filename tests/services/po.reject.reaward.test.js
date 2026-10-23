@@ -212,6 +212,25 @@ describe("re-award after a PO rejection", () => {
     expect(rejectionMails.filter((m) => m.to === emailOf.get(W.INITIATOR))).toHaveLength(1);
   });
 
+  it("quotes a comment that already ends a sentence without a second full stop", async () => {
+    const a = await pendingPoWithAlternative();
+    const po = await db.one(`SELECT po_number FROM tbl_rfq_purchase_order WHERE id = $1`, [a.poId]);
+    const res = await world.rejectOnPoPage(a.poId, { remarks: "GST shown twice on line 3.", reason_category: "PRICE_TAX_QUERY" });
+    expect(res.status).toBe(200);
+    await drainPoRejectedNotifications();
+
+    const rows = await db.any(
+      `SELECT message FROM tbl_notifications WHERE (additional_data->>'po_id')::int = $1 AND type = 'po_rejected'`, [a.poId]);
+    expect(rows.length).toBeGreaterThan(0);
+    const approverName = (await db.one(`SELECT name FROM tbl_users WHERE id = $1`, [W.PO_APPROVER])).name;
+    for (const r of rows) {
+      expect(r.message).toBe(
+        `PO ${po.po_number} was rejected by ${approverName}: Question on price, GST or calculation. ` +
+        `"GST shown twice on line 3." It is back in commercial evaluation for re-award.`
+      );
+    }
+  });
+
   it("tells an approval initiator who also created the PO once, not twice", async () => {
     // INITIATOR raises the award approval, so they create the PO, and then
     // presses Initiate on it too.

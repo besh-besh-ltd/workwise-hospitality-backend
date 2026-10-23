@@ -1513,7 +1513,9 @@ export async function getPODetailFull(po_id, scope, viewer = null) {
       business_unit: po.business_unit || null,
       department: po.department_name || null,
       finalized_by: rfqCreator ? rfqCreator.name : null,
-      finalized_date: po.instance_completed_at ? new Date(po.instance_completed_at).toISOString() : null,
+      // Only an approved PO's approval date stands in here: a rejection or a
+      // cancellation is not when the vendor selection was finalized.
+      finalized_date: approvedAt(po) ? new Date(approvedAt(po)).toISOString() : null,
       vendors_invited: null, // not derivable from PO scope
       vendors_participated: rfqStats ? rfqStats.participated : 0,
       rounds: null, // negotiation round count not derivable cleanly here
@@ -1607,11 +1609,20 @@ function humanizeStatus(status) {
   return map[status] || status;
 }
 
+// The approval's completed_at is when it ENDED, whichever way: approved,
+// rejected by an approver, or cancelled. Name the date by that outcome; a
+// rejected PO used to read "Approved <date>".
+const APPROVAL_OUTCOME_LABEL = Object.freeze({ APPROVED: "Approved", REJECTED: "Rejected", CANCELLED: "Cancelled" });
+
+/** When the PO's approval was APPROVED, or null for any other outcome. */
+const approvedAt = (po) => (po.instance_status === "APPROVED" ? po.instance_completed_at || null : null);
+
 function buildKeyDates(po, milestones) {
   const dates = [];
   if (po.created_at) dates.push({ k: "Created", v: new Date(po.created_at).toISOString(), soon: false });
-  if (po.instance_completed_at)
-    dates.push({ k: "Approved", v: new Date(po.instance_completed_at).toISOString(), soon: false });
+  const outcome = APPROVAL_OUTCOME_LABEL[po.instance_status];
+  if (outcome && po.instance_completed_at)
+    dates.push({ k: outcome, v: new Date(po.instance_completed_at).toISOString(), soon: false });
   if (po.vendor_action_at)
     dates.push({ k: "Vendor Action", v: new Date(po.vendor_action_at).toISOString(), soon: false });
   const nextMilestone = milestones.find((m) => m.due_date && new Date(m.due_date) >= new Date());
@@ -2009,7 +2020,9 @@ async function buildAuditTrail(po, docRows = [], { isVendorView = false } = {}) 
 
   const lifecycle = [];
   if (!approvalRejected && status !== "rejected" && status !== "cancelled") {
-    lifecycle.push({ title: "Sent to vendor", by: po.vendor_name || null, when: iso(po.instance_completed_at), done: sentDone });
+    // Sent when the approval was approved. A cancelled approval leaves the PO
+    // here too (pending_approval), and its end is not a send.
+    lifecycle.push({ title: "Sent to vendor", by: po.vendor_name || null, when: iso(approvedAt(po)), done: sentDone });
     if (isRejectedVendor) {
       lifecycle.push({
         title: "Vendor rejected the PO",

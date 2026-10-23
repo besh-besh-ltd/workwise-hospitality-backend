@@ -542,7 +542,7 @@ describe("a hold never outlives its approval", () => {
     await drainPoSendBackNotifications();
     const told = await notificationsFor(h.poId, "po_send_back_closed");
     expect(told.map((n) => n.recipient_user_id)).toEqual([S.CREATOR]);
-    expect(told[0].message).toContain(closedCopy((await poRow(h.poId)).po_number, "the approval was restarted"));
+    expect(told[0].message).toContain(closedCopy((await poRow(h.poId)).po_number, "the approval steps for this PO changed"));
 
     // The new current step's approver can decide: nothing is holding it.
     const ok = await world.approve(L3_APPROVER, h.poId);
@@ -557,6 +557,13 @@ describe("a hold never outlives its approval", () => {
     expect(await instanceRow(h.instanceId)).toMatchObject({ status: "CANCELLED" });
     expect(await holdRow(h.sendBackId)).toMatchObject({ status: "SUPERSEDED", resolution: "PO_SUPERSEDED", closed: true });
     await expectNoHoldOutlivesItsStep();
+
+    // Nothing was restarted: the person asked hears it was cancelled.
+    await drainPoSendBackNotifications();
+    const told = await notificationsFor(h.poId, "po_send_back_closed");
+    expect(told.map((n) => n.recipient_user_id)).toEqual([S.CREATOR]);
+    expect(told[0].message).toContain(closedCopy((await poRow(h.poId)).po_number, "the approval was cancelled"));
+    expect(told[0].message).not.toMatch(/restarted/);
   });
 
   it("a role that can no longer approve retires the held step, and the hold with it", async () => {
@@ -574,7 +581,7 @@ describe("a hold never outlives its approval", () => {
     await drainPoSendBackNotifications();
     const told = await notificationsFor(h.poId, "po_send_back_closed");
     expect(told.map((n) => n.recipient_user_id)).toEqual([S.CREATOR]);
-    expect(told[0].message).toContain(closedCopy((await poRow(h.poId)).po_number, "the approval was restarted"));
+    expect(told[0].message).toContain(closedCopy((await poRow(h.poId)).po_number, "the approval steps for this PO changed"));
 
     expect((await world.approve(L3_APPROVER, h.poId)).status).toBe(200);
     expect(await instanceRow(h.instanceId)).toMatchObject({ status: "APPROVED" });
@@ -600,7 +607,7 @@ describe("a hold never outlives its approval", () => {
       await drainPoSendBackNotifications();
       const told = await notificationsFor(h.poId, "po_send_back_closed");
       expect(told.map((n) => n.recipient_user_id)).toEqual([S.CREATOR]);
-      expect(told[0].message).toContain(closedCopy((await poRow(h.poId)).po_number, "the approval was restarted"));
+      expect(told[0].message).toContain(closedCopy((await poRow(h.poId)).po_number, "the approval steps for this PO changed"));
 
       expect((await world.approve(L3_APPROVER, h.poId)).status).toBe(200);
       expect(await instanceRow(h.instanceId)).toMatchObject({ status: "APPROVED" });
@@ -624,6 +631,7 @@ describe("a hold never outlives its approval", () => {
     await drainPoSendBackNotifications();
     const told = await notificationsFor(h.poId, "po_send_back_closed");
     expect(told.map((n) => n.recipient_user_id)).toEqual([S.CREATOR]);
+    expect(told[0].message).toContain(closedCopy((await poRow(h.poId)).po_number, "the approval steps for this PO changed"));
 
     // Nothing holds the step any more, and under ALL one approval does not decide it.
     expect((await world.approve(S.APPROVER_A, h.poId)).status).toBe(200);

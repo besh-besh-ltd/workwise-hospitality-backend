@@ -345,6 +345,31 @@ describe("request-info hold", () => {
     ]);
   });
 
+  it("each notice quotes the comment once, with one full stop whatever it ends with", async () => {
+    const a = await heldAtStep2();
+    expect((await world.respond(S.CREATOR, a.sendBack.id, { response_text: "Attached all six." })).status).toBe(200);
+    const second = await world.sendBack(S.APPROVER_B, a.poId, {
+      target_role: "RFQ_CREATOR", reason_category: "QTY_SPEC_CHANGE", comment: "Is 50 still right?",
+    });
+    expect(second.status).toBe(201);
+    await drainPoSendBackNotifications();
+
+    const po = await db.one(`SELECT po_number FROM tbl_rfq_purchase_order WHERE id = $1`, [a.poId]);
+    const asked = (await notificationsFor(a.poId, "po_send_back_requested")).map((n) => n.message);
+    // A comment with no closing punctuation gets the sentence's full stop ...
+    expect(asked).toContainEqual(expect.stringContaining(
+      `Photos or documents missing. "Please attach the site photos". The approval waits until you answer.`));
+    // ... and one that already ends a sentence keeps its own, alone.
+    expect(asked).toContainEqual(expect.stringContaining(
+      `Quantity or specification needs a change. "Is 50 still right?" The approval waits until you answer.`));
+    const answered = (await notificationsFor(a.poId, "po_send_back_answered")).map((n) => n.message);
+    expect(answered.length).toBeGreaterThan(0);
+    for (const m of answered) {
+      expect(m).toContain(`PO ${po.po_number} (RFQ ${a.rfq.rfq_no}). "Attached all six." The approval can continue.`);
+    }
+    for (const m of [...asked, ...answered]) expect(m).not.toMatch(/[.!?]"\./);
+  });
+
   it("withdraw by the other step-2 approver reopens the step", async () => {
     const a = await heldAtStep2();
 

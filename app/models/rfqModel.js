@@ -5479,6 +5479,12 @@ LIMIT 2;
       PO_REJECTED:               { resource: 'awarding',      actions: ['read', 'create'], useDepartment: false, label: 'PO initiator' },
     };
     const APPROVAL_LABEL = 'Pending Approvers';
+    // PO_APPROVAL with every live PO on hold: the work is with the people asked
+    // for information. They answer; they are not approvers, so this is not an
+    // 'approval' entry (nothing that tallies approvals or offers Approve may
+    // count them) but a 'response' one, the "Pending for me" group for a
+    // question someone is waiting on.
+    const HOLD_LABEL = 'Asked for information';
 
     const result = {};
 
@@ -5529,7 +5535,7 @@ LIMIT 2;
           params.push(rfqApprovalIds);
           cteParts.push(`
             SELECT ai.entity_id AS rfq_id, u.id AS user_id, u.name, u.email, ais.decision_rule,
-                   ai.id AS instance_id, ai.entity_type, ais.id AS step_id
+                   ai.id AS instance_id, ai.entity_type, ais.id AS step_id, FALSE AS held
             FROM tbl_approval_instances ai
             JOIN tbl_approval_instance_steps ais ON ais.approval_instance_id = ai.id AND ais.step_order = ai.current_step
             JOIN tbl_approval_step_approvers asa ON asa.approval_instance_step_id = ais.id AND asa.status = 'PENDING'
@@ -5545,7 +5551,7 @@ LIMIT 2;
           params.push(techApprovingIds);
           cteParts.push(`
             SELECT (ai.metadata->>'rfq_id')::int AS rfq_id, u.id AS user_id, u.name, u.email, ais.decision_rule,
-                   ai.id AS instance_id, ai.entity_type, ais.id AS step_id
+                   ai.id AS instance_id, ai.entity_type, ais.id AS step_id, FALSE AS held
             FROM tbl_approval_instances ai
             JOIN tbl_approval_instance_steps ais ON ais.approval_instance_id = ai.id AND ais.step_order = ai.current_step
             JOIN tbl_approval_step_approvers asa ON asa.approval_instance_step_id = ais.id AND asa.status = 'PENDING'
@@ -5562,7 +5568,7 @@ LIMIT 2;
           params.push(quoteApprovalIds);
           cteParts.push(`
             SELECT (ai.metadata->>'rfq_id')::int AS rfq_id, u.id AS user_id, u.name, u.email, ais.decision_rule,
-                   ai.id AS instance_id, ai.entity_type, ais.id AS step_id
+                   ai.id AS instance_id, ai.entity_type, ais.id AS step_id, FALSE AS held
             FROM tbl_approval_instances ai
             JOIN tbl_approval_instance_steps ais ON ais.approval_instance_id = ai.id AND ais.step_order = ai.current_step
             JOIN tbl_approval_step_approvers asa ON asa.approval_instance_step_id = ais.id AND asa.status = 'PENDING'
@@ -5579,7 +5585,7 @@ LIMIT 2;
           params.push(poApprovalIds);
           cteParts.push(`
             SELECT (ai.metadata->>'rfq_id')::int AS rfq_id, u.id AS user_id, u.name, u.email, ais.decision_rule,
-                   ai.id AS instance_id, ai.entity_type, ais.id AS step_id
+                   ai.id AS instance_id, ai.entity_type, ais.id AS step_id, FALSE AS held
             FROM tbl_approval_instances ai
             JOIN tbl_approval_instance_steps ais ON ais.approval_instance_id = ai.id AND ais.step_order = ai.current_step
             JOIN tbl_approval_step_approvers asa ON asa.approval_instance_step_id = ais.id AND asa.status = 'PENDING'
@@ -5591,16 +5597,59 @@ LIMIT 2;
               -- A PO on hold waits on the person asked, not on its approvers.
               AND ${instanceNotHeldSql('ai')}
           `);
+          // One row per live PO approval of these RFQs: held → the person asked
+          // (held = TRUE); not held → a marker with no user (held = FALSE), so a
+          // live approval with nobody pending still counts as not held. Same
+          // statement as the approver rows: no extra round trip.
+          cteParts.push(`
+            SELECT (ai.metadata->>'rfq_id')::int AS rfq_id, u.id AS user_id, u.name, u.email, NULL AS decision_rule,
+                   ai.id AS instance_id, ai.entity_type, NULL AS step_id, (hold.target_user_id IS NOT NULL) AS held
+            FROM tbl_approval_instances ai
+            LEFT JOIN LATERAL (
+              SELECT sb.target_user_id
+                FROM tbl_po_send_backs sb
+               WHERE sb.purchase_order_id = ai.entity_id AND sb.status = 'OPEN'
+               ORDER BY sb.id DESC
+               LIMIT 1
+            ) hold ON TRUE
+            LEFT JOIN tbl_users u ON u.id = hold.target_user_id
+            WHERE ai.entity_type = 'PO'
+              AND ai.status = 'PENDING'
+              AND metadata->>'rfq_id' IS NOT NULL
+              AND (ai.metadata->>'rfq_id')::int = ANY($${paramIdx}::int[])
+          `);
           paramIdx++;
         }
+
+        const holdHolders = (users) => ({
+          type: 'information', kind: 'response', label: HOLD_LABEL, users,
+          // No approval to route anyone to, and no step whose role names them.
+          decision_rule: null, instance_id: null, entity_type: 'PO', step_id: null,
+        });
 
         if (cteParts.length > 0) {
           const sql = cteParts.join(' UNION ') + ' ORDER BY rfq_id, name';
           const rows = await db.any(sql, params);
 
-          // Group by rfq_id
+          // Group by rfq_id. PO rows are sorted first: the people asked on
+          // held POs, and which RFQs have a live PO approval that is not held.
           const grouped = {};
+          const holdTargets = new Map();
+          const unheldPo = new Set();
           for (const row of rows) {
+            if (row.entity_type === 'PO') {
+              const rfqId = Number(row.rfq_id);
+              if (row.held) {
+                if (!holdTargets.has(rfqId)) holdTargets.set(rfqId, []);
+                const targets = holdTargets.get(rfqId);
+                if (row.user_id != null && !targets.some((u) => u.id === row.user_id)) {
+                  targets.push({ id: row.user_id, name: row.name, email: row.email });
+                }
+                continue;
+              }
+              unheldPo.add(rfqId);
+              if (row.user_id == null) continue; // the not-held marker: names nobody
+            }
             if (!grouped[row.rfq_id]) {
               grouped[row.rfq_id] = {
                 users: [],
@@ -5620,6 +5669,11 @@ LIMIT 2;
           }
 
           for (const rfq of approvalRfqs) {
+            // Every live PO approval held: the people asked act now.
+            if (rfq.stage === 'PO_APPROVAL' && holdTargets.has(rfq.id) && !unheldPo.has(rfq.id)) {
+              result[rfq.id] = holdHolders(holdTargets.get(rfq.id));
+              continue;
+            }
             result[rfq.id] = {
               type: 'approval',
               // `kind` is the "Pending for me" grouping axis. `type` is kept
@@ -6701,7 +6755,12 @@ LIMIT 2;
           // payload, so user_id is null — the tile names the company, not a
           // person to chase. Always an array; never null.
           let currentActors = [];
-          if (inst?.status === 'PENDING') {
+          if (inst?.status === 'PENDING' && po.hold_id) {
+            // Held: the step's approvers cannot decide it until the person
+            // asked answers (or the request is withdrawn), so that person is
+            // who acts now. The approval counts above still count approvers only.
+            currentActors = [{ user_id: Number(po.hold_target_id), name: po.hold_target_name || null }];
+          } else if (inst?.status === 'PENDING') {
             currentActors = pendingApprovers.map(a => ({ user_id: a.user_id, name: a.user_name || null }));
           } else if (awaitingVendorAcceptance || withVendor) {
             const vendorLabel = po.vendor_company || po.vendor_name;
@@ -7005,11 +7064,17 @@ LIMIT 2;
       let userApprovalStepId = null;
       let userApprovalEntityType = null;
 
+      // A held PO's approvers cannot decide it until the person asked answers,
+      // so its instance does not put an approval in front of them here. (The
+      // instance keeps can_user_approve: it is also what lets an approver with
+      // no module role open the PO stage to see, or withdraw, the hold.)
+      const heldPoIds = new Set(poData.filter(p => p.hold_id).map(p => Number(p.id)));
       for (const phase of phases) {
         if (!phase.approval_instances) continue;
         // Skip expired phases — the approval is stale (e.g. auto-published RFQ)
         if (phase.status === 'expired') continue;
         for (const inst of phase.approval_instances) {
+          if (inst.entity_type === 'PO' && heldPoIds.has(Number(inst.entity_id))) continue;
           if (inst.can_user_approve && inst.status === 'PENDING') {
             userCanApprove = true;
             userApprovalInstanceId = inst.id;
@@ -7047,7 +7112,20 @@ LIMIT 2;
         !NON_ACTIONABLE_STAGES.has(currentStage)
       ) {
         const isCurrentUserActionHolder = currentActionHolders.users.some(u => parseInt(u.id) === parseInt(userId));
-        if (isCurrentUserActionHolder) {
+        if (isCurrentUserActionHolder && currentActionHolders.kind === 'response') {
+          // Asked for information on a held PO: say which, not "You are a …".
+          userActionRequired = true;
+          userActionType = 'response';
+          const mine = poData
+            .filter(p => p.hold_id && Number(p.hold_target_id) === Number(userId))
+            .map(p => p.po_number || `#${p.id}`);
+          userActionLabel = mine.length > 1
+            ? `You were asked for information on POs ${mine.join(', ')}`
+            : mine.length === 1
+              ? `You were asked for information on PO ${mine[0]}`
+              : 'You were asked for information on a purchase order';
+          userActionPhase = currentPhase;
+        } else if (isCurrentUserActionHolder) {
           userActionRequired = true;
           userActionType = currentActionHolders.type === 'permission' ? 'evaluation' : 'approval';
           // 'PO initiator' keeps its capitals: lower-casing an acronym gave "a po initiators".

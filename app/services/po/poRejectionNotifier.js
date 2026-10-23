@@ -25,6 +25,7 @@ import { sendMail, logError } from "../../helper/common.js";
 import { logger } from "../../util/logger.js";
 import { generateEmailTemplate, emailButton } from "../../helper/notificationEmailLayout.js";
 import { clampText } from "../../helper/poReference.js";
+import { quoteInSentence } from "../../helper/quoteInSentence.js";
 import { dispatch as dispatchNotification } from "../notificationService.js";
 import {
   buyerNegotiationCreateRound,
@@ -107,7 +108,7 @@ export function buildRejectionCopy({ po, actorName, route, reasonCategory, comme
   const poLabel = `PO ${po.po_number || `#${po.id}`}`;
   const who = actorName || "an approver";
   const label = reasonLabel(reasonCategory);
-  const quoted = comment && String(comment).trim() ? ` "${String(comment).trim()}".` : "";
+  const quoted = quoteInSentence(comment);
   const cancelled = route === "CANCEL";
 
   const title = clampText(cancelled ? `${poLabel} cancelled by ${who}` : `${poLabel} rejected by ${who}`);

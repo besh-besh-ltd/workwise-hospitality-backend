@@ -24,6 +24,7 @@ import { sendMail, logError } from "../../helper/common.js";
 import { logger } from "../../util/logger.js";
 import { generateEmailTemplate, emailButton } from "../../helper/notificationEmailLayout.js";
 import { clampText } from "../../helper/poReference.js";
+import { quoteInSentence } from "../../helper/quoteInSentence.js";
 import { dispatch as dispatchNotification } from "../notificationService.js";
 import { buyerPoApproval, buyerPoDetail, toAbsoluteUrl } from "../notificationLinks.js";
 import { reasonLabel } from "./poSendBackReasons.js";
@@ -67,13 +68,15 @@ async function activeBuyers(userIds, actorId) {
 
 const poLabelOf = (ctx) => `PO ${ctx.po_number || `#${ctx.po_id}`}`;
 const rfqPart = (ctx) => (ctx.rfq_no ? ` (RFQ ${ctx.rfq_no})` : "");
-const quoted = (text) => (text && String(text).trim() ? ` "${String(text).trim()}"` : "");
 
 /** Why a hold was closed, by its resolution, for the "closed" copy. */
 export const CLOSED_BECAUSE = Object.freeze({
   PO_AMENDED_RESTARTED: "the PO was edited",
   RFQ_CLOSED: "the RFQ was closed",
-  PO_SUPERSEDED: "the approval was restarted",
+  // A policy edit that removed, reshaped or moved past the held step, the held
+  // step's role losing approve, or its last approver leaving. Nothing restarts
+  // on any of these. cancelApprovalInstance passes its own reason instead.
+  PO_SUPERSEDED: "the approval steps for this PO changed",
 });
 
 /** Title, body, link and button per event. Exported for copy tests. */
@@ -93,7 +96,7 @@ export function buildSendBackCopy(event, { ctx, actorName, because }) {
     const asker = ctx.requested_by_name || "An approver";
     return {
       title: clampText(`Reminder: ${po} is waiting for your answer`),
-      body: `${asker} asked you for information on ${po}${rfqPart(ctx)}: ${reasonLabel(ctx.reason_category)}.${quoted(ctx.comment)} The approval is waiting for your answer.`,
+      body: `${asker} asked you for information on ${po}${rfqPart(ctx)}: ${reasonLabel(ctx.reason_category)}.${quoteInSentence(ctx.comment)} The approval is waiting for your answer.`,
       linkPath: buyerPoDetail(ctx.po_id),
       button: "Answer on the purchase order",
     };
@@ -101,7 +104,7 @@ export function buildSendBackCopy(event, { ctx, actorName, because }) {
   if (event === "requested") {
     return {
       title: clampText(`${po} is on hold: ${who} needs information from you`),
-      body: `${who} asked you for information on ${po}${rfqPart(ctx)}: ${reasonLabel(ctx.reason_category)}.${quoted(ctx.comment)} The approval waits until you answer.`,
+      body: `${who} asked you for information on ${po}${rfqPart(ctx)}: ${reasonLabel(ctx.reason_category)}.${quoteInSentence(ctx.comment)} The approval waits until you answer.`,
       linkPath: buyerPoDetail(ctx.po_id),
       button: "Answer on the purchase order",
     };
@@ -109,7 +112,7 @@ export function buildSendBackCopy(event, { ctx, actorName, because }) {
   if (event === "answered") {
     return {
       title: clampText(`${who} answered the question on ${po}`),
-      body: `${who} answered the request for information on ${po}${rfqPart(ctx)}.${quoted(ctx.response_text)} The approval can continue.`,
+      body: `${who} answered the request for information on ${po}${rfqPart(ctx)}.${quoteInSentence(ctx.response_text)} The approval can continue.`,
       linkPath: buyerPoApproval(ctx.po_id, ctx.rfq_id),
       button: "Review and decide",
     };
