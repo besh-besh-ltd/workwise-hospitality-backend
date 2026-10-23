@@ -16,15 +16,22 @@ const RFQ_CREATOR = IDS.users.a1_proc_buyer;
 const NEGOTIATOR = IDS.users.a1_proc_commEval;
 const VA = IDS.users.vendor_alpha;
 const ROLE_COMM_APPROVER = 12;
-const APPROVER = 80951; // own user: the routes run acl([2, 8])
+const APPROVER = 80953; // own user: the routes run acl([2, 8])
+
+const OTHER_TENANT_BUYER = IDS.users.companyB_admin;
+const TOKEN = 80953000000123; // email-link token for the vendor
 
 const inserted = { rfqIds: [] };
-let vendorPriorType;
+const typesBefore = {};
 
 beforeAll(async () => {
   // Fixture vendors carry a NULL user_type; the vendor branches key on 3.
-  vendorPriorType = (await db.one(`SELECT user_type FROM tbl_users WHERE id = $1`, [VA])).user_type;
+  for (const r of await db.any(`SELECT id, user_type FROM tbl_users WHERE id = ANY($1::int[])`, [[VA, NEGOTIATOR, OTHER_TENANT_BUYER]])) {
+    typesBefore[r.id] = r.user_type;
+  }
   await db.none(`UPDATE tbl_users SET user_type = 3 WHERE id = $1`, [VA]);
+  // The creator and an outsider read over HTTP, whose route ACL needs buyer type.
+  await db.none(`UPDATE tbl_users SET user_type = 2 WHERE id = ANY($1::int[])`, [[NEGOTIATOR, OTHER_TENANT_BUYER]]);
   await db.none(
     `INSERT INTO tbl_users (id, name, email, status, user_type, company_id, created_at, updated_at)
      VALUES ($1, 'A2 Remarks Approver', 'negremarks.approver@test.local', 1, 2, $2, now(), now())
@@ -75,7 +82,7 @@ afterEach(async () => {
     await db.none(`DELETE FROM tbl_negotiation_round_quotes WHERE negotiation_round_id = ANY($1::int[])`, [roundIds]);
     await db.none(`DELETE FROM tbl_negotiation_rounds WHERE id = ANY($1::int[])`, [roundIds]);
   }
-  await db.none(`DELETE FROM tbl_lifecycle_history WHERE entity_id = ANY($1::int[])`, [inserted.rfqIds]);
+  await db.none(`DELETE FROM tbl_lifecycle_history WHERE entity_type IN ('RFQ','TENDER') AND entity_id = ANY($1::int[])`, [inserted.rfqIds]);
   await db.none(`DELETE FROM tbl_rfq_product_vendors WHERE rfq_id = ANY($1::int[])`, [inserted.rfqIds]);
   await db.none(`DELETE FROM tbl_rfq_products WHERE rfq_id = ANY($1::int[])`, [inserted.rfqIds]);
   await db.none(`DELETE FROM tbl_rfq WHERE id = ANY($1::int[])`, [inserted.rfqIds]);
@@ -83,7 +90,10 @@ afterEach(async () => {
 });
 
 afterAll(async () => {
-  await db.none(`UPDATE tbl_users SET user_type = $2 WHERE id = $1`, [VA, vendorPriorType]);
+  await db.none(`DELETE FROM tbl_vendor_rfq_tokens_non_login WHERE token = $1`, [TOKEN]);
+  for (const [id, t] of Object.entries(typesBefore)) {
+    await db.none(`UPDATE tbl_users SET user_type = $2 WHERE id = $1`, [Number(id), t]);
+  }
   // Rejecting a round as the approver leaves rows that point at that user.
   await db.none(`DELETE FROM tbl_lifecycle_history WHERE performed_by = $1`, [APPROVER]);
   await db.none(`DELETE FROM tbl_approval_actions WHERE approver_user_id = $1`, [APPROVER]);
@@ -285,6 +295,37 @@ describe("buyer reads include creator_remarks", () => {
   });
 });
 
+describe("creator and tenant reads", () => {
+  it("the creator sees creator_remarks on round detail and the approval bundle", async () => {
+    const { rfqId } = await setup({ creator_remarks: "Creator can reread" });
+    const round = await roundRow(rfqId);
+    const client = await httpClient(NEGOTIATOR);
+    const detail = await client.get(`/api/v1/negotiation/rounds/${round.id}/detail`);
+    expect(detail.status).toBe(200);
+    expect(detail.body.data.round.creator_remarks).toBe("Creator can reread");
+    const bundle = await client.get(`/api/v1/negotiation/rounds/${rfqId}/approval-bundle`);
+    expect(bundle.status).toBe(200);
+    const r = bundle.body.data.rounds_history.find((x) => Number(x.id) === Number(round.id));
+    expect(r.creator_remarks).toBe("Creator can reread");
+  });
+
+  it("active-round read: another tenant is refused, an in-scope buyer still gets the round", async () => {
+    const { rfqId, productId } = await setup({ creator_remarks: "tenant-scoped" });
+    const round = await roundRow(rfqId);
+    await db.none(
+      `UPDATE tbl_negotiation_rounds SET status = 'ACTIVE', approved_at = NOW(), published_at = NOW() WHERE id = $1`,
+      [round.id]
+    );
+    const url = `/api/v1/negotiation/rounds/${rfqId}/active?rfq_product_id=${productId}`;
+    const outsider = await (await httpClient(OTHER_TENANT_BUYER)).get(url);
+    expect(outsider.status).toBe(403);
+    expect(JSON.stringify(outsider.body)).not.toMatch(/tenant-scoped|creator_remarks/);
+    const insider = await (await httpClient(NEGOTIATOR)).get(url);
+    expect(insider.status).toBe(200);
+    expect(Number(insider.body.data.id)).toBe(Number(round.id));
+  });
+});
+
 describe("vendors never see creator_remarks", () => {
   it("no vendor read exposes creator_remarks", async () => {
     const { rfqId, productId } = await setup({ creator_remarks: "SECRET-INTERNAL-NOTE" });
@@ -314,5 +355,17 @@ describe("vendors never see creator_remarks", () => {
       expect([name, hasKeyDeep(res.body, "creator_remarks")]).toEqual([name, false]);
       expect([name, JSON.stringify(res.body).includes("SECRET-INTERNAL-NOTE")]).toEqual([name, false]);
     }
+
+    // Emailed-link variant: no Authorization header, token in the query string.
+    await db.none(`DELETE FROM tbl_vendor_rfq_tokens_non_login WHERE token = $1`, [TOKEN]);
+    await db.none(
+      `INSERT INTO tbl_vendor_rfq_tokens_non_login (token, vendor_id, rfq_no) VALUES ($1, $2, $3)`,
+      [TOKEN, VA, rfqId]
+    );
+    const tokenRes = await (await httpClient(null)).get(`${base}?token=${TOKEN}`);
+    expect(tokenRes.status).toBe(200);
+    expect(JSON.stringify(tokenRes.body).includes(`"id":${round.id}`)).toBe(true);
+    expect(hasKeyDeep(tokenRes.body, "creator_remarks")).toBe(false);
+    expect(JSON.stringify(tokenRes.body).includes("SECRET-INTERNAL-NOTE")).toBe(false);
   });
 });
