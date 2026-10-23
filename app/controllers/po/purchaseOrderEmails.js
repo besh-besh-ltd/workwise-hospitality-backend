@@ -11,6 +11,7 @@ import hospitalityModel from "../../models/hospitalityModel.js";
 import { dispatch as dispatchNotification } from "../../services/notificationService.js";
 import {
   buyerPoApproval,
+  buyerPoDetail,
   buyerQuoteComparison,
   toAbsoluteUrl,
   vendorPoDetail,
@@ -359,8 +360,12 @@ export const sendVendorRejectionNotification = async (purchaseOrder, vendorUserI
       return;
     }
 
-    const linkPath = buyerQuoteComparison(purchaseOrder.rfq_id);
-    const quoteCompareUrl = toAbsoluteUrl(linkPath);
+    const quoteComparePath = buyerQuoteComparison(purchaseOrder.rfq_id);
+    const quoteCompareUrl = toAbsoluteUrl(quoteComparePath);
+    // The PO page is where an evaluator can send the PO back to the vendor.
+    const poDetailPath = buyerPoDetail(purchaseOrder.id);
+    const linkPath = poDetailPath || quoteComparePath;
+    const poDetailUrl = toAbsoluteUrl(poDetailPath || quoteComparePath);
 
     for (const user of evaluators) {
       const headerContent = `<h2>Hello ${user.name},</h2>`;
@@ -381,13 +386,20 @@ export const sendVendorRejectionNotification = async (purchaseOrder, vendorUserI
           </ul>
 
           <p>
-            The vendor has been de-finalized for this RFQ. Please review the Quote Comparison
-            and finalize an alternative vendor to proceed.
+            The vendor has been de-finalized for this RFQ. If they rejected it by mistake, you can
+            send the same PO back to them from the PO page. Otherwise, finalize an alternative vendor
+            in Quote Comparison.
           </p>
 
           <div style="text-align:center; margin-top:24px;">
-            <a href="${quoteCompareUrl}"
+            <a href="${poDetailUrl}"
                style="background-color:#3B82F6; color:white; padding:12px 24px; border-radius:8px; text-decoration:none; display:inline-block; font-weight:600;">
+              Open PO #${purchaseOrder.po_number}
+            </a>
+          </div>
+          <div style="text-align:center; margin-top:12px;">
+            <a href="${quoteCompareUrl}"
+               style="background-color:#FFFFFF; color:#3B82F6; border:1px solid #3B82F6; padding:11px 23px; border-radius:8px; text-decoration:none; display:inline-block; font-weight:600;">
               Go to Quote Compare
             </a>
           </div>
@@ -413,7 +425,7 @@ export const sendVendorRejectionNotification = async (purchaseOrder, vendorUserI
       category: 'po',
       type: 'po_vendor_rejected',
       title: `Vendor rejected PO #${purchaseOrder.po_number} — action needed`,
-      body: `${vendorName} has rejected PO #${purchaseOrder.po_number}. Please finalize an alternative vendor.`,
+      body: `${vendorName} has rejected PO #${purchaseOrder.po_number}. If it was a mistake, send it back to them from the PO page; otherwise finalize another vendor.`,
       data: { po_id: purchaseOrder.id, rfq_id: purchaseOrder.rfq_id, reason: reason || null },
       actionUrl: linkPath
     }).catch((err) => logError('dispatch po_vendor_rejected failed', err));

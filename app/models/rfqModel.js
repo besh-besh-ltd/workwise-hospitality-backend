@@ -5029,6 +5029,7 @@ LIMIT 2;
     return t.any(`
       SELECT
         po.rfq_id,
+        po.id AS po_id,
         rp.product_variant_id,
         rp.variant,
         po.finalized_vendor_id AS vendor_id,

@@ -3,8 +3,9 @@ import { logger } from '../util/logger.js';
 import { resolveCurrentPrice } from './arcPricingResolver.js';
 import { logArcEvent, ARC_EVENT_TYPES } from './arcEventLogService.js';
 import { dispatch as dispatchNotification } from './notificationService.js';
-import { buyerMrDetail, buyerMrList } from './notificationLinks.js';
+import { buyerMrDetail, buyerMrList, vendorPoDetail } from './notificationLinks.js';
 import { sendMail } from '../helper/common.js';
+import { buildVendorPoReference } from '../helper/poReference.js';
 import { normalizeArcCharges } from '../models/arc_v2/arcEvaluationModel.js';
 import { effectiveSupplierExpr } from './vendorNetwork/fulfilmentSql.js';
 import { computeCallOffLine } from '../helper/arc_v2/callOffLineTax.js';
@@ -65,7 +66,7 @@ function computeAllInUnitPrice(pricingResult) {
  * FOR UPDATE on the requisition hotel's tbl_arc_contract_line_hotel rows for the
  * MR's contract lines, ascending id. Taken before any tbl_arc_contract_line lock.
  */
-async function lockMrHotelLedgerRows(runner, mrId, hotelId) {
+export async function lockMrHotelLedgerRows(runner, mrId, hotelId) {
   if (hotelId == null) return;
   await runner.any(
     `SELECT clh.id FROM tbl_arc_contract_line_hotel clh
@@ -520,4 +521,64 @@ export async function notifyCallOffRejected({ raisedBy, mrId = null, mrNumber, p
     // blip here must not propagate now that the caller awaits this function.
     logger.error({ err, raisedBy }, '[callOffPo.notifyCallOffRejected] raiser lookup failed');
   }
+}
+
+/**
+ * Ask the vendor to accept a released call-off PO: the in-app notice plus the
+ * email. Shared by the release (mrController.notifyCallOffReleased) and the
+ * buyer's send-back of a vendor-rejected PO, so both say the same thing.
+ * Vendor-facing only: nothing buyer-internal (notes, raiser) belongs here.
+ *
+ * Best-effort and total: the in-app step is awaited and swallows its errors;
+ * the email is started and its promise returned as `mail` (already caught), so
+ * a caller can wait for it or ignore it.
+ *
+ * @param {{po: object, mr: {id:number, mr_number:string, raised_by?:number|null}, vendorId: number}} args
+ * @returns {Promise<{mail: Promise<void>}>}
+ */
+export async function notifyVendorCallOffAwaitingAcceptance({ po, mr, vendorId }) {
+  const actionUrl = vendorPoDetail(po.id);
+  if (Number(vendorId) && actionUrl) {
+    try {
+      await dispatchNotification({
+        userIds: [Number(vendorId)],
+        senderUserId: mr?.raised_by || null,
+        category: 'mr',
+        type: 'CALL_OFF_RELEASED',
+        title: 'Released PO awaiting acceptance',
+        body: `Released PO ${po.po_number} (₹${Number(po.total_value).toLocaleString('en-IN')}) was released from requisition ${mr?.mr_number} and is awaiting vendor acceptance.`,
+        data: { po_id: po.id, mr_id: mr?.id, po_number: po.po_number },
+        actionUrl,
+      });
+    } catch (err) {
+      logger.error({ err, poId: po.id }, '[callOffPo.notifyVendorCallOffAwaitingAcceptance] in-app notify failed');
+    }
+  }
+  let mail = Promise.resolve();
+  try {
+    const vendor = await db.oneOrNone(`SELECT email, name FROM tbl_users WHERE id = $1`, [vendorId]);
+    if (vendor?.email) {
+      // Contract + requisition number so the vendor knows what this order is
+      // for. The MR title stays buyer-side.
+      const arcRef = po.arc_contract_id
+        ? await db.oneOrNone(
+            `SELECT a.arc_number, a.title AS arc_title
+               FROM tbl_arc_contract c JOIN tbl_arc a ON a.id = c.arc_id
+              WHERE c.id = $1`,
+            [po.arc_contract_id]
+          ).catch(() => null)
+        : null;
+      const reference = buildVendorPoReference({ ...arcRef, mr_number: mr?.mr_number, is_call_off: true });
+      mail = Promise.resolve(sendMail({
+        to: vendor.email,
+        subject: `New released purchase order ${po.po_number}${reference ? ` (${reference})` : ''} — acceptance required`,
+        html: `<p>Hello ${vendor.name || 'Vendor'},</p>
+               <p>A new released purchase order <strong>${po.po_number}</strong> has been released against your active rate contract and is awaiting your acceptance.</p>
+               <p>Please log in to your vendor portal to review and accept it.</p>`,
+      })).catch((err) => logger.error({ err, poId: po.id }, '[callOffPo.notifyVendorCallOffAwaitingAcceptance] email failed'));
+    }
+  } catch (err) {
+    logger.error({ err, poId: po.id }, '[callOffPo.notifyVendorCallOffAwaitingAcceptance] vendor lookup failed');
+  }
+  return { mail };
 }

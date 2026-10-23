@@ -1306,7 +1306,7 @@ export const acceptPO = async (req, res) => {
       // caller can distinguish (404 not-found / 403 wrong-vendor / 409
       // wrong-state) instead of receiving an ambiguous lump.
       const po = await t.oneOrNone(
-        `SELECT * FROM tbl_rfq_purchase_order WHERE id = $1`,
+        `SELECT * FROM tbl_rfq_purchase_order WHERE id = $1 FOR UPDATE`,
         [po_id]
       );
       if (!po) {
@@ -1393,7 +1393,7 @@ export const rejectPO = async (req, res) => {
     const result = await db.tx(async t => {
       // F-PO-IDEM-001: split lookup into 404 / 403 / 409 branches.
       const po = await t.oneOrNone(
-        `SELECT * FROM tbl_rfq_purchase_order WHERE id = $1`,
+        `SELECT * FROM tbl_rfq_purchase_order WHERE id = $1 FOR UPDATE`,
         [po_id]
       );
       if (!po) {
