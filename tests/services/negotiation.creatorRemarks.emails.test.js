@@ -79,8 +79,22 @@ describe("approval-step email", () => {
     expect(sentMails[0].html).toContain("Creator's remarks:");
     expect(sentMails[0].html).toContain(ESCAPED);
     expect(sentMails[0].html).not.toContain("<b>x</b>");
-    // in-app notification carries it too
+    // in-app notification carries it too, and shows a one-line preview
     expect(dispatched[0].data.creator_remarks).toBe(RAW);
+    expect(dispatched[0].body).toContain('Remarks: “<b>x</b> line2”');
+  });
+
+  it("in-app body shows a one-line preview cut at 140 characters", async () => {
+    const long = "a".repeat(150) + "\n" + "b".repeat(10);
+    await sendApprovalStepNotification(stepArgs("ARC_NEGOTIATION", { creator_remarks: long }));
+    expect(dispatched[0].body).toContain(`Remarks: “${"a".repeat(140)}…”`);
+    expect(dispatched[0].body).not.toContain("bbb");
+  });
+
+  it("in-app body has no remarks when there are none or for other entity types", async () => {
+    await sendApprovalStepNotification(stepArgs("NEGOTIATION", { creator_remarks: null }));
+    await sendApprovalStepNotification(stepArgs("NEGOTIATION_QUOTE", { creator_remarks: RAW }));
+    expect(dispatched.map((d) => d.body).join(" ")).not.toContain("Remarks:");
   });
 
   it("shows remarks for an ARC_NEGOTIATION instance", async () => {

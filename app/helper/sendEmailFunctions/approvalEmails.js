@@ -1,7 +1,7 @@
 import config from "../../config/app.config.js";
 import { sendMail, logError } from "../common.js";
 import { generateEmailTemplate, emailButton } from "../notificationEmailLayout.js";
-import { creatorRemarksRowHtml } from "../negotiation/roundRemarks.js";
+import { creatorRemarksRowHtml, creatorRemarksPreview } from "../negotiation/roundRemarks.js";
 import { logger } from '../../util/logger.js';
 import { dispatch as dispatchNotification, resolveRecipientUserIds } from "../../services/notificationService.js";
 import {
@@ -301,7 +301,7 @@ export const sendApprovalStepNotification = async ({
         category: 'approval',
         type: 'approval_step_required',
         title: `Action required: Approve ${label} ${entityType === 'NEGOTIATION' || entityType === 'NEGOTIATION_QUOTE' ? `— RFQ #${entityIdentifier}` : `#${entityIdentifier}`}`,
-        body: `Step ${stepOrder} of ${totalSteps} — initiated by ${initiatorName || 'a team member'}.`,
+        body: `Step ${stepOrder} of ${totalSteps} — initiated by ${initiatorName || 'a team member'}.${hasRemarks ? ` Remarks: “${creatorRemarksPreview(extraContext.creator_remarks)}”` : ''}`,
         data: { entity_type: entityType, entity_id: entityId, step_order: stepOrder, total_steps: totalSteps, ...extraContext },
         actionUrl
       });
