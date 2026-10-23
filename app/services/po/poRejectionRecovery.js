@@ -86,8 +86,11 @@ export class RecoveryError extends Error {
 // (mrController.validateMrItemAgainstLine, mrModel).
 const LIVE_CONTRACT_STATUSES = ['active', 'expiring_soon'];
 
-// POs that no longer hold a product. Anything else on the same rfq_product_id
-// (draft, pending_approval, acceptance_pending, approved, ...) replaced this one.
+// REPLACEMENT_PO_EXISTS: another PO on one of this PO's rfq_product_ids that is
+// either NEWER than this one (any status — even a dead newer PO means the
+// product moved on, and its own rejection left the latest history row, which
+// restoring this older PO would wrongly pick up), or OLDER and still alive
+// (not one of these dead statuses).
 const DEAD_PO_STATUSES = [PO_STATUSES.REJECTED, PO_STATUSES.REJECTED_BY_VENDOR, PO_STATUSES.CANCELLED];
 
 /**
@@ -102,28 +105,22 @@ export async function lockPo(t, poId) {
   return t.oneOrNone(`SELECT * FROM tbl_rfq_purchase_order WHERE id = $1 FOR UPDATE`, [id]);
 }
 
-// Distinct (rfq_product_id, product_variant_id, variant) behind the PO's lines —
-// the same source of truth handlePORejection walks.
+// Distinct (rfq_product_id, product_variant_id, variant) behind the PO's lines
+// ($1 = PO id) — the same source of truth handlePORejection walks.
+const RFQ_LINES_SQL = `
+  SELECT DISTINCT pop.rfq_product_id, rp.product_variant_id, rp.variant
+    FROM tbl_purchase_order_product pop
+    JOIN tbl_rfq_products rp ON rp.id = pop.rfq_product_id
+   WHERE pop.purchase_order_id = $1`;
+
 async function loadRfqLines(t, poId) {
-  return t.any(
-    `SELECT DISTINCT pop.rfq_product_id, rp.product_variant_id, rp.variant
-       FROM tbl_purchase_order_product pop
-       JOIN tbl_rfq_products rp ON rp.id = pop.rfq_product_id
-      WHERE pop.purchase_order_id = $1
-      ORDER BY pop.rfq_product_id`,
-    [poId]
-  );
+  return t.any(`${RFQ_LINES_SQL} ORDER BY 1`, [poId]);
 }
 
 // The open-window test is the finalize guard's (rfqController.finalize):
 // end_date is a naive column holding UTC wall clock.
 const RFQ_GUARDS_SQL = `
-  WITH lines AS (
-    SELECT DISTINCT pop.rfq_product_id, rp.product_variant_id, rp.variant
-      FROM tbl_purchase_order_product pop
-      JOIN tbl_rfq_products rp ON rp.id = pop.rfq_product_id
-     WHERE pop.purchase_order_id = $1
-  )
+  WITH lines AS (${RFQ_LINES_SQL})
   SELECT
     (SELECT r.status FROM tbl_rfq r WHERE r.id = $2) AS rfq_status,
     EXISTS (
@@ -139,7 +136,8 @@ const RFQ_GUARDS_SQL = `
           ON opp.rfq_product_id = l.rfq_product_id
          AND opp.purchase_order_id <> $1
         JOIN tbl_rfq_purchase_order opo ON opo.id = opp.purchase_order_id
-       WHERE NOT (opo.status::text = ANY($4::text[]))
+       WHERE opo.id > $1
+          OR NOT (opo.status::text = ANY($4::text[]))
     ) AS replacement_po_exists,
     EXISTS (
       SELECT 1 FROM lines l

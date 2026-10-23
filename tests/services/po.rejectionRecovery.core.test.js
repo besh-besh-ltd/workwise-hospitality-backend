@@ -20,9 +20,45 @@ import {
 import { db, closeDb } from "../setup/db.js";
 import { IDS } from "../fixtures/ids.js";
 import { TEST_CATEGORIES } from "../fixtures/vendors.js";
-import * as poController from "../../app/controllers/po/purchaseOrderController.js";
-import * as recovery from "../../app/services/po/poRejectionRecovery.js";
 import { poFixtures, newPoFixtureTracker, cleanupPoFixtures } from "../helpers/poFixtures.js";
+
+// ---- Post-commit work ------------------------------------------------------
+//
+// acceptPO / rejectPO answer first and notify afterwards without awaiting
+// (sendPONotificationToVendor, sendPOAcceptedNotificationToTeam,
+// sendVendorRejectionNotification), and those in turn fire dispatchNotification
+// without awaiting. Left alone, that work races this suite's cleanup and
+// outlives closeDb() (pg-promise's end() shuts every pool in the process, the
+// app's included). The real functions still run; they are only wrapped so the
+// suite can wait for them. Registration order matters: notificationService is
+// mocked BEFORE the real purchaseOrderEmails is loaded, so that module binds to
+// the tracked dispatch, and both are mocked before the controller is loaded.
+const pending = new Set();
+const track = (fn) => (...args) => {
+  const p = Promise.resolve().then(() => fn(...args));
+  pending.add(p);
+  p.then(() => pending.delete(p), () => pending.delete(p));
+  return p;
+};
+async function drainPostCommitWork() {
+  while (pending.size) await Promise.allSettled([...pending]);
+}
+
+const actualNotifications = await import("../../app/services/notificationService.js");
+jest.unstable_mockModule("../../app/services/notificationService.js", () => ({
+  ...actualNotifications,
+  dispatch: track(actualNotifications.dispatch),
+}));
+const actualPoEmails = await import("../../app/controllers/po/purchaseOrderEmails.js");
+jest.unstable_mockModule("../../app/controllers/po/purchaseOrderEmails.js", () => ({
+  ...actualPoEmails,
+  sendPONotificationToVendor: track(actualPoEmails.sendPONotificationToVendor),
+  sendPOAcceptedNotificationToTeam: track(actualPoEmails.sendPOAcceptedNotificationToTeam),
+  sendVendorRejectionNotification: track(actualPoEmails.sendVendorRejectionNotification),
+}));
+
+const poController = await import("../../app/controllers/po/purchaseOrderController.js");
+const recovery = await import("../../app/services/po/poRejectionRecovery.js");
 
 const ALPHA = IDS.users.vendor_alpha;
 const BETA = IDS.users.vendor_beta;
@@ -30,8 +66,20 @@ const BUYER = IDS.users.a1_proc_buyer;
 const HOUR = 3600_000;
 
 afterAll(async () => {
+  await drainPostCommitWork();
   await closeDb();
 });
+
+// Notifications are keyed by entity in additional_data; delete only this suite's.
+async function deleteNotificationsFor({ poIds = [], mrIds = [] }) {
+  if (!poIds.length && !mrIds.length) return;
+  await db.none(
+    `DELETE FROM tbl_notifications
+      WHERE (additional_data->>'po_id') = ANY($1::text[])
+         OR (additional_data->>'mr_id') = ANY($2::text[])`,
+    [poIds.map(String), mrIds.map(String)]
+  );
+}
 
 function mockExpress(opts = {}) {
   const calls = { status: null, body: null };
@@ -53,6 +101,8 @@ const inserted = newPoFixtureTracker();
 const { makeRfqWithProductAndVendor, makeFinalization, makePo, attachProductToPo } = poFixtures(inserted);
 
 afterEach(async () => {
+  await drainPostCommitWork();
+  await deleteNotificationsFor({ poIds: inserted.poIds });
   const rfqIds = inserted.rfqIds;
   const rpIds = inserted.rfqProductIds;
   if (rpIds.length) {
@@ -136,8 +186,9 @@ async function insertNq(rfq_product_id, status, { stepStatus } = {}) {
 /**
  * An awarded RFQ PO awaiting the vendor: one finalization + one APPROVED
  * NEGOTIATION_QUOTE instance per product, one PO line per product.
+ * `beforePo(base)` runs just before the PO is created (to place an OLDER PO).
  */
-async function awardedPo({ vendorId = ALPHA, productVariantIds = [1] } = {}) {
+async function awardedPo({ vendorId = ALPHA, productVariantIds = [1], beforePo = null } = {}) {
   const base = await makeRfqWithProductAndVendor({ vendorId, productVariantId: productVariantIds[0] });
   const lines = [{ rfq_product_id: base.rfq_product_id, product_variant_id: productVariantIds[0] }];
   for (const pv of productVariantIds.slice(1)) {
@@ -149,6 +200,7 @@ async function awardedPo({ vendorId = ALPHA, productVariantIds = [1] } = {}) {
     finalizationIds.push(await makeFinalization(base.rfq_id, l.product_variant_id, vendorId, base.quote_id));
     nqIds.push(await insertNq(l.rfq_product_id, "APPROVED"));
   }
+  if (beforePo) await beforePo(base);
   const po_id = await makePo({
     rfq_id: base.rfq_id, vendorId,
     rfq_product_ids: lines.map((l) => l.rfq_product_id),
@@ -207,6 +259,14 @@ describe("findRecoveryBlockers — RFQ PO", () => {
     expect(po.status).toBe("rejected_by_vendor");
     expect(await liveFinalizations(s.rfq_id)).toEqual([]);
     expect(await nqStatus(s.nqIds[0])).toBe("CANCELLED");
+    // ...including the post-commit notice to the evaluators (tracked, see top).
+    await drainPostCommitWork();
+    const notice = await db.oneOrNone(
+      `SELECT 1 FROM tbl_notifications
+        WHERE type = 'po_vendor_rejected' AND (additional_data->>'po_id') = $1 LIMIT 1`,
+      [String(s.po_id)]
+    );
+    expect(notice).not.toBeNull();
 
     expect(await blockersFor(s.po_id)).toEqual([]);
   });
@@ -230,13 +290,15 @@ describe("findRecoveryBlockers — RFQ PO", () => {
   });
 
   it("reports REPLACEMENT_PO_EXISTS for a newer draft PO on the same product", async () => {
-    const s = await rejectedPo();
-
-    // A dead PO on the product is not a replacement.
-    const dead = await makePo({
-      rfq_id: s.rfq_id, status: "cancelled", rfq_product_ids: [s.rfq_product_id], quote_ids: [s.quote_id],
+    // An OLDER dead PO on the product is not a replacement.
+    const s = await rejectedPo({
+      beforePo: async ({ rfq_id, rfq_product_id, quote_id }) => {
+        const older = await makePo({
+          rfq_id, status: "cancelled", rfq_product_ids: [rfq_product_id], quote_ids: [quote_id],
+        });
+        await attachProductToPo(older, rfq_product_id, quote_id);
+      },
     });
-    await attachProductToPo(dead, s.rfq_product_id, s.quote_id);
     expect(await blockersFor(s.po_id)).toEqual([]);
 
     const draft = await makePo({
@@ -401,6 +463,35 @@ describe("restoreAward — RFQ PO", () => {
     expect(await liveFinalizations(s.rfq_id)).toEqual([{ vendor_id: ALPHA, product_variant_id: 1 }]);
   });
 
+  it("an older rejected PO is not restored with a newer award's history; only the newest rejected PO is restorable", async () => {
+    // V rejects PO1 -> the buyer re-awards the product to V on a fresh quote ->
+    // PO2 -> V rejects PO2. Both POs are now rejected_by_vendor, and the latest
+    // history row is PO2's.
+    const s = await rejectedPo();
+    const quote2 = await addQuote(s.rfq_id, ALPHA);
+    await makeFinalization(s.rfq_id, s.product_variant_id, ALPHA, quote2);
+    const nq2 = await insertNq(s.rfq_product_id, "APPROVED");
+    const po2 = await makePo({
+      rfq_id: s.rfq_id, rfq_product_ids: [s.rfq_product_id], quote_ids: [quote2],
+    });
+    await attachProductToPo(po2, s.rfq_product_id, quote2);
+    await vendorRejects(po2);
+    expect(await nqStatus(nq2)).toBe("CANCELLED");
+
+    expect(await blockersFor(s.po_id)).toEqual([BLOCKERS.REPLACEMENT_PO_EXISTS]);
+    await expect(restore(s.po_id)).rejects.toMatchObject({ status: 409, code: BLOCKERS.REPLACEMENT_PO_EXISTS });
+    expect(await liveFinalizations(s.rfq_id)).toEqual([]);
+    expect(await nqStatus(s.nqIds[0])).toBe("CANCELLED");
+    expect(await nqStatus(nq2)).toBe("CANCELLED");
+
+    expect(await blockersFor(po2)).toEqual([]);
+    await restore(po2);
+    expect(await db.any(`SELECT vendor_id, quote_id FROM tbl_quote_finalization WHERE rfq_id = $1`, [s.rfq_id]))
+      .toEqual([{ vendor_id: ALPHA, quote_id: quote2 }]);
+    expect(await nqStatus(nq2)).toBe("APPROVED");
+    expect(await nqStatus(s.nqIds[0])).toBe("CANCELLED");
+  });
+
   it("multi-product PO with one product re-awarded is blocked as a whole", async () => {
     const s = await rejectedPo({ productVariantIds: [1, 2] });
     const betaQuote = await addQuote(s.rfq_id, BETA);
@@ -416,7 +507,8 @@ describe("restoreAward — RFQ PO", () => {
 
   it("restoreAward on a multi-vendor PO restores only this vendor's rows (the F-PO-CASCADE-001 mirror)", async () => {
     // One product split between two vendors under one batched award approval,
-    // one PO each. Both vendors reject; only Alpha's award comes back.
+    // one PO each (Beta's raised first). Both vendors reject; only Alpha's
+    // award comes back.
     const base = await makeRfqWithProductAndVendor({ vendorId: ALPHA });
     await db.none(
       `INSERT INTO tbl_rfq_product_vendors (rfq_id, product_variant_id, user_id, variant) VALUES ($1, 1, $2, 0)`,
@@ -426,20 +518,22 @@ describe("restoreAward — RFQ PO", () => {
     await makeFinalization(base.rfq_id, 1, ALPHA, base.quote_id);
     await makeFinalization(base.rfq_id, 1, BETA, betaQuote);
     const nq = await insertNq(base.rfq_product_id, "APPROVED");
-    const alphaPo = await makePo({
-      rfq_id: base.rfq_id, vendorId: ALPHA, rfq_product_ids: [base.rfq_product_id], quote_ids: [base.quote_id],
-    });
-    await attachProductToPo(alphaPo, base.rfq_product_id, base.quote_id);
     const betaPo = await makePo({
       rfq_id: base.rfq_id, vendorId: BETA, rfq_product_ids: [base.rfq_product_id], quote_ids: [betaQuote],
     });
     await attachProductToPo(betaPo, base.rfq_product_id, betaQuote);
+    const alphaPo = await makePo({
+      rfq_id: base.rfq_id, vendorId: ALPHA, rfq_product_ids: [base.rfq_product_id], quote_ids: [base.quote_id],
+    });
+    await attachProductToPo(alphaPo, base.rfq_product_id, base.quote_id);
 
     await vendorRejects(betaPo, BETA);
     expect(await nqStatus(nq)).toBe("APPROVED"); // Alpha still holds the award
     await vendorRejects(alphaPo, ALPHA);
     expect(await nqStatus(nq)).toBe("CANCELLED");
 
+    // A newer PO on the product, whatever its status, means it moved on.
+    expect(await blockersFor(betaPo)).toEqual([BLOCKERS.REPLACEMENT_PO_EXISTS]);
     expect(await blockersFor(alphaPo)).toEqual([]);
     await restore(alphaPo);
 
@@ -450,8 +544,8 @@ describe("restoreAward — RFQ PO", () => {
     );
     expect(hist.map((h) => h.vendor_id)).toEqual([ALPHA, BETA]); // the trail is kept
     expect((await readPo(betaPo)).status).toBe("rejected_by_vendor");
-    // Beta now finds the product held by Alpha again.
-    expect(await blockersFor(betaPo)).toEqual([BLOCKERS.PRODUCT_REAWARDED]);
+    // Beta now also finds the product held by Alpha again.
+    expect(await blockersFor(betaPo)).toEqual([BLOCKERS.PRODUCT_REAWARDED, BLOCKERS.REPLACEMENT_PO_EXISTS]);
   });
 
   it("a PO carrying another vendor's line (the F-PO-CASCADE-001 shape) is refused as a whole and leaves that vendor's row alone", async () => {
@@ -576,10 +670,14 @@ describe("call-off PO recovery", () => {
   });
 
   afterAll(async () => {
+    await drainPostCommitWork();
     const poIds = (await db.any(
       `SELECT id FROM tbl_rfq_purchase_order WHERE arc_contract_id = $1`, [contractId]
     )).map((r) => r.id);
-    await db.none(`DELETE FROM tbl_notifications WHERE category IN ('CALL_OFF','mr')`);
+    const mrIds = (await db.any(
+      `SELECT id FROM tbl_material_requisition WHERE hospitality_company_id = $1 AND title LIKE 'RRCORE%'`, [HC]
+    )).map((r) => r.id);
+    await deleteNotificationsFor({ poIds, mrIds });
     if (poIds.length) {
       await db.none(`DELETE FROM tbl_lifecycle_history WHERE entity_type = 'PO' AND entity_id = ANY($1::int[])`, [poIds]);
     }
