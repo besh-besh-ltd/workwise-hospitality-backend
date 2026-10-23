@@ -65,7 +65,7 @@ function computeAllInUnitPrice(pricingResult) {
  * FOR UPDATE on the requisition hotel's tbl_arc_contract_line_hotel rows for the
  * MR's contract lines, ascending id. Taken before any tbl_arc_contract_line lock.
  */
-async function lockMrHotelLedgerRows(runner, mrId, hotelId) {
+export async function lockMrHotelLedgerRows(runner, mrId, hotelId) {
   if (hotelId == null) return;
   await runner.any(
     `SELECT clh.id FROM tbl_arc_contract_line_hotel clh
