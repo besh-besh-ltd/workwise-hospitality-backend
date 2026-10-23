@@ -2,7 +2,7 @@ import { Router } from "express";
 import { acceptPO, addSiteRepresentative, approvePO, createMilestoneController, createTaskController, deleteMilestoneController, deleteTaskController, getMilestonesController, getPOByRFQ, getPODetails, getPoInitiators, getTasksController, initiatePO, markDispatched, markGRN, mergePODrafts, raiseInvoice, regeneratePO, rejectPO, uploadPODocument, updateGST, updateHSNForProduct, updateMilestoneController, updatePO, updateTaskController } from "../../controllers/po/purchaseOrderController.js";
 import { listPOs, dashboardKpis, awaitingPOs, poDetailFull, tracking, analytics, exportPOList, exportTracking, exportAnalytics } from "../../controllers/po/poDashboardController.js";
 import { vendorDashboard, vendorListView, vendorPoDetail, vendorPoPdf, vendorExport } from "../../controllers/po/poVendorController.js";
-import { getRejectionUndoState, withdrawRejection } from "../../controllers/po/poRejectionRecoveryController.js";
+import { getRejectionUndoState, withdrawRejection, getReinstate, reinstate } from "../../controllers/po/poRejectionRecoveryController.js";
 import { poUploadMiddleware } from "../../validations/paramValidation/poValidation.js";
 import passport from '../../middleware/passport.js';
 import { acl, noAcl } from "../../helper/common.js";
@@ -115,6 +115,8 @@ PORoutes.post('/reject/:po_id', passportSignIn, acl([3]), rejectPO);
 // REQ-0032: a vendor who rejected by mistake takes it back within 24 hours.
 PORoutes.get('/vendor/:po_id/rejection-undo', passportSignIn, acl([3]), getRejectionUndoState);
 PORoutes.post('/vendor/:po_id/withdraw-rejection', passportSignIn, acl([3]), withdrawRejection);
+PORoutes.get('/:po_id/reinstate', passportSignIn, acl([2, 8, 10]), getReinstate);
+PORoutes.post('/:po_id/reinstate', passportSignIn, acl([2, 8, 10]), reinstate);
 PORoutes.post('/regenerate/:po_id', passportSignIn, noAcl([3]), regeneratePO);
 PORoutes.post('/upload-pdf/:po_id', passportSignIn, noAcl([3]), poUploadMiddleware, uploadPODocument);
 PORoutes.post('/updateGST/:po_id', passportSignIn, noAcl([3]), updateGST);

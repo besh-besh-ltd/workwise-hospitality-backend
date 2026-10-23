@@ -34,6 +34,8 @@ import { coversProductSql } from '../../models/negotiationModel.js';
 import { lockMrHotelLedgerRows } from '../callOffPoService.js';
 import { logArcEvent, ARC_EVENT_TYPES } from '../arcEventLogService.js';
 import { PO_STATUSES, RFQ_STATUSES } from '../../util/constants.js';
+import { assertCanReadParentRfq, assertUserHasScope, isAuthorizationError } from '../authorizationService.js';
+import { assertPoAccess, PoAccessError } from '../../models/purchaseOrderModel.js';
 
 export const UNDO_WINDOW_HOURS = 24;
 
@@ -535,6 +537,181 @@ export async function withdrawRejectionByVendor(poId, vendorUserId) {
   });
 }
 
+export const NOTE_MAX_LENGTH = 1000;
+
+const notFound = () => new RecoveryError(404, 'NOT_FOUND', 'Purchase order not found.');
+
+// Tenant gate, first. tbl_rfq_purchase_order.company_id is a tbl_company id,
+// which spans several hospitality companies, so it cannot isolate a legal
+// entity; the PO is resolved to its real tenancy tuple instead (RFQ, or the ARC
+// for a call-off) and the caller's read scope on it is checked, exactly as every
+// other buyer PO endpoint does (assertPoAccess). Anything out of scope, or
+// unknown, is a 404 so another tenant's PO is never confirmed to exist.
+async function assertPoVisible(t, user, poId) {
+  try {
+    await assertPoAccess(user, poId, t);
+  } catch (err) {
+    if (err instanceof PoAccessError) throw notFound();
+    throw err;
+  }
+}
+
+/**
+ * May this user send this PO back? RFQ PO: read scope on the RFQ plus
+ * quote-compare.create on its tuple. Call-off PO: mr.create on the
+ * requisition's company and hotel. Scope comes from the loaded rows only.
+ * Authorization failures become 403 NOT_PERMITTED; anything else propagates.
+ */
+export async function assertCanReinstate(t, user, po) {
+  try {
+    if (po.is_call_off) {
+      const { mrId } = await loadCallOffContext(t, po);
+      const mr = mrId
+        ? await t.oneOrNone(
+          `SELECT hospitality_company_id, hotel_id FROM tbl_material_requisition WHERE id = $1`, [mrId]
+        )
+        : null;
+      await assertUserHasScope(user.id, 'mr.create', {
+        hospitality_company_id: mr?.hospitality_company_id,
+        hotel_id: mr?.hotel_id,
+      }, t);
+    } else {
+      const rfq = await t.oneOrNone(
+        `SELECT id, hospitality_company_id, hotel_id, department_id, process_id, is_tender
+           FROM tbl_rfq WHERE id = $1`,
+        [po.rfq_id]
+      );
+      if (!rfq) throw notFound();
+      await assertCanReadParentRfq(user.id, rfq.id, t, { rfqRow: rfq });
+      await assertUserHasScope(user.id, 'quote-compare.create', {
+        hospitality_company_id: rfq.hospitality_company_id,
+        hotel_id: rfq.hotel_id,
+        department_id: rfq.department_id,
+        process_id: rfq.process_id,
+      }, t);
+    }
+  } catch (err) {
+    if (isAuthorizationError(err)) {
+      throw new RecoveryError(403, 'NOT_PERMITTED', 'You do not have permission to send this order back to the vendor.');
+    }
+    throw err;
+  }
+}
+
+const isoOrNull = (v) => (v ? new Date(v).toISOString() : null);
+
+/**
+ * What the buyer's "Send back to vendor" panel needs. Read only. A user without
+ * the permission gets permitted:false (the UI explains it), not a 403; only an
+ * unknown PO or another tenant's PO is a 404.
+ *
+ * @returns {Promise<{permitted:boolean, available:boolean, blockers:string[],
+ *   rejection:{reason:string|null, rejected_at:string|null, vendor_name:string|null}}>}
+ */
+export async function getReinstateState(poId, user) {
+  return db.task(async (t) => {
+    await assertPoVisible(t, user, poId);
+    const po = await t.oneOrNone(`SELECT * FROM tbl_rfq_purchase_order WHERE id = $1`, [Number(poId)]);
+    if (!po) throw notFound();
+
+    let permitted = true;
+    try {
+      await assertCanReinstate(t, user, po);
+    } catch (err) {
+      if (err instanceof RecoveryError && err.code === 'NOT_PERMITTED') permitted = false;
+      else throw err;
+    }
+
+    const blockers = await findRecoveryBlockers(t, po);
+    const rejected = po.status === PO_STATUSES.REJECTED_BY_VENDOR;
+    const vendor = rejected
+      ? await t.oneOrNone(`SELECT name, organization_name FROM tbl_users WHERE id = $1`, [po.finalized_vendor_id])
+      : null;
+    return {
+      permitted,
+      available: permitted && blockers.length === 0,
+      blockers,
+      rejection: {
+        reason: rejected ? (po.vendor_rejection_reason ?? null) : null,
+        rejected_at: rejected ? isoOrNull(po.vendor_action_at) : null,
+        vendor_name: vendor ? (vendor.organization_name || vendor.name || null) : null,
+      },
+    };
+  });
+}
+
+/**
+ * The buyer sends a vendor-rejected PO back to the SAME vendor: restore the
+ * award and return the PO to acceptance_pending, in one transaction. No new
+ * approval — vendor, price and quantity are unchanged. The reminder counter and
+ * the vendor's action stamp reset so the reminder cron starts again from day 1.
+ *
+ * The note is internal: it is stored on the lifecycle row only, and never sent
+ * to the vendor.
+ *
+ * @returns {Promise<{po:object, previous:{reason:string|null, rejected_at:*}, callOff:null|{raised_by:number|null, mr_id:number|null, mr_number:string|null}}>}
+ */
+export async function reinstateByBuyer(poId, user, note) {
+  return db.tx(async (t) => {
+    await assertPoVisible(t, user, poId);
+
+    const text = typeof note === 'string' ? note.trim() : '';
+    if (!text) {
+      throw new RecoveryError(400, 'NOTE_REQUIRED', 'Add a note saying why the order is being sent back.');
+    }
+    if (text.length > NOTE_MAX_LENGTH) {
+      throw new RecoveryError(400, 'NOTE_TOO_LONG', `Keep the note to ${NOTE_MAX_LENGTH} characters or fewer.`);
+    }
+
+    const po = await lockPo(t, poId);
+    if (!po) throw notFound();
+
+    await assertCanReinstate(t, user, po);
+
+    const blockers = await findRecoveryBlockers(t, po);
+    if (blockers.length) throw new RecoveryError(409, blockers[0]);
+
+    await restoreAward(t, po, user.id);
+
+    await t.none(
+      `UPDATE tbl_rfq_purchase_order
+          SET status = 'acceptance_pending', vendor_rejection_reason = NULL,
+              vendor_action_at = NULL, vendor_reminder_count = 0, updated_at = NOW()
+        WHERE id = $1`,
+      [po.id]
+    );
+
+    const previous = { reason: po.vendor_rejection_reason ?? null, rejected_at: po.vendor_action_at ?? null };
+    await recordLifecycleEvent({
+      entity_type: 'PO',
+      entity_id: po.id,
+      stage: 'PO_SENT_BACK_TO_VENDOR',
+      action: 'REINSTATE',
+      performed_by: user.id,
+      remarks: text,
+      metadata: {
+        rfq_id: po.rfq_id,
+        po_number: po.po_number,
+        previous_rejection_reason: previous.reason,
+        previous_rejected_at: previous.rejected_at,
+      },
+      txContext: t,
+    });
+
+    let callOff = null;
+    if (po.is_call_off) {
+      const { mrId } = await loadCallOffContext(t, po);
+      const mr = mrId
+        ? await t.oneOrNone(`SELECT id, mr_number, raised_by FROM tbl_material_requisition WHERE id = $1`, [mrId])
+        : null;
+      callOff = { raised_by: mr?.raised_by ?? null, mr_id: mr?.id ?? null, mr_number: mr?.mr_number ?? null };
+    }
+
+    const fresh = await t.one(`SELECT * FROM tbl_rfq_purchase_order WHERE id = $1`, [po.id]);
+    return { po: fresh, previous, callOff, note: text };
+  });
+}
+
 export default {
   UNDO_WINDOW_HOURS,
   BLOCKERS,
@@ -546,4 +723,7 @@ export default {
   restoreAward,
   getVendorUndoState,
   withdrawRejectionByVendor,
+  assertCanReinstate,
+  getReinstateState,
+  reinstateByBuyer,
 };

@@ -62,6 +62,7 @@ export async function installPostCommitTracking() {
   jest.unstable_mockModule("../../app/controllers/po/purchaseOrderEmails.js", () => ({
     ...actualPoEmails,
     sendPONotificationToVendor: track("sendPONotificationToVendor", actualPoEmails.sendPONotificationToVendor),
+    sendPOAcceptanceRequestToVendor: track("sendPOAcceptanceRequestToVendor", actualPoEmails.sendPOAcceptanceRequestToVendor),
     sendPOAcceptedNotificationToTeam: track("sendPOAcceptedNotificationToTeam", actualPoEmails.sendPOAcceptedNotificationToTeam),
     sendVendorRejectionNotification: track("sendVendorRejectionNotification", actualPoEmails.sendVendorRejectionNotification),
   }));

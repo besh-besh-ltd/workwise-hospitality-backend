@@ -11,8 +11,8 @@ import { generateEmailTemplate } from '../../helper/notificationEmailLayout.js';
 import userModel from '../../models/userModel.js';
 import rbacModel from '../../models/rbacModel.js';
 import { dispatch as dispatchNotification } from '../notificationService.js';
-import { buyerPoDetail, buyerPoList, buyerMrDetail, buyerMrList, toAbsoluteUrl } from '../notificationLinks.js';
-import { sendPONotificationToVendor, sendPOAcceptedNotificationToTeam } from '../../controllers/po/purchaseOrderEmails.js';
+import { buyerPoDetail, buyerPoList, buyerMrDetail, buyerMrList, vendorPoDetail, toAbsoluteUrl } from '../notificationLinks.js';
+import { sendPONotificationToVendor, sendPOAcceptedNotificationToTeam, sendPOAcceptanceRequestToVendor } from '../../controllers/po/purchaseOrderEmails.js';
 
 const esc = (v) => String(v ?? '').replace(/[&<>"']/g, (c) => (
   { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]
@@ -136,4 +136,135 @@ async function notifyCallOffRaiser({ po, callOff }) {
   }
 }
 
-export default { notifyRejectionWithdrawn };
+/**
+ * The buyer sent a vendor-rejected PO back for acceptance.
+ *   - vendor: the standard acceptance request a freshly approved PO gets (RFQ
+ *     PO), or the call-off release's notice (call-off PO). The note is NEVER
+ *     part of anything addressed to the vendor.
+ *   - RFQ PO: in-app + email to the commercial evaluators, minus the actor
+ *   - call-off PO: in-app to the requisition raiser, unless they are the actor
+ * The note appears only in the internal notices.
+ *
+ * @param {{po: object, actor: {id:number, name?:string}, note: string,
+ *   callOff: null|{raised_by:number|null, mr_id:number|null, mr_number:string|null}}} args
+ * @returns {Promise<void>} never rejects
+ */
+export async function notifyPoSentBackToVendor({ po, actor, note, callOff = null }) {
+  try {
+    let actorName = actor?.name || 'A buyer';
+    await safe('actor lookup', async () => {
+      const u = (await userModel.getUserById(actor?.id))?.[0];
+      actorName = u?.name || actorName;
+    });
+    let vendorName = 'the vendor';
+    await safe('vendor lookup', async () => {
+      const v = (await userModel.getUserById(po.finalized_vendor_id))?.[0];
+      vendorName = v?.organization_name || v?.name || vendorName;
+    });
+
+    if (po.is_call_off) {
+      await safe('vendor call-off acceptance request', () => notifyVendorCallOff({ po, callOff }));
+      await safe('call-off raiser notice', () => notifyRaiserSentBack({ po, actor, actorName, vendorName, note, callOff }));
+    } else {
+      await safe('vendor acceptance request', async () => {
+        const rfqDetails = await db.oneOrNone(
+          `SELECT id, rfq_no, title, created_by FROM tbl_rfq WHERE id = $1`, [po.rfq_id]
+        );
+        await sendPOAcceptanceRequestToVendor(po, rfqDetails);
+      });
+      await safe('evaluator notice', () => notifyEvaluatorsSentBack({ po, actor, actorName, vendorName, note }));
+    }
+  } catch (err) {
+    logError('notifyPoSentBackToVendor failed', err);
+  }
+}
+
+const sentBackBody = ({ actorName, po, vendorName, note }) =>
+  `${actorName} sent PO #${po.po_number} back to ${vendorName} for acceptance: “${note}”`;
+
+// Same two notices the call-off release sends the vendor (mrController
+// notifyCallOffReleased), without the buyer-side one.
+async function notifyVendorCallOff({ po, callOff }) {
+  const vendorId = Number(po.finalized_vendor_id);
+  const actionUrl = vendorPoDetail(po.id);
+  await dispatchNotification({
+    userIds: [vendorId],
+    senderUserId: callOff?.raised_by || null,
+    category: 'mr',
+    type: 'CALL_OFF_RELEASED',
+    title: 'Released PO awaiting acceptance',
+    body: `Released PO ${po.po_number} (₹${Number(po.total_value).toLocaleString('en-IN')}) was released from requisition ${callOff?.mr_number ?? ''} and is awaiting vendor acceptance.`,
+    data: { po_id: po.id, mr_id: callOff?.mr_id ?? null, po_number: po.po_number },
+    actionUrl,
+  });
+  const vendor = await db.oneOrNone(`SELECT email, name FROM tbl_users WHERE id = $1`, [vendorId]);
+  if (vendor?.email) {
+    Promise.resolve(sendMail({
+      to: vendor.email,
+      subject: `New released purchase order ${po.po_number} — acceptance required`,
+      html: `<p>Hello ${esc(vendor.name || 'Vendor')},</p>
+             <p>A released purchase order <strong>${esc(po.po_number)}</strong> against your active rate contract is awaiting your acceptance.</p>
+             <p>Please log in to your vendor portal to review and accept it.</p>`,
+    })).catch((err) => logError('call-off acceptance request email failed', err));
+  }
+}
+
+async function notifyEvaluatorsSentBack({ po, actor, actorName, vendorName, note }) {
+  const rfq = await db.oneOrNone(`SELECT id, rfq_no, title, hotel_id FROM tbl_rfq WHERE id = $1`, [po.rfq_id]);
+  const evaluators = (await rbacModel.getUsersWithModuleActionsForHotels(
+    [rfq?.hotel_id], 'quote-compare', ['read', 'create'], null
+  ) || []).filter((u) => Number(u.id) !== Number(actor?.id));
+  if (evaluators.length === 0) {
+    logger.info('No other commercial evaluators to notify for a PO sent back to the vendor');
+    return;
+  }
+  const linkPath = buyerPoDetail(po.id) || buyerPoList();
+  const url = toAbsoluteUrl(linkPath);
+  const subject = `PO #${po.po_number} sent back to ${vendorName} for acceptance`;
+
+  for (const user of evaluators) {
+    if (!user.email) continue;
+    const html = generateEmailTemplate(
+      `<h2>Hello ${esc(user.name)},</h2>`,
+      `<div style="font-size:16px; font-family:'Roboto', sans-serif; color:#333;">
+         <p>${esc(actorName)} sent PO #${esc(po.po_number)} back to ${esc(vendorName)} for acceptance${rfq?.rfq_no ? ` (RFQ #${esc(rfq.rfq_no)})` : ''}.</p>
+         <p><strong>Note:</strong> ${esc(note).replace(/\n/g, '<br/>')}</p>
+         <p>The order keeps its number, prices and approvals. This note is internal and was not sent to the vendor.</p>
+         <div style="text-align:center; margin-top:24px;">
+           <a href="${esc(url)}" style="background-color:#3B82F6; color:white; padding:12px 24px; border-radius:8px; text-decoration:none; display:inline-block; font-weight:600;">View purchase order</a>
+         </div>
+       </div>`
+    );
+    Promise.resolve(sendMail({ from: config.webmasterMail, to: user.email, subject, html }))
+      .catch((err) => logError('sent-back email failed', err));
+  }
+
+  await dispatchNotification({
+    userIds: evaluators.map((u) => u.id).filter(Boolean),
+    senderUserId: actor?.id ?? null,
+    category: 'po',
+    type: 'po_sent_back_to_vendor',
+    title: 'PO sent back to the vendor',
+    body: sentBackBody({ actorName, po, vendorName, note }),
+    data: { po_id: po.id, rfq_id: po.rfq_id },
+    actionUrl: linkPath,
+  });
+}
+
+async function notifyRaiserSentBack({ po, actor, actorName, vendorName, note, callOff }) {
+  const raisedBy = Number(callOff?.raised_by);
+  if (!raisedBy || raisedBy === Number(actor?.id)) return;
+  const mrId = Number(callOff.mr_id) || null;
+  await dispatchNotification({
+    userIds: [raisedBy],
+    senderUserId: actor?.id ?? null,
+    category: 'mr',
+    type: 'po_sent_back_to_vendor',
+    title: 'PO sent back to the vendor',
+    body: sentBackBody({ actorName, po, vendorName, note }),
+    data: { po_id: po.id, mr_id: mrId, mr_number: callOff.mr_number, po_number: po.po_number },
+    actionUrl: buyerMrDetail(mrId) || buyerMrList({ tab: 'for_me' }),
+  });
+}
+
+export default { notifyRejectionWithdrawn, notifyPoSentBackToVendor };
