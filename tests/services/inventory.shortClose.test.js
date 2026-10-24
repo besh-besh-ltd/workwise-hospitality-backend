@@ -355,35 +355,40 @@ describe("reopen", () => {
     });
   });
 
-  it("credit RTV on a call-off gives back contract qty and reopen re-consumes it", async () => {
+  it("credit RTV on a call-off gives back contract qty; its lines cannot be reopened", async () => {
     await withTx(async (t) => {
       const role = await t.one(`SELECT id FROM tbl_roles WHERE title = 'Inventory Controller' AND created_by IS NULL`);
       await grantRoleScope(t, { userId: STORES.id, roleId: role.id, companyId: CO, hotelId: A2 });
       const po = await makeCallOffPo(t, { hotel: A2, qty: 6 });
       const grn = await postReceiptGrn(t, { poId: po.poId, hotelId: A2, lines: [{ poLineId: po.lineId, accepted: 6 }] });
       const dlId = grn.lines[0].deliveryLineId;
-      const before = await consumed(t, po.contractLineId);
-      expect(before).toEqual({ line: 6, hotels: { [A1]: 50, [A2]: 6 } });
+      expect(await consumed(t, po.contractLineId)).toEqual({ line: 6, hotels: { [A1]: 50, [A2]: 6 } });
 
       // 2 go back against a credit note: the contract and the ordering hotel get 2 back.
       const rtv = await createRtv(t, STORES, {
         grnId: grn.grnId, disposition: "CREDIT",
         lines: [{ grnLineId: grn.lines[0].grnLineId, qty: 2, reason: "Leaking" }],
       });
-      await dispatchRtv(t, STORES, rtv.id, {});
+      const sent = await dispatchRtv(t, STORES, rtv.id, {});
       expect(await t.any(
         `SELECT delivery_line_id, qty::float AS qty, reason_code, action, rtv_id FROM tbl_po_short_close WHERE po_id = $1`,
         [po.poId]
       )).toEqual([{ delivery_line_id: dlId, qty: 2, reason_code: "other", action: "close", rtv_id: rtv.id }]);
-      expect(await consumed(t, po.contractLineId)).toEqual({ line: 4, hotels: { [A1]: 50, [A2]: 4 } });
+      const afterCredit = { line: 4, hotels: { [A1]: 50, [A2]: 4 } };
+      expect(await consumed(t, po.contractLineId)).toEqual(afterCredit);
       expect(await receiptStatus(t, po.poId)).toBe("closed_short");
 
-      // The buyer asks for the 2 after all: reopening takes them from the contract again.
-      const out = await reopenShortClose(t, OWNER, po.poId, { deliveryLineIds: [dlId], remarks: "Vendor will resend" });
-      expect(out.reopened).toEqual([{ deliveryLineId: dlId, poLineId: po.lineId, qty: 2 }]);
-      expect(out.callOffReconsume).toEqual([{ arcContractLineId: po.contractLineId, hotelId: A2, qty: 2 }]);
-      expect(await consumed(t, po.contractLineId)).toEqual(before);
-      expect(out.receiptStatus).toBe("partial");
+      // Credited qty stays closed: a reopen is refused and nothing moves.
+      const log = await logOf(t, po.poId);
+      const err = await expectInvError(
+        reopenShortClose(t, OWNER, po.poId, { deliveryLineIds: [dlId], remarks: "Vendor will resend" }),
+        "VALIDATION",
+        { field: "deliveryLineIds", rtvNumbers: [sent.rtvNumber] }
+      );
+      expect(err.message).toBe(`Qty credited by RTV ${sent.rtvNumber} can't be reopened`);
+      expect(await logOf(t, po.poId)).toEqual(log);
+      expect(await consumed(t, po.contractLineId)).toEqual(afterCredit);
+      expect(await receiptStatus(t, po.poId)).toBe("closed_short");
     });
   });
 });

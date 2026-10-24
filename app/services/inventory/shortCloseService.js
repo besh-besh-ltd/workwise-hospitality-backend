@@ -14,8 +14,9 @@
 //
 // A CREDIT return to vendor closes its returned qty through the same log
 // (closeForCreditReturn): rows carry rtv_id, and a call-off gives that qty
-// back to the contract too. Those rows reopen like any other close (the buyer
-// wants the goods after all), and the reopen re-consumes the contract.
+// back to the contract too. Credited qty stays closed for good: reopen skips
+// rows with rtv_id (turning a credit into a replacement is a decision about
+// the return, not a short-close reopen).
 //
 // Who: the PO's owners, through the PO initiate gate (assertPoInitiateAccess:
 // PO read scope → 404, then PO_INITIATE_PERMISSIONS → 403). When: once the
@@ -280,8 +281,10 @@ export async function shortClose(t, user, poId, { target, reasonCode, remarks } 
 
 /**
  * Reopen short-closed quantity on chosen delivery lines: each line gets a
- * 'reopen' row for its net closed qty (Σ close − Σ reopen), including qty a
- * CREDIT return closed (the buyer wants those goods delivered after all).
+ * 'reopen' row for its net closed qty (Σ close − Σ reopen) over the buyer's
+ * own short-closes. Qty a CREDIT return closed (rows with rtv_id) is never
+ * reopened; asking only for that gives VALIDATION "Qty credited by RTV <no>
+ * can't be reopened".
  *
  * @param {{deliveryLineIds:number[], remarks:string}} input remarks required
  * @returns {Promise<{poId, poNumber, companyId, hotelIds, shortCloseIds,
@@ -305,7 +308,7 @@ export async function reopenShortClose(t, user, poId, { deliveryLineIds, remarks
     `SELECT sc.delivery_line_id,
             SUM(CASE WHEN sc.action = 'close' THEN sc.qty ELSE -sc.qty END)::text AS qty
        FROM tbl_po_short_close sc
-      WHERE sc.po_id = $1 AND sc.delivery_line_id = ANY($2::int[])
+      WHERE sc.po_id = $1 AND sc.delivery_line_id = ANY($2::int[]) AND sc.rtv_id IS NULL
       GROUP BY sc.delivery_line_id`,
     [id, lines.map((l) => l.id)]
   );
@@ -313,7 +316,20 @@ export async function reopenShortClose(t, user, poId, { deliveryLineIds, remarks
   const rows = lines
     .map((l) => ({ deliveryLineId: l.id, poLineId: l.poLineId, arcContractLineId: l.arcContractLineId, qty: netById.get(l.id) || 0 }))
     .filter((r) => r.qty > 0);
-  if (!rows.length) throw invalid('Nothing is short-closed on those lines', { field: 'deliveryLineIds' });
+  if (!rows.length) {
+    const credited = await t.any(
+      `SELECT DISTINCT rv.rtv_number
+         FROM tbl_po_short_close sc JOIN tbl_rtv rv ON rv.id = sc.rtv_id
+        WHERE sc.po_id = $1 AND sc.delivery_line_id = ANY($2::int[])
+        ORDER BY rv.rtv_number`,
+      [id, lines.map((l) => l.id)]
+    );
+    if (credited.length) {
+      const rtvNumbers = credited.map((r) => r.rtv_number);
+      throw invalid(`Qty credited by RTV ${rtvNumbers.join(', ')} can't be reopened`, { field: 'deliveryLineIds', rtvNumbers });
+    }
+    throw invalid('Nothing is short-closed on those lines', { field: 'deliveryLineIds' });
+  }
 
   const shortCloseIds = await writeLog(t, {
     companyId: ctx.companyId, poId: id, rows, reasonCode: null, remarks: note, action: 'reopen', userId: positiveInt(user?.id),
