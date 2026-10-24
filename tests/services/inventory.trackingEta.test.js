@@ -3,13 +3,18 @@
 //
 // Rule under test (app/models/poDashboardModel.js fetchTrackingRows):
 //   - open delivery = tbl_po_delivery with status open|partial and a due date,
-//     on a PO that is not legacy-received, not received / closed short and not
-//     completed;
+//     on a PO that is not received / closed short (a legacy-received PO is
+//     'received'; the go-live backlog, legacy with nothing received, counts)
+//     and not completed;
 //   - ETA = the earliest open due date on or after today (IST), else the
 //     earliest overdue one;
-//   - `overdue` = some open delivery is past its IST due date;
+//   - `overdue` = some open delivery is past its IST due date, once the vendor
+//     has accepted the PO (not while it is sent / awaiting acceptance);
+//   - eta_label = "Phase N overdue" (or "N phases overdue") when late, else
+//     the ETA day;
 //   - with no open dated delivery, ETA and `overdue` fall back to the
 //     milestone date as before.
+// The tracking export writes the ETA as a date-only "ETA (IST)" cell.
 //
 // Dates are computed from Postgres's IST "today", so the suite means the same
 // thing under the UTC session CI and prod run in and under a local IST one.
@@ -21,6 +26,7 @@ import { db, closeDb } from "../setup/db.js";
 import { IDS } from "../fixtures/ids.js";
 import { httpClient } from "../helpers/http.js";
 import * as fx from "../helpers/invPlanFixtures.js";
+import { buildTrackingWorkbook } from "../../app/services/poExcelExport.js";
 
 const tr = fx.newTracker();
 
@@ -48,11 +54,14 @@ async function istDay(offset = 0) {
  * milestone. deliveries = [{phaseNo, dueDate|null, status?}], each planning
  * the whole line (the tracking ETA reads delivery rows, not quantities).
  */
-async function poWithPlan({ deliveries, milestoneDue = null, status = "approved", legacy = false }) {
+async function poWithPlan({ deliveries, milestoneDue = null, status = "approved", legacy = false, receiptStatus = null }) {
   return db.tx(async (t) => {
     const po = await fx.makeRfqPo(t, { status, lines: [{ qty: 10 }], tracker: tr });
     if (legacy) {
       await t.none(`UPDATE tbl_rfq_purchase_order SET receipt_legacy = true WHERE id = $1`, [po.poId]);
+    }
+    if (receiptStatus) {
+      await t.none(`UPDATE tbl_rfq_purchase_order SET receipt_status = $2 WHERE id = $1`, [po.poId, receiptStatus]);
     }
     for (const d of deliveries) {
       const row = await t.one(
@@ -102,7 +111,8 @@ describe("PO tracking ETA", () => {
       ],
       milestoneDue: p30,
     });
-    // A late phase and an upcoming one: the ETA is the upcoming date, flagged overdue.
+    // A late phase and an upcoming one: the ETA is the upcoming date, flagged
+    // overdue, and the line under it names the late phase.
     const lateAndNext = await poWithPlan({
       deliveries: [
         { phaseNo: 1, dueDate: m1 },
@@ -119,16 +129,34 @@ describe("PO tracking ETA", () => {
     });
     // Due today (IST) is on time, not overdue.
     const dueToday = await poWithPlan({ deliveries: [{ phaseNo: 1, dueDate: today }], milestoneDue: m3 });
+    // Go-live backlog: flagged legacy but nothing received, so still received
+    // line by line; its plan drives the ETA.
+    const backlog = await poWithPlan({
+      deliveries: [{ phaseNo: 1, dueDate: m1 }, { phaseNo: 2, dueDate: p12 }],
+      milestoneDue: p30, legacy: true, receiptStatus: "not_received",
+    });
+    // Not yet accepted by the vendor: the date shows, but nothing is late.
+    const sent = await poWithPlan({ deliveries: [{ phaseNo: 1, dueDate: m3 }], status: "sent" });
+    const awaiting = await poWithPlan({
+      deliveries: [{ phaseNo: 1, dueDate: m1 }, { phaseNo: 2, dueDate: p4 }], status: "acceptance_pending",
+    });
 
     const rows = await trackingRows();
 
     expect(rows.get(upcoming.poId)).toMatchObject({ eta_label: p5, overdue: false });
     expect(rows.get(upcoming.poId).eta_delivery.slice(0, 10)).toBe(p5);
 
-    expect(rows.get(lateAndNext.poId)).toMatchObject({ eta_label: p4, overdue: true });
+    expect(rows.get(lateAndNext.poId)).toMatchObject({ eta_label: "Phase 1 overdue", overdue: true });
     expect(rows.get(lateAndNext.poId).eta_delivery.slice(0, 10)).toBe(p4);
 
-    expect(rows.get(allLate.poId)).toMatchObject({ eta_label: m6, overdue: true });
+    expect(rows.get(allLate.poId)).toMatchObject({ eta_label: "2 phases overdue", overdue: true });
+    expect(rows.get(allLate.poId).eta_delivery.slice(0, 10)).toBe(m6);
+
+    expect(rows.get(backlog.poId)).toMatchObject({ eta_label: "Phase 1 overdue", overdue: true });
+    expect(rows.get(backlog.poId).eta_delivery.slice(0, 10)).toBe(p12);
+
+    expect(rows.get(sent.poId)).toMatchObject({ eta_label: m3, overdue: false });
+    expect(rows.get(awaiting.poId)).toMatchObject({ eta_label: p4, overdue: false });
 
     // The overdue milestone no longer decides the ETA or its colour…
     expect(rows.get(dueToday.poId)).toMatchObject({ eta_label: today, overdue: false });
@@ -150,7 +178,9 @@ describe("PO tracking ETA", () => {
       milestoneDue: p20,
     });
     // Received before line-level receiving existed: its plan rows don't count.
-    const legacy = await poWithPlan({ deliveries: [{ phaseNo: 1, dueDate: m2 }], milestoneDue: p20, legacy: true });
+    const legacy = await poWithPlan({
+      deliveries: [{ phaseNo: 1, dueDate: m2 }], milestoneDue: p20, legacy: true, receiptStatus: "received",
+    });
     // A completed PO's leftover open phase doesn't count either.
     const completed = await poWithPlan({
       deliveries: [{ phaseNo: 1, dueDate: m2 }], milestoneDue: p20, status: "completed",
@@ -164,5 +194,26 @@ describe("PO tracking ETA", () => {
       expect(rows.get(po.poId)).toMatchObject({ eta_label: p20, overdue: false });
     }
     expect(rows.get(nothing.poId)).toMatchObject({ eta_delivery: null, eta_label: null, overdue: false });
+  });
+});
+
+describe("PO tracking export", () => {
+  it("writes the ETA as a date-only ETA (IST) column", async () => {
+    const wb = buildTrackingWorkbook({
+      rows: [
+        { id: 1, po_number: "PO-1", eta_delivery: "2026-11-20T00:00:00.000Z", overdue: true, total_value: 10 },
+        { id: 2, po_number: "PO-2", eta_delivery: null, overdue: false, total_value: 10 },
+      ],
+      generatedBy: "test",
+    });
+    const ws = wb.getWorksheet("PO tracking");
+    const header = ws.getRow(1).values.indexOf("ETA (IST)");
+    expect(header).toBeGreaterThan(0);
+    expect(ws.getRow(1).values).not.toContain("Next milestone due (IST)");
+    const cell = ws.getRow(2).getCell(header);
+    // The calendar day itself: no +05:30 shift, no time of day.
+    expect(cell.value).toEqual(new Date(Date.UTC(2026, 10, 20)));
+    expect(cell.numFmt).toBe("dd-mmm-yyyy");
+    expect(ws.getRow(3).getCell(header).value).toBeNull();
   });
 });

@@ -172,12 +172,93 @@ describe("delivery plan", () => {
         [BUYER, role.id, fx.CO, A1]
       );
       const out = await getDeliveries(t, buyer, po.poId);
-      expect(out.can).toEqual({ editPlan: false, shortClose: false, receive: false, reverse: true, manageSiteRep: false });
+      expect(out.can).toEqual({
+        editPlan: false, shortClose: false, receive: false, reverse: true, manageSiteRep: false, siteRepHotelIds: [],
+      });
+
+      // Receiving and site-rep links follow grn.create at the PO's hotels, not
+      // the initiate grant: a receiver without awarding.create gets both ...
+      const grant = async (title, resource, action, hotelId) => {
+        const r = await t.one(
+          `INSERT INTO tbl_roles (title, description, created_by) VALUES ($1, 'test', $2) RETURNING id`,
+          [title, ADMIN]
+        );
+        await t.none(
+          `INSERT INTO tbl_role_permissions (role_id, permission_id)
+           SELECT $1, id FROM tbl_permissions WHERE resource::text = $2 AND action::text = $3`,
+          [r.id, resource, action]
+        );
+        await t.none(
+          `INSERT INTO tbl_user_role_scopes (user_id, role_id, company_id, hotel_id) VALUES ($1, $2, $3, $4)`,
+          [BUYER, r.id, fx.CO, hotelId]
+        );
+      };
+      const two = await fx.makeRfqPo(t, { mappedHotels: [A1, A2] });
+      await grant("C2 receiver", "grn", "create", A2);
+      expect((await getDeliveries(t, buyer, two.poId)).can).toEqual({
+        editPlan: false, shortClose: false, receive: true, reverse: true, manageSiteRep: true, siteRepHotelIds: [A2],
+      });
+      // ... only at the hotels where they hold it (A1 alone: no grn.create there).
+      expect((await getDeliveries(t, buyer, po.poId)).can).toMatchObject({
+        receive: false, manageSiteRep: false, siteRepHotelIds: [],
+      });
+
+      // Receive waits for the vendor to accept; links can go out before that.
+      for (const status of ["acceptance_pending", "sent", "pending_approval"]) {
+        await t.none(`UPDATE tbl_rfq_purchase_order SET status = $2 WHERE id = $1`, [two.poId, status]);
+        expect((await getDeliveries(t, buyer, two.poId)).can).toMatchObject({
+          receive: false, manageSiteRep: true, siteRepHotelIds: [A2],
+        });
+      }
+      // A cancelled or rejected PO offers neither.
+      for (const status of ["cancelled", "rejected"]) {
+        await t.none(`UPDATE tbl_rfq_purchase_order SET status = $2 WHERE id = $1`, [two.poId, status]);
+        expect((await getDeliveries(t, buyer, two.poId)).can).toMatchObject({ receive: false, manageSiteRep: false });
+      }
+
+      // The other direction: an initiator with no grn.create edits the plan
+      // and short-closes, but can neither receive nor manage site reps.
+      await grant("C2 initiator", "awarding", "create", A1);
+      expect((await getDeliveries(t, buyer, po.poId)).can).toEqual({
+        editPlan: true, shortClose: true, receive: false, reverse: true, manageSiteRep: false, siteRepHotelIds: [],
+      });
 
       // A vendor, or a site-rep token, never reads the buyer's plan, whatever a route lets through.
       for (const who of [{ id: VENDOR, user_type: 3 }, { id: ADMIN, user_type: 2, is_token_user: true }]) {
         await expect(getDeliveries(t, who, po.poId)).rejects.toMatchObject({ code: "NOT_FOUND" });
         await expect(savePlan(t, who, po.poId, [])).rejects.toMatchObject({ code: "NOT_FOUND" });
+      }
+    });
+  });
+
+  it("the payload lists the PO's site-rep links, never the token", async () => {
+    await withTx(async (t) => {
+      const po = await fx.makeRfqPo(t, { mappedHotels: [A1, A2] });
+      const link = (over) =>
+        t.one(
+          `INSERT INTO tbl_token_login_data
+             (token_type, entity_id, name, email, phone, added_by, token, token_hash, hotel_id, expires_at, revoked_at, last_used_at)
+           VALUES ('GRN', $1, $2, $3, '9876543210', $4, NULL, md5(random()::text), $5,
+                   now() + interval '7 days', $6, $7)
+           RETURNING id`,
+          [po.poId, over.name, `${over.name.toLowerCase()}@example.com`, ADMIN, over.hotelId, over.revokedAt ?? null, over.lastUsedAt ?? null]
+        );
+      const old = await link({ name: "Ravi", hotelId: A1, revokedAt: new Date("2030-01-01T00:00:00Z") });
+      const live = await link({ name: "Meera", hotelId: A2, lastUsedAt: new Date("2030-01-02T00:00:00Z") });
+
+      const { siteReps } = await getDeliveries(t, admin, po.poId);
+      expect(siteReps.map((r) => [r.tokenId, r.name, r.hotelId, r.hotelName, r.revoked, r.live])).toEqual([
+        [Number(live.id), "Meera", A2, "Hotel A-2", false, true],
+        [Number(old.id), "Ravi", A1, "Hotel A-1", true, false],
+      ]);
+      expect(siteReps[0]).toMatchObject({
+        email: "meera@example.com", phone: "9876543210", lastUsedAt: "2030-01-02T00:00:00.000Z",
+      });
+      expect(Date.parse(siteReps[0].expiresAt)).toBeGreaterThan(Date.now());
+      for (const r of siteReps) {
+        expect(Object.keys(r).sort()).toEqual([
+          "createdAt", "email", "expiresAt", "hotelId", "hotelName", "lastUsedAt", "live", "name", "phone", "revoked", "tokenId",
+        ]);
       }
     });
   });
