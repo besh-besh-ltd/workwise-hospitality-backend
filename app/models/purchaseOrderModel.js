@@ -1,8 +1,7 @@
 import db from "../config/dbConn.js";
 import { sendApprovalNotification } from "../controllers/po/purchaseOrderEmails.js";
 import { consoleLogData, generateSignature, logError } from "../helper/common.js";
-import { scheduleGRNReminders } from "../helper/cronManager.js";
-import { sendDispatchedEmail, sendGRNRepresentativeEmail, sendGRNUpdationEmail, sendInvoiceEmail } from "../helper/sendEmailFunctions/generalReminderEmails.js";
+import { sendGRNRepresentativeEmail, sendGRNUpdationEmail, sendInvoiceEmail } from "../helper/sendEmailFunctions/generalReminderEmails.js";
 import { AVAILABLE_HIERARCHY_TYPES, INVALID_PO_STATUSES_FOR_VENDOR, PO_STATUSES } from "../util/constants.js";
 import { logger } from "../util/logger.js";
 import generalModel, { markPOStatusChange, createApprovalInstance, getApprovalWorkflowUsers } from "./generalModel.js";
@@ -2679,6 +2678,18 @@ export const handleUpdatePO = async (po_id, changes, current_user) => {
       await t.none(productUpdateQuery, values);
     }
 
+    // A delivery plan made against the old lines or quantities cannot stand:
+    // drop it here, in this transaction, and the next read of the PO's
+    // deliveries builds the default plan from the edited lines (inventory
+    // planCore.ensureDefaultPlan). Only reachable before vendor acceptance
+    // (PO_LOCKED_STATUSES), so nothing has been dispatched or received yet.
+    const linesChanged = Object.values(productUpdates).some(
+      (info) => info.remove || Object.prototype.hasOwnProperty.call(info.fields, "quantity")
+    );
+    if (linesChanged) {
+      await t.none(`DELETE FROM tbl_po_delivery WHERE po_id = $1`, [poId]);
+    }
+
     // --- 2b) Server-authoritative recompute of total_price per touched
     // product, then re-aggregate the PO's total_value. The engine consumes
     // the row state AFTER the patches above were applied, so any client-
@@ -3156,7 +3167,7 @@ export const updateHSNCode = async (po_id, hsn_codes, mapped_by) => {
 // iterated it — the TypeError rejected inside db.tx and took the recorded GRN
 // or invoice down with it. Resolve from the approval engine instead and keep
 // the legacy hierarchy only as an extra source for a PO that still carries one.
-const resolvePoNotificationRecipients = async (po, t = db) => {
+export const resolvePoNotificationRecipients = async (po, t = db) => {
   const ids = new Set();
 
   if (po?.initiated_by != null) ids.add(Number(po.initiated_by));
@@ -3348,10 +3359,26 @@ export const handleMarkGRN = async (po_id, grn_document_url, user_id, remarks) =
 };
 
 
+// The legacy "Mark dispatched" button. It is now a dispatch note with no lines
+// (inventory dispatchService), which moves po.status forward to 'dispatched'
+// (never back from GRN / invoice_raised), locks the delivery plan, and sends
+// the same dispatch email and GRN reminders as before. It used to read the
+// PO's lines joined to their quote items with t.one, which threw on every PO
+// with more than one line and on every call-off PO (D1).
+//
+// Throws Error('PO does not exist…' / '…does not belong to you!') as before,
+// and InventoryError CONFLICT when the PO is not accepted, is closed, or has
+// been received in full.
 export const handleMarkDispatched = async (po_id, vendor_id) => {
-  return await db.tx(async t => {
+  // Lazy: the inventory services import this model.
+  const [{ createDispatch }, { notifyDispatchCreated }] = await Promise.all([
+    import("../services/inventory/dispatchService.js"),
+    import("../services/inventory/notices/planNotices.js"),
+  ]);
+
+  const dispatch = await db.tx(async (t) => {
     const po = await t.oneOrNone(
-      `SELECT * FROM tbl_rfq_purchase_order
+      `SELECT id, finalized_vendor_id FROM tbl_rfq_purchase_order
       WHERE id = $1`,
       [po_id]
     );
@@ -3359,53 +3386,12 @@ export const handleMarkDispatched = async (po_id, vendor_id) => {
     if(!po) throw new Error('PO does not exist with given id')
     else if (po && po.finalized_vendor_id != vendor_id) throw new Error('PO does not belong to you!')
 
-    await t.none(
-      `UPDATE tbl_rfq_purchase_order
-      SET status = 'dispatched'
-      WHERE id = $1`,
-      [po_id]
-    );
+    return createDispatch(t, { system: true, userId: Number(vendor_id) }, po.id, { lines: [] });
+  });
 
-    const formattedPOData = await t.one(
-      `SELECT PO.*,
-      TU.name AS finalized_vendor_name,
-      TU.email AS finalized_vendor_email,
-      COALESCE(TAHH.created_at, TAI.completed_at) AS po_approved_on,
-      QI.delivery_period
-
-      FROM tbl_rfq_purchase_order PO
-      JOIN tbl_purchase_order_product TPOP ON TPOP.purchase_order_id = PO.id
-      JOIN tbl_quote_items QI ON QI.id = TPOP.quote_id
-      LEFT JOIN tbl_approval_hierarchy_transactions TAHT ON TAHT.hierarchy_type = 'po' AND TAHT.target_entity_id = PO.id
-      LEFT JOIN tbl_approval_hierarchy_history TAHH ON TAHT.id = TAHH.approval_transaction_id AND TAHH.action = 'approved'
-      LEFT JOIN tbl_approval_instances TAI ON TAI.id = PO.approval_instance_id AND TAI.status = 'APPROVED'
-      JOIN tbl_users TU ON PO.finalized_vendor_id = TU.id
-      JOIN tbl_company TC ON TU.company_id = TC.id
-
-      WHERE PO.id = $1`,
-      [po_id]
-    );
-
-    const reminderUsers = await resolvePoNotificationRecipients(po, t);
-
-    const grnRepData = await t.oneOrNone(
-      `SELECT id, name, email, phone
-      FROM tbl_token_login_data
-      WHERE token_type = 'GRN'
-      AND entity_id = $1`,
-      [po_id]
-    );
-
-    // The dispatch itself is already recorded; reminders and mail are advisory.
-    try {
-      await scheduleGRNReminders(formattedPOData, reminderUsers, grnRepData);
-      await sendDispatchedEmail(formattedPOData, reminderUsers);
-    } catch (err) {
-      logError(`[po ${po_id}] dispatch notification failed`, err);
-    }
-
-    return true;
-  })
+  // After commit: advisory, never throws.
+  await notifyDispatchCreated(db, { dispatchId: dispatch.id });
+  return true;
 };
 
 export const handleAddSiteRepresentative = async (po_id, added_by, name, email, phone) => {

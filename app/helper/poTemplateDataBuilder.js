@@ -1,6 +1,7 @@
 import db from '../config/dbConn.js';
 import { formatCompanyLocationDisplay } from './companyLocation.js';
 import { buildPOTemplatePricing, resolvePOTaxMode } from './poTemplatePricing.js';
+import { loadDeliveryPlanForDocument, poQrSvg } from '../services/inventory/planDocument.js';
 
 const getLatestCompanyLocation = async (conn, companyId) => {
   if (!companyId) return null;
@@ -192,8 +193,11 @@ export const buildPOTemplateData = async (po_id, txContext = null) => {
 
   const approvalDataP = getApprovalDataForPO(po_id, poData, conn);
 
-  const [supplier, [buyerLocation, supplierLocation], items, paymentTermsList, rfqTerms, approvalData] =
-    await Promise.all([supplierP, locationsP, itemsP, paymentTermsP, rfqTermsP, approvalDataP]);
+  // The delivery plan (hotel × phase, inventory) as printed on the PO.
+  const deliveryPlanP = loadDeliveryPlanForDocument(conn, po_id);
+
+  const [supplier, [buyerLocation, supplierLocation], items, paymentTermsList, rfqTerms, approvalData, deliveryPlan] =
+    await Promise.all([supplierP, locationsP, itemsP, paymentTermsP, rfqTermsP, approvalDataP, deliveryPlanP]);
 
   const taxMode = resolvePOTaxMode(buyerLocation, supplierLocation);
   // Document-level global charges — primary source is the snapshot column on
@@ -345,7 +349,11 @@ export const buildPOTemplateData = async (po_id, txContext = null) => {
     rfqApproverName: approvalData.rfqApproverName,
     techEvaluations: approvalData.techEvaluations,
     commercialEvaluations: approvalData.commercialEvaluations,
-    poApprovers: approvalData.poApprovers
+    poApprovers: approvalData.poApprovers,
+    // Inventory: the delivery plan and a QR of the PO's short link (/s/p/<id>),
+    // which opens Receive for this PO when scanned at the receiving bay.
+    deliveryPlan,
+    poQrSvg: poQrSvg(po_id)
   };
 };
 

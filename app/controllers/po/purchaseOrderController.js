@@ -23,6 +23,8 @@ import { deriveScope } from "./poDashboardController.js";
 import { handleCallOffRejection, notifyCallOffRejected } from "../../services/callOffPoService.js";
 import { deferJson, isDeferred, sendDeferred } from "../../helper/deferredResponse.js";
 import { poFieldsFor } from "../../services/po/buyerOnlyPoFields.js";
+import { fillDefaultDueDates } from "../../services/inventory/planService.js";
+import { sendInventoryError } from "../../services/inventory/errors.js";
 
 // Tiny tagged-error class for controllers that need to map a thrown
 // failure mode to a specific HTTP status code (instead of the historic
@@ -1331,6 +1333,15 @@ export const acceptPO = async (req, res) => {
         WHERE id = $1
       `, [po_id]);
 
+      // Delivery plan (inventory): an untouched default plan gets its due
+      // date now that the delivery period runs from today. In a savepoint, so
+      // a plan problem can never cost the vendor their acceptance.
+      try {
+        await t.tx((sp) => fillDefaultDueDates(sp, po.id));
+      } catch (planErr) {
+        logError(`[po ${po.id}] delivery plan dates at acceptance failed`, planErr);
+      }
+
       await recordLifecycleEvent({
         entity_type: 'PO',
         entity_id: po_id,
@@ -1599,6 +1610,8 @@ export const markDispatched = async (req, res) => {
       data: result
     });
   } catch (error) {
+    // Refusals from the dispatch service (PO not accepted, closed, received in full).
+    if (error?.name === 'InventoryError') return sendInventoryError(res, error);
     logError('markDispatched failed', error);
     return res.status(500).json({
       status: 0,
