@@ -48,6 +48,9 @@ afterAll(async () => {
 });
 
 const countLabels = (html) => (html.match(/class="label[ "]/g) || []).length;
+const occurrences = (html, text) => html.split(text).length - 1;
+/** The drawing of an item's QR (bwip-js path data), as it appears in the sheet. */
+const qrDrawing = (invItemId) => qrSvg(shortUrl("i", invItemId)).match(/<path[^>]*\/>/)[0];
 
 /** Spies on the (stubbed) renderer and returns the calls it received. */
 const watchRenderer = () => jest.spyOn(pdfRenderer, "renderToFile");
@@ -65,8 +68,11 @@ describe("label HTML", () => {
       ],
     });
 
-    expect(html).toContain(qrSvg(shortUrl("i", 12)));
-    expect(html).toContain(qrSvg(shortUrl("i", 13)));
+    // Each item's QR is drawn once and referenced by every label of that item.
+    expect(occurrences(html, qrDrawing(12))).toBe(1);
+    expect(occurrences(html, qrDrawing(13))).toBe(1);
+    expect(html).toMatch(/<use href="#qr-i-12"/);
+    expect(html).toMatch(/<use href="#qr-i-13"/);
     expect(html).toContain("Paneer &lt;fresh&gt;"); // escaped, never raw markup
     expect(html).not.toContain("Paneer <fresh>");
     for (const text of ["PNR-1", "kg", "R2-S3", "LOT-7", "31 Mar 2027", "Sugar"]) {
@@ -116,7 +122,9 @@ describe("renderItemLabels", () => {
       expect(countLabels(html)).toBe(4);
       expect(html.match(/DRY-R1/g)).toHaveLength(3);
       expect(html.match(/15 Jan 2027/g)).toHaveLength(3);
-      expect(html).toContain(qrSvg(shortUrl("i", oil)));
+      expect(occurrences(html, qrDrawing(oil))).toBe(1);
+      expect(occurrences(html, qrDrawing(rice))).toBe(1); // three rice labels, one drawing
+      expect(occurrences(html, `<use href="#qr-i-${rice}"`)).toBe(3);
       expect(html).toContain("Sunflower oil");
       expect(options).toMatchObject({ format: "A4", preferCSSPageSize: true });
 
@@ -144,15 +152,21 @@ describe("renderItemLabels", () => {
       }
 
       await grantRoleScope(t, { userId: USER.id, roleId: await storekeeperRoleId(t), companyId: A, hotelId: A1 });
+      const itemMessages = new Set();
       for (const payload of [
         { layout: "A4_24", hotelId: A1, items: [{ invItemId: foreign, copies: 1 }] },
         { layout: "A4_24", items: [{ invItemId: foreign, copies: 1 }] },
         { layout: "A4_24", items: [{ invItemId: 999999999, copies: 1 }] },
-        { layout: "A4_24", hotelId: B1, items: [{ invItemId: mine, copies: 1 }] },
       ]) {
         const err = await thrownBy(t, (sp) => renderItemLabels(sp, USER, payload));
         expect([err.code, err.httpStatus]).toEqual(["NOT_FOUND", 404]);
+        itemMessages.add(err.message);
       }
+      // Another company's item and no item at all read the same: nothing to probe.
+      expect([...itemMessages]).toEqual(["Item not found"]);
+      const err = await thrownBy(t, (sp) =>
+        renderItemLabels(sp, USER, { layout: "A4_24", hotelId: B1, items: [{ invItemId: mine, copies: 1 }] }));
+      expect([err.code, err.httpStatus]).toEqual(["NOT_FOUND", 404]);
 
       for (const [field, payload] of [
         ["layout", { layout: "A5", items: [{ invItemId: mine, copies: 1 }] }],
@@ -165,6 +179,31 @@ describe("renderItemLabels", () => {
         const err = await thrownBy(t, (sp) => renderItemLabels(sp, USER, payload));
         expect([field, err.code, err.details.field]).toEqual([field, "VALIDATION", field]);
       }
+    });
+  });
+});
+
+describe("label job size", () => {
+  it("1000 labels (the cap) draw each QR once; the sheet stays small", async () => {
+    await withTx(async (t) => {
+      await grantRoleScope(t, { userId: USER.id, roleId: await storekeeperRoleId(t), companyId: A, hotelId: A1 });
+      const rice = await makeItem(t, { name: "Basmati rice", stockUom: "kg" });
+      const oil = await makeItem(t, { name: "Sunflower oil", stockUom: "L" });
+      const spy = watchRenderer();
+
+      await renderItemLabels(t, USER, {
+        layout: "A4_65",
+        items: [{ invItemId: rice, copies: 999 }, { invItemId: oil, copies: 1 }],
+      });
+      const [html] = spy.mock.calls[0];
+      expect(countLabels(html)).toBe(1000);
+      expect(occurrences(html, "<symbol ")).toBe(2);
+      expect(occurrences(html, qrDrawing(rice))).toBe(1);
+      expect(occurrences(html, `<use href="#qr-i-${rice}"`)).toBe(999);
+      // Inline, each label would carry its own ~4 KB drawing (about 4 MB here).
+      const oneDrawing = qrDrawing(rice).length;
+      expect(oneDrawing).toBeGreaterThan(2000);
+      expect(html.length).toBeLessThan(1000 * 600 + 2 * oneDrawing + 20000);
     });
   });
 });
@@ -225,10 +264,21 @@ describe("renderGrnLabels", () => {
       const foreignGrn = await makeGrn(t, {
         companyId: B, hotelId: B1, poId: foreignPo, lines: [{ poLineId: fl[0], invItemId: foreignItem, accepted: 1 }],
       });
+      const grnMessages = new Set();
       for (const id of [foreignGrn, 999999999, "abc"]) {
         err = await thrownBy(t, (sp) => renderGrnLabels(sp, USER, id, { layout: "A4_24", mode: "per_unit" }));
         expect([id, err.code, err.httpStatus]).toEqual([id, "NOT_FOUND", 404]);
+        grnMessages.add(err.message);
       }
+      expect([...grnMessages]).toEqual(["GRN not found"]);
+
+      // A draft has nothing in stock yet.
+      const draft = await makeGrn(t, {
+        poId, status: "draft", lines: [{ poLineId: lineIds[0], invItemId: item, accepted: 1 }],
+      });
+      err = await thrownBy(t, (sp) => renderGrnLabels(sp, USER, draft, { layout: "A4_24", mode: "per_unit" }));
+      expect([err.code, err.httpStatus, err.message, err.details.field])
+        .toEqual(["VALIDATION", 400, "Post the receipt before printing labels", "grnId"]);
 
       const reversal = await makeGrn(t, { poId, docType: "REVERSAL", reversesGrnId: grnId, lines: [] });
       err = await thrownBy(t, (sp) => renderGrnLabels(sp, USER, reversal, { layout: "A4_24", mode: "per_unit" }));

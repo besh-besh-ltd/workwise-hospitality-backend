@@ -12,15 +12,19 @@
 //   5. tbl_product_variant.sku of a variant mapped to a stock item.
 // Steps 3-5 use the GTIN for a GS1 code and the raw code otherwise. Numeric
 // EAN/UPC/GTIN codes match whatever their length (8, 12, 13 or 14 digits):
-// they are compared as GTIN-14, so a UPC-A alias matches its EAN-13 or GS1 read.
+// they are compared as GTIN-14, so a UPC-A alias matches its EAN-13 or GS1 read,
+// and a UPC-E is expanded to its UPC-A (not zero-padded) on either side.
 //
 // Scope (spec §6.1, §10.1): the context is `po:<id>` or `hotel:<id>`, and the
 // caller needs grn.read or inventory.read on that hotel / one of the PO's
 // hotels (a foreign context is 404, a visible one without the grant 403). With
 // no context, the companies of the caller's own readable hotels are searched.
 // Codes resolve inside that company only, so another tenant's code is simply
-// 'unknown'. In a PO context an item must also map to one of the PO's lines
-// (poLineId), otherwise it is 'unknown' too.
+// 'unknown'. In a PO context only items on the PO's lines are candidates (and
+// the result carries the poLineId); anything else is 'unknown' too. In a hotel
+// context every company item resolves, with stockedAtHotel saying whether the
+// hotel has a balance or hotel-item row for it. Our own item QR resolves with
+// GRN rights alone (grn.read / grn.create), as receiving scans it.
 //
 // resolveShortLink answers the /s/<t>/<id> page: the frontend route to open,
 // or NOT_FOUND (404) for anything missing or outside the caller's scope.
@@ -179,8 +183,60 @@ export function parseShortUrl(code) {
   return id ? { t: m[1].toLowerCase(), id } : null;
 }
 
-/** GTIN-14 key for an all-digit EAN-8 / UPC-A / EAN-13 / GTIN-14, else null. */
-const gtinKey = (code) => (/^(\d{8}|\d{12,14})$/.test(code) ? code.padStart(14, '0') : null);
+// ─── EAN / UPC equivalence ────────────────────────────────────────────────────
+
+/**
+ * UPC-E (8 digits: number system 0/1, six data digits, check digit) to the
+ * UPC-A it zero-suppresses, or null when the code is not a valid UPC-E.
+ * The last data digit says where the zeros go.
+ */
+export function upcEToUpcA(code) {
+  if (typeof code !== 'string' || !/^[01]\d{7}$/.test(code)) return null;
+  const [a, b, c, d, e, f] = code.slice(1, 7);
+  let body;
+  if (f <= '2') body = `${a}${b}${f}0000${c}${d}${e}`; // manufacturer ab f00, product 00cde
+  else if (f === '3') body = `${a}${b}${c}00000${d}${e}`; // abc00, 000de
+  else if (f === '4') body = `${a}${b}${c}${d}00000${e}`; // abcd0, 0000e
+  else body = `${a}${b}${c}${d}${e}0000${f}`; // abcde, 0000f (f 5-9)
+  const upcA = `${code[0]}${body}${code[7]}`;
+  return validGtinCheckDigit(upcA) ? upcA : null;
+}
+
+/** The UPC-E of a UPC-A that zero-suppresses, else null (inverse of upcEToUpcA). */
+export function upcAToUpcE(upcA) {
+  if (typeof upcA !== 'string' || !/^[01]\d{11}$/.test(upcA)) return null;
+  const m = upcA.slice(1, 6);
+  const p = upcA.slice(6, 11);
+  let data = null;
+  if ('012'.includes(m[2]) && m.slice(3) === '00' && p.startsWith('00')) data = `${m[0]}${m[1]}${p.slice(2)}${m[2]}`;
+  else if (m.slice(3) === '00' && p.startsWith('000')) data = `${m.slice(0, 3)}${p.slice(3)}3`;
+  else if (m[4] === '0' && p.startsWith('0000')) data = `${m.slice(0, 4)}${p[4]}4`;
+  else if (p.startsWith('0000') && p[4] >= '5') data = `${m}${p[4]}`;
+  if (!data) return null;
+  const upcE = `${upcA[0]}${data}${upcA[11]}`;
+  return upcEToUpcA(upcE) === upcA ? upcE : null;
+}
+
+/**
+ * How one numeric read can be stored as an alias:
+ *   keys  — GTIN-14 forms (EAN-8 / UPC-A / EAN-13 / GTIN-14 zero-padded; for a
+ *           valid UPC-E also its UPC-A), compared with lpad(alias, 14, '0');
+ *   forms — the 8-digit UPC-E of the same product, compared as text (padding
+ *           a UPC-E does not give its GTIN, so it cannot be a key).
+ * An 8-digit read is kept as an EAN-8 too: the digits alone do not say which.
+ */
+function gtinForms(code) {
+  if (!/^(\d{8}|\d{12,14})$/.test(code)) return { keys: [], forms: [] };
+  const keys = new Set([code.padStart(14, '0')]);
+  const upcA = code.length === 8 ? upcEToUpcA(code) : null;
+  if (upcA) keys.add(upcA.padStart(14, '0'));
+  const forms = new Set();
+  for (const key of keys) {
+    const upcE = key.startsWith('00') ? upcAToUpcE(key.slice(2)) : null;
+    if (upcE) forms.add(upcE);
+  }
+  return { keys: [...keys], forms: [...forms] };
+}
 
 // ─── Scope helpers ────────────────────────────────────────────────────────────
 
@@ -222,7 +278,7 @@ async function resolveContext(t, user, context) {
         WHERE id = ANY($1::int[]) ORDER BY hospitality_company_id`,
       [hotels]
     );
-    return { companyIds: rows.map((r) => Number(r.hospitality_company_id)), po: null };
+    return { companyIds: rows.map((r) => Number(r.hospitality_company_id)), po: null, hotelId: null };
   }
 
   const m = typeof context === 'string' ? context.trim().match(/^(po|hotel):(\d+)$/) : null;
@@ -233,7 +289,7 @@ async function resolveContext(t, user, context) {
 
   if (m[1] === 'hotel') {
     const { companyId } = await assertReadOnAny(t, user, [id]);
-    return { companyIds: [companyId], po: null };
+    return { companyIds: [companyId], po: null, hotelId: id };
   }
 
   let ctx;
@@ -245,7 +301,7 @@ async function resolveContext(t, user, context) {
   }
   if (!ctx.companyId || !ctx.hotelIds.length) throw notFound();
   await assertReadOnAny(t, user, ctx.hotelIds);
-  return { companyIds: [ctx.companyId], po: { id, companyId: ctx.companyId } };
+  return { companyIds: [ctx.companyId], po: { id, companyId: ctx.companyId }, hotelId: null };
 }
 
 /**
@@ -323,20 +379,28 @@ async function locate(t, user, kind, id) {
     );
     if (!item) return null;
     const companyId = Number(item.hospitality_company_id);
-    const hotels = await hotelIdsWithPermission(t, user, 'inventory', 'read');
-    const first = hotels.length
-      ? await t.oneOrNone(
+    // Scanning our own label is part of receiving, so GRN rights are enough
+    // to resolve it; the stock card the link opens needs inventory.read.
+    const stockHotels = await hotelIdsWithPermission(t, user, 'inventory', 'read');
+    const scanHotels = [...new Set([
+      ...stockHotels,
+      ...(await hotelIdsWithPermission(t, user, 'grn', 'read')),
+      ...(await hotelIdsWithPermission(t, user, 'grn', 'create')),
+    ])];
+    const inCompany = scanHotels.length
+      ? (await t.any(
         `SELECT id FROM tbl_hospitality_company_hotels
-          WHERE id = ANY($1::int[]) AND hospitality_company_id = $2 ORDER BY id LIMIT 1`,
-        [hotels, companyId]
-      )
-      : null;
-    if (!first) return null;
+          WHERE id = ANY($1::int[]) AND hospitality_company_id = $2 ORDER BY id`,
+        [scanHotels, companyId]
+      )).map((r) => Number(r.id))
+      : [];
+    if (!inCompany.length) return null;
+    const stockCardHotel = inCompany.find((h) => stockHotels.includes(h));
     return {
       kind: 'item',
       invItemId: id,
       companyId,
-      path: `/dashboard/buyer/inventory/stock/${Number(first.id)}/${id}`,
+      path: stockCardHotel ? `/dashboard/buyer/inventory/stock/${stockCardHotel}/${id}` : null,
     };
   }
 
@@ -345,20 +409,37 @@ async function locate(t, user, kind, id) {
 
 // ─── Item lookup ──────────────────────────────────────────────────────────────
 
-/** Steps 3-5: alias, item code, variant SKU. Returns {invItemId, packFactor} or null. */
-async function lookupItem(t, companyIds, code) {
-  const key = gtinKey(code);
+// Stock items on a PO's lines (the line's own variant, else its RFQ product's).
+// `$<poId>` is NULL outside a PO context, which lets every item through.
+const ON_CONTEXT_PO = (column, param) => `($${param}::int IS NULL OR ${column} IN (
+          SELECT iv_po.inv_item_id
+            FROM tbl_purchase_order_product pop
+            LEFT JOIN tbl_rfq_products rp ON rp.id = pop.rfq_product_id
+            JOIN tbl_inv_item_variant iv_po
+              ON iv_po.product_variant_id = COALESCE(pop.product_variant_id, rp.product_variant_id)
+           WHERE pop.purchase_order_id = $${param}))`;
+
+/**
+ * Steps 3-5: alias, item code, variant SKU. In a PO context only items on the
+ * PO's lines are candidates, so a closer match off the PO cannot hide the one
+ * on it. Returns {invItemId, packFactor} or null.
+ */
+async function lookupItem(t, ctx, code) {
+  const { companyIds } = ctx;
+  const poId = ctx.po ? ctx.po.id : null;
+  const { keys, forms } = gtinForms(code);
   const alias = await t.oneOrNone(
     `SELECT b.inv_item_id, b.pack_factor::text AS pack_factor
        FROM tbl_inv_item_barcode b
       WHERE b.hospitality_company_id = ANY($1::int[])
         AND (b.code = $2
              OR lower(b.code) = lower($2)
-             OR ($3::text IS NOT NULL AND b.code ~ '^([0-9]{8}|[0-9]{12,14})$'
-                 AND lpad(b.code, 14, '0') = $3))
+             OR b.code = ANY($4::text[])
+             OR (b.code ~ '^([0-9]{8}|[0-9]{12,14})$' AND lpad(b.code, 14, '0') = ANY($3::text[])))
+        AND ${ON_CONTEXT_PO('b.inv_item_id', 5)}
       ORDER BY (b.code = $2) DESC, (lower(b.code) = lower($2)) DESC, b.id
       LIMIT 1`,
-    [companyIds, code, key]
+    [companyIds, code, keys, forms, poId]
   );
   if (alias) return { invItemId: Number(alias.inv_item_id), packFactor: Number(alias.pack_factor) };
 
@@ -366,8 +447,9 @@ async function lookupItem(t, companyIds, code) {
     `SELECT id FROM tbl_inv_item
       WHERE hospitality_company_id = ANY($1::int[]) AND item_code IS NOT NULL
         AND lower(item_code) = lower($2)
+        AND ${ON_CONTEXT_PO('id', 3)}
       ORDER BY id LIMIT 1`,
-    [companyIds, code]
+    [companyIds, code, poId]
   );
   if (coded) return { invItemId: Number(coded.id), packFactor: 1 };
 
@@ -378,8 +460,9 @@ async function lookupItem(t, companyIds, code) {
       WHERE iv.hospitality_company_id = ANY($1::int[])
         AND COALESCE(pv.is_deleted, 0) = 0
         AND pv.sku IS NOT NULL AND lower(pv.sku) = lower($2)
+        AND ${ON_CONTEXT_PO('iv.inv_item_id', 3)}
       ORDER BY iv.id LIMIT 1`,
-    [companyIds, code]
+    [companyIds, code, poId]
   );
   if (bySku) return { invItemId: Number(bySku.inv_item_id), packFactor: 1 };
   return null;
@@ -416,12 +499,26 @@ async function itemPayload(t, { invItemId, packFactor }, ctx) {
     poLineId = Number(line.id);
   }
 
+  // In a hotel context: does the hotel hold or plan to hold this item (a
+  // balance row or a hotel-item row)? The code is known either way; the
+  // screen decides what an unstocked item means. Null without a single hotel.
+  let stockedAtHotel = null;
+  if (ctx.hotelId) {
+    const row = await t.one(
+      `SELECT EXISTS (SELECT 1 FROM tbl_inv_balance WHERE hotel_id = $1 AND inv_item_id = $2)
+           OR EXISTS (SELECT 1 FROM tbl_inv_hotel_item WHERE hotel_id = $1 AND inv_item_id = $2) AS stocked`,
+      [ctx.hotelId, invItemId]
+    );
+    stockedAtHotel = row.stocked === true;
+  }
+
   return {
     invItemId: Number(item.id),
     displayName: item.display_name,
     stockUom: item.stock_uom,
     packFactor,
     poLineId,
+    stockedAtHotel,
   };
 }
 
@@ -435,7 +532,8 @@ async function itemPayload(t, { invItemId, packFactor }, ctx) {
  * @param {{code:string, context?:string}} args  context 'po:<id>' | 'hotel:<id>'
  * @returns {Promise<{kind:'item'|'po'|'grn'|'dispatch'|'unknown', code:string,
  *   gs1:{gtin,batch,expiry,serial}|null,
- *   item:{invItemId, displayName, stockUom, packFactor:number, poLineId:number|null}|null,
+ *   item:{invItemId, displayName, stockUom, packFactor:number, poLineId:number|null,
+ *         stockedAtHotel:boolean|null}|null,
  *   poId?:number, grnId?:number, dispatchId?:number}>}
  *   `code` is echoed as received (trimmed).
  * @throws InventoryError VALIDATION (code / context), NOT_FOUND (foreign or
@@ -471,7 +569,7 @@ export async function resolveScan(t, user, { code, context } = {}) {
   // 2. GS1, else 3-5 on the plain code.
   const gs1 = parseGs1(raw);
   const lookupCode = gs1 ? gs1.gtin : raw.replace(ANY_AIM_PREFIX, '');
-  const hit = lookupCode ? await lookupItem(t, ctx.companyIds, lookupCode) : null;
+  const hit = lookupCode ? await lookupItem(t, ctx, lookupCode) : null;
   const item = hit ? await itemPayload(t, hit, ctx) : null;
   return item ? { kind: 'item', code: raw, gs1, item } : unknown(gs1);
 }
@@ -481,6 +579,8 @@ export async function resolveScan(t, user, { code, context } = {}) {
  *   p → /dashboard/buyer/purchase-orders/<id>?tab=deliveries
  *   g → /dashboard/buyer/inventory/grn/<id>
  *   i → /dashboard/buyer/inventory/stock/<first hotel with inventory.read>/<id>
+ *       (404 without inventory.read in the item's company, even though GRN
+ *       rights are enough for resolveScan to recognise the same label)
  *   d → /dashboard/buyer/inventory/receive/<poId>?dispatch=<id>
  *
  * @param {object} t
@@ -495,8 +595,8 @@ export async function resolveShortLink(t, user, { t: kind, id } = {}) {
   const found = ['p', 'g', 'i', 'd'].includes(type)
     ? await locate(t, user, type, positiveInt(id))
     : null;
-  if (!found) throw notFound();
+  if (!found || !found.path) throw notFound();
   return { path: found.path };
 }
 
-export default { parseGs1, parseShortUrl, resolveScan, resolveShortLink };
+export default { parseGs1, parseShortUrl, upcEToUpcA, upcAToUpcE, resolveScan, resolveShortLink };

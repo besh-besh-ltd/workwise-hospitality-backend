@@ -151,7 +151,10 @@ describe("resolveScan and resolveShortLink", () => {
         kind: "item",
         code: `/s/i/${item}`,
         gs1: null,
-        item: { invItemId: item, displayName: "Basmati rice", stockUom: "kg", packFactor: 1, poLineId: null },
+        item: {
+          invItemId: item, displayName: "Basmati rice", stockUom: "kg", packFactor: 1, poLineId: null,
+          stockedAtHotel: false,
+        },
       });
 
       // A GRN at a hotel the user has no grant on is not theirs to open.
@@ -177,7 +180,10 @@ describe("resolveScan and resolveShortLink", () => {
         kind: "item",
         code: "8901234567897",
         gs1: null,
-        item: { invItemId: butter, displayName: "Amul Butter 100g", stockUom: "pcs", packFactor: 24, poLineId: null },
+        item: {
+          invItemId: butter, displayName: "Amul Butter 100g", stockUom: "pcs", packFactor: 24, poLineId: null,
+          stockedAtHotel: false,
+        },
       });
       // Scanner noise around the code is ignored.
       expect((await resolveScan(t, USER, { code: " 8901234567897\r\n", ...ctx })).item.invItemId).toBe(butter);
@@ -189,7 +195,10 @@ describe("resolveScan and resolveShortLink", () => {
         kind: "item",
         code: gs1Code,
         gs1: { gtin: "08901234567897", batch: "B9", expiry: "2027-12-31", serial: null },
-        item: { invItemId: butter, displayName: "Amul Butter 100g", stockUom: "pcs", packFactor: 24, poLineId: null },
+        item: {
+          invItemId: butter, displayName: "Amul Butter 100g", stockUom: "pcs", packFactor: 24, poLineId: null,
+          stockedAtHotel: false,
+        },
       });
 
       // A GS1 code whose GTIN is not an alias is unknown, with the parse kept
@@ -259,7 +268,10 @@ describe("resolveScan and resolveShortLink", () => {
         kind: "item",
         code: `ON-PO-${process.pid}`,
         gs1: null,
-        item: { invItemId: onPo, displayName: "On the PO", stockUom: "kg", packFactor: 12, poLineId: lineIds[1] },
+        item: {
+          invItemId: onPo, displayName: "On the PO", stockUom: "kg", packFactor: 12, poLineId: lineIds[1],
+          stockedAtHotel: null, // a PO context names no single hotel
+        },
       });
       // The item is on two lines: once the first is received, the next open one.
       await t.none(`UPDATE tbl_purchase_order_product SET receipt_status = 'received' WHERE id = $1`, [lineIds[1]]);
@@ -274,6 +286,98 @@ describe("resolveScan and resolveShortLink", () => {
       expect((await resolveScan(t, USER, { code: `OFF-PO-${process.pid}`, context: `hotel:${A1}` })).item).toMatchObject({
         invItemId: offPo, poLineId: null,
       });
+    });
+  });
+
+  it("in a PO context the alias of the item on the PO wins over a closer match off it", async () => {
+    await withTx(async (t) => {
+      await grantStorekeeper(t, A1);
+      const [v1] = await freeVariants(t, 1);
+      const onPo = await makeItem(t, { name: "Mixed-case alias, on the PO" });
+      await mapVariant(t, { invItemId: onPo, variantId: v1 });
+      const offPo = await makeItem(t, { name: "Exact alias, off the PO" });
+      const code = `MIX-${process.pid}`;
+      await addBarcode(t, { invItemId: offPo, code });
+      await addBarcode(t, { invItemId: onPo, code: code.toLowerCase(), packFactor: 6 });
+      const { poId, lineIds } = await makeRfqPo(t, { lines: [{ qty: 6, variantId: v1 }] });
+
+      // Off the PO, the exact alias is the better match ...
+      expect((await resolveScan(t, USER, { code, context: `hotel:${A1}` })).item.invItemId).toBe(offPo);
+      // ... on the PO only the PO's item is a candidate, so it is found, not "unknown".
+      expect((await resolveScan(t, USER, { code, context: `po:${poId}` })).item).toMatchObject({
+        invItemId: onPo, packFactor: 6, poLineId: lineIds[0],
+      });
+    });
+  });
+
+  it("UPC-E and its UPC-A / EAN-13 / GTIN-14 forms are one product", async () => {
+    await withTx(async (t) => {
+      await grantStorekeeper(t, A1);
+      const ctx = { context: `hotel:${A1}` };
+      // UPC-E 04252614 is UPC-A 042100005264 (last data digit 1: manufacturer
+      // 42100, product 00526), not 04252614 padded with zeros.
+      const cola = await makeItem(t, { name: "Cola 330ml can" });
+      await addBarcode(t, { invItemId: cola, code: "042100005264" });
+      for (const code of ["04252614", "0042100005264", `]C1010004210000526410LOT${GS}`]) {
+        const r = await resolveScan(t, USER, { code, ...ctx });
+        expect([code, r.kind, r.item?.invItemId]).toEqual([code, "item", cola]);
+      }
+
+      // Stored as UPC-E, found from the long forms.
+      const chips = await makeItem(t, { name: "Chips 50g" });
+      await addBarcode(t, { invItemId: chips, code: "01234565" });
+      for (const code of ["012345000065", "0012345000065", "00012345000065"]) {
+        const r = await resolveScan(t, USER, { code, ...ctx });
+        expect([code, r.kind, r.item?.invItemId]).toEqual([code, "item", chips]);
+      }
+
+      // An 8-digit code that is not a valid UPC-E stays an EAN-8: zero-padding
+      // never turns it into some UPC-A.
+      expect((await resolveScan(t, USER, { code: "04252615", ...ctx })).kind).toBe("unknown");
+    });
+  });
+
+  it("in a hotel context an item not stocked there still resolves, flagged stockedAtHotel:false", async () => {
+    await withTx(async (t) => {
+      await grantStorekeeper(t, null); // every company-A hotel
+      const held = await makeItem(t, { name: "Has a balance at A1" });
+      await t.none(
+        `INSERT INTO tbl_inv_balance (hotel_id, inv_item_id, hospitality_company_id, qty) VALUES ($1, $2, $3, 4)`,
+        [A1, held, A]
+      );
+      const binned = await makeItem(t, { name: "Has a bin at A1" });
+      await t.none(
+        `INSERT INTO tbl_inv_hotel_item (hotel_id, inv_item_id, hospitality_company_id, bin_label) VALUES ($1, $2, $3, 'B-1')`,
+        [A1, binned, A]
+      );
+      const never = await makeItem(t, { name: "Never stocked" });
+      for (const [id, n] of [[held, 1], [binned, 2], [never, 3]]) {
+        await addBarcode(t, { invItemId: id, code: `STK-${process.pid}-${n}` });
+      }
+
+      const at = async (n, context) => (await resolveScan(t, USER, { code: `STK-${process.pid}-${n}`, context }));
+      for (const [n, a1, a2] of [[1, true, false], [2, true, false], [3, false, false]]) {
+        const r1 = await at(n, `hotel:${A1}`);
+        const r2 = await at(n, `hotel:${A2}`);
+        // The code is known either way: "kind:item", never the link-this-code path.
+        expect([n, r1.kind, r1.item.stockedAtHotel, r2.kind, r2.item.stockedAtHotel])
+          .toEqual([n, "item", a1, "item", a2]);
+      }
+      // No single hotel in play: no flag.
+      expect((await at(1, undefined)).item.stockedAtHotel).toBeNull();
+    });
+  });
+
+  it("our item QR resolves for a receiver with GRN rights only; its stock card link needs inventory.read", async () => {
+    await withTx(async (t) => {
+      await grantRoleScope(t, { userId: USER.id, roleId: await roleWith(t, ["grn.read", "grn.create"]), companyId: A, hotelId: A1 });
+      const item = await makeItem(t, { name: "Labelled by us" });
+      expect(await resolveScan(t, USER, { code: `/s/i/${item}`, context: `hotel:${A1}` })).toMatchObject({
+        kind: "item", item: { invItemId: item, stockedAtHotel: false },
+      });
+      // The phone-camera link opens the stock card, which this user cannot read.
+      const err = await thrownBy(t, (sp) => resolveShortLink(sp, USER, { t: "i", id: item }));
+      expect(err).toMatchObject({ code: "NOT_FOUND", httpStatus: 404 });
     });
   });
 
@@ -393,7 +497,10 @@ describe("scan resolve and short links over HTTP", () => {
       message: expect.any(String),
       data: {
         kind: "item", code, gs1: null,
-        item: { invItemId: itemId, displayName: `HTTP item ${process.pid}`, stockUom: "L", packFactor: 6, poLineId: null },
+        item: {
+          invItemId: itemId, displayName: `HTTP item ${process.pid}`, stockUom: "L", packFactor: 6, poLineId: null,
+          stockedAtHotel: false,
+        },
       },
     });
 

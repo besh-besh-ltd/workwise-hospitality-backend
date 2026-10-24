@@ -81,6 +81,11 @@ const positiveInt = (v) => {
 const invalid = (field, message, details = {}) =>
   new InventoryError('VALIDATION', message, { field, ...details });
 
+// One message whether the id is missing or belongs to another company, so the
+// label endpoints cannot be used to probe which ids exist.
+const itemNotFound = () => new InventoryError('NOT_FOUND', 'Item not found');
+const grnNotFound = () => new InventoryError('NOT_FOUND', 'GRN not found');
+
 const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 
 /** 'YYYY-MM-DD' that names a real day, else null. */
@@ -110,6 +115,20 @@ function layoutOf(layout) {
 const labelCount = (qty) => Math.max(1, Math.ceil(Number(qty) - 1e-9));
 
 /**
+ * An item's QR as an SVG <symbol> body: bwip-js returns one <svg viewBox> per
+ * code; the sheet defines it once and every label of the item <use>s it, so a
+ * 1000-label job carries one drawing per item, not one per label (~4 KB each).
+ */
+function qrSymbol(invItemId) {
+  const svg = qrSvg(shortUrl('i', invItemId));
+  const viewBox = (svg.match(/viewBox="([^"]+)"/) || [])[1];
+  const open = svg.indexOf('>');
+  const close = svg.lastIndexOf('</svg>');
+  if (!viewBox || open === -1 || close === -1) throw new Error('unexpected QR SVG from bwip-js');
+  return { id: `qr-i-${invItemId}`, viewBox, body: svg.slice(open + 1, close).trim() };
+}
+
+/**
  * The label sheet HTML (the template function). Pure: no database, no I/O
  * beyond the cached template file.
  *
@@ -121,10 +140,10 @@ const labelCount = (qty) => Math.max(1, Math.ceil(Number(qty) - 1e-9));
  */
 export function renderLabelsHtml({ layout, labels }) {
   const spec = layoutOf(layout);
-  const qrs = new Map();
+  const symbols = new Map();
   const qrFor = (id) => {
-    if (!qrs.has(id)) qrs.set(id, qrSvg(shortUrl('i', id)));
-    return qrs.get(id);
+    if (!symbols.has(id)) symbols.set(id, qrSymbol(id));
+    return symbols.get(id);
   };
   const rows = (labels || []).map((l) => ({
     qr: qrFor(l.invItemId),
@@ -138,7 +157,7 @@ export function renderLabelsHtml({ layout, labels }) {
   const perSheet = spec.cols * spec.rows;
   const sheets = [];
   for (let i = 0; i < rows.length; i += perSheet) sheets.push({ labels: rows.slice(i, i + perSheet) });
-  return template()({ layout: spec, sheets });
+  return template()({ layout: spec, sheets, symbols: [...symbols.values()] });
 }
 
 /** Render to a temp PDF, upload, clean up. Throws when the upload fails. */
@@ -182,10 +201,16 @@ async function assertUpdateInCompany(t, user, companyId) {
     [companyId]
   );
   if (live.some((h) => hotels.includes(Number(h.id)))) return;
-  if (!live.length) throw new InventoryError('NOT_FOUND', 'Item not found');
-  await assertHotelPermission(t, user, { resource: 'inventory', action: 'update', hotelId: Number(live[0].id) });
+  if (!live.length) throw itemNotFound();
+  try {
+    await assertHotelPermission(t, user, { resource: 'inventory', action: 'update', hotelId: Number(live[0].id) });
+  } catch (err) {
+    // Outside the company: the same answer as for an id that does not exist.
+    if (err instanceof InventoryError && err.code === 'NOT_FOUND') throw itemNotFound();
+    throw err;
+  }
   // A super admin passes above; anyone reaching here holds no grant.
-  throw new InventoryError('NOT_FOUND', 'Item not found');
+  throw itemNotFound();
 }
 
 function validateItemsPayload(payload) {
@@ -248,7 +273,7 @@ export async function renderItemLabels(t, user, payload) {
       WHERE i.id = ANY($1::int[])`,
     [ids, hotelId]
   );
-  if (rows.length !== ids.length) throw new InventoryError('NOT_FOUND', 'Item not found');
+  if (rows.length !== ids.length) throw itemNotFound();
   const byId = new Map(rows.map((r) => [Number(r.id), r]));
   const companies = [...new Set(rows.map((r) => Number(r.hospitality_company_id)))];
 
@@ -256,7 +281,7 @@ export async function renderItemLabels(t, user, payload) {
     const { companyId } = await assertHotelPermission(t, user, {
       resource: 'inventory', action: 'update', hotelId,
     });
-    if (companies.some((c) => c !== companyId)) throw new InventoryError('NOT_FOUND', 'Item not found');
+    if (companies.some((c) => c !== companyId)) throw itemNotFound();
   } else {
     for (const companyId of companies) await assertUpdateInCompany(t, user, companyId);
   }
@@ -290,9 +315,10 @@ export async function renderItemLabels(t, user, payload) {
  * @param {number|string} grnId
  * @param {{layout:string, mode?:'per_unit'|'per_pack'}} payload  mode defaults to per_unit
  * @returns {Promise<{url:string}>}
- * @throws InventoryError NOT_FOUND (missing / foreign GRN), FORBIDDEN (no
- *   grn.read at the GRN's hotel), VALIDATION (layout | mode | grnId for a
- *   reversal, a reversed receipt or nothing to label | copies over the cap)
+ * @throws InventoryError NOT_FOUND 'GRN not found' (missing or foreign GRN,
+ *   one message for both), FORBIDDEN (no grn.read at the GRN's hotel),
+ *   VALIDATION (layout | mode | grnId for a draft, a reversal, a reversed
+ *   receipt or nothing to label | copies over the cap)
  */
 export async function renderGrnLabels(t, user, grnId, payload) {
   const p = payload && typeof payload === 'object' ? payload : {};
@@ -307,11 +333,18 @@ export async function renderGrnLabels(t, user, grnId, payload) {
       [id]
     )
     : null;
-  if (!grn) throw new InventoryError('NOT_FOUND', 'GRN not found');
-  await assertHotelPermission(t, user, { resource: 'grn', action: 'read', hotelId: Number(grn.hotel_id) });
+  if (!grn) throw grnNotFound();
+  try {
+    await assertHotelPermission(t, user, { resource: 'grn', action: 'read', hotelId: Number(grn.hotel_id) });
+  } catch (err) {
+    if (err instanceof InventoryError && err.code === 'NOT_FOUND') throw grnNotFound();
+    throw err;
+  }
   if (grn.doc_type !== 'RECEIPT' || grn.status === 'reversed') {
     throw invalid('grnId', 'Labels are printed from a receipt that still stands');
   }
+  // A draft has put nothing in stock yet; its quantities can still change.
+  if (grn.status === 'draft') throw invalid('grnId', 'Post the receipt before printing labels');
 
   const lines = await t.any(
     `SELECT gl.inv_item_id, gl.accepted_qty::text AS accepted_qty, gl.uom_factor::text AS uom_factor,
