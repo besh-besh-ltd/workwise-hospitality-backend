@@ -29,6 +29,7 @@ BEGIN
   END IF;
 END $$;
 
+DROP TABLE IF EXISTS public.tbl_inv_count_line_event;
 DROP TABLE IF EXISTS public.tbl_inv_count_line;
 DROP TABLE IF EXISTS public.tbl_inv_count;
 DROP TABLE IF EXISTS public.tbl_inv_adjustment_line;

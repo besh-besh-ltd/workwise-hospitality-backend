@@ -4,7 +4,10 @@
 // no approval). OUT posts MARK_OUT per line at the current average cost;
 // RETURN posts RETURN_IN tagged with the department, at the current average,
 // or at the last MARK_OUT unit cost of that item at the hotel when nothing is
-// on hand (the goods go back at what they were issued at).
+// on hand (the goods go back at what they were issued at). A department
+// returns at most its net issued quantity of the item at the hotel (mark-outs
+// less earlier returns); stock that was never issued comes in as a FOUND
+// adjustment instead.
 //
 // Idempotency: tbl_inv_out.client_event_id is UNIQUE. A replayed session
 // (dropped connection, outbox retry) returns the original document; replays
@@ -16,7 +19,7 @@
 // item order before postMovements, which takes the same rows in the same
 // order) → postMovements (called once).
 
-import { assertHotelPermission, hotelIdsWithPermission } from './scope.js';
+import { hotelIdsWithPermission } from './scope.js';
 import { nextDocNumber } from './docNumber.js';
 import { postMovements } from './ledger.js';
 import {
@@ -201,15 +204,19 @@ function validateLines(lines) {
  *   requestedByName?:string, remarks?:string, clientEventId:string,
  *   lines:Array<{invItemId:number, qty:number}>}} input  qty > 0, stock units
  * @returns {Promise<{doc:object, replayed:boolean}>} doc is the OutDoc
- * @throws {InventoryError} VALIDATION | NOT_FOUND | FORBIDDEN | CONFLICT |
- *   LOCKED (count freeze) | NEGATIVE_STOCK (details.lines: every short line,
+ * @throws {InventoryError} VALIDATION (a RETURN over the department's net
+ *   issued qty: {field:'lines', index, invItemId, maxReturnable}) |
+ *   NOT_FOUND (a hotel the caller can neither read nor post at) | FORBIDDEN
+ *   (can read it, cannot post) | CONFLICT | LOCKED (count freeze) |
+ *   NEGATIVE_STOCK (details.lines: every short line,
  *   {invItemId, itemName, available, requested, …})
  */
 export async function postOut(t, user, input = {}) {
   const clientEventId = requireUuid(input.clientEventId);
   const hotelId = positiveInt(input.hotelId);
   if (!hotelId) throw invalid('Choose a hotel', { field: 'hotelId' });
-  const { companyId } = await assertHotelPermission(t, user, { resource: 'inventory', action: 'create', hotelId });
+  // Out of the caller's sight (another company, or no read here): NOT_FOUND.
+  const { companyId } = await assertDocAccess(t, user, hotelId, 'create');
 
   // Serialise copies of one scan session, then answer from the first.
   await t.one(`SELECT pg_advisory_xact_lock(hashtext('inv:out'), hashtext($1))`, [clientEventId]);
@@ -249,25 +256,45 @@ export async function postOut(t, user, input = {}) {
   );
   const lineIdOf = new Map(written.map((w) => [Number(w.inv_item_id), Number(w.id)]));
 
-  // RETURN with nothing on hand: back at the last mark-out cost.
+  // RETURN: at most what this department still holds of the item here (net
+  // of earlier returns), read under the balance locks; with nothing on hand,
+  // back at the last mark-out cost.
   const returnCost = new Map();
   if (docType === 'RETURN') {
     const ids = [...lineIdOf.keys()].sort((a, b) => a - b);
-    const balances = await t.any(
-      `SELECT inv_item_id, qty::text AS qty FROM tbl_inv_balance
+    await t.any(
+      `SELECT inv_item_id FROM tbl_inv_balance
         WHERE hotel_id = $1 AND inv_item_id = ANY($2::int[])
         ORDER BY inv_item_id FOR UPDATE`,
       [hotelId, ids]
     );
-    const onHand = new Map(balances.map((b) => [Number(b.inv_item_id), Number(b.qty)]));
-    const missing = lines.find((l) => !onHand.has(l.invItemId));
-    if (missing) {
-      throw invalid(
-        `${items.get(missing.invItemId).displayName} was never marked out at this hotel, so it cannot be returned`,
-        { field: 'lines', index: missing.index, invItemId: missing.invItemId }
-      );
+    const issued = new Map(
+      (
+        await t.any(
+          `SELECT inv_item_id, (-sum(qty))::text AS net
+             FROM tbl_inv_movement
+            WHERE hotel_id = $1 AND inv_item_id = ANY($2::int[]) AND department_id = $3
+              AND movement_type IN ('MARK_OUT', 'RETURN_IN')
+            GROUP BY inv_item_id`,
+          [hotelId, ids, departmentId]
+        )
+      ).map((r) => [Number(r.inv_item_id), Math.max(0, Number(r.net))])
+    );
+    for (const l of lines) {
+      const max = issued.get(l.invItemId) ?? 0;
+      if (l.qty > max) {
+        const item = items.get(l.invItemId);
+        throw invalid(
+          `Only ${max} ${item.stockUom} of ${item.displayName} was marked out to ${department.title} here`,
+          { field: 'lines', index: l.index, invItemId: l.invItemId, maxReturnable: max }
+        );
+      }
     }
-    const empty = ids.filter((id) => onHand.get(id) <= 0);
+    const balances = await t.any(
+      `SELECT inv_item_id, qty::text AS qty FROM tbl_inv_balance WHERE hotel_id = $1 AND inv_item_id = ANY($2::int[])`,
+      [hotelId, ids]
+    );
+    const empty = balances.filter((b) => Number(b.qty) <= 0).map((b) => Number(b.inv_item_id));
     if (empty.length) {
       const last = await t.any(
         `SELECT DISTINCT ON (inv_item_id) inv_item_id, unit_cost::text AS unit_cost
@@ -276,7 +303,9 @@ export async function postOut(t, user, input = {}) {
           ORDER BY inv_item_id, posted_at DESC, id DESC`,
         [hotelId, empty]
       );
-      for (const r of last) returnCost.set(Number(r.inv_item_id), Number(r.unit_cost));
+      for (const r of last) {
+        if (Number(r.unit_cost) > 0) returnCost.set(Number(r.inv_item_id), Number(r.unit_cost));
+      }
     }
   }
 

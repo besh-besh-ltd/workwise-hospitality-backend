@@ -113,12 +113,16 @@ export const submitCount = async (req, res) => {
   return undefined;
 };
 
-/** POST /counts/:id/approve {reasons:{[lineId]: text}}: posts the differences. */
+/**
+ * POST /counts/:id/approve {reasons:{[lineId]: text}, unitCosts?:{[lineId]: number}}:
+ * posts the differences.
+ */
 export const approveCount = async (req, res) => {
   let data;
   try {
     const id = countId(req);
-    data = await db.tx((t) => approveCountService(t, req.user, id, bodyOf(req).reasons ?? {}));
+    const { reasons, unitCosts } = bodyOf(req);
+    data = await db.tx((t) => approveCountService(t, req.user, id, reasons ?? {}, unitCosts ?? null));
   } catch (err) {
     return sendInventoryError(res, err);
   }

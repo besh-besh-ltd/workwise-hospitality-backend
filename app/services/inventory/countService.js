@@ -5,31 +5,41 @@
 //            at most one active (open or submitted) count per hotel.
 //   lines    (inventory.create, open only) each saved line records the
 //            balance at that moment (system_qty_at_count) and when it was
-//            counted; re-saving re-captures it. Each save carries a
-//            clientEventId: a replayed save changes nothing. An item not on
-//            the count (found while counting) joins it.
+//            counted; re-saving re-captures it. Each line of a save carries a
+//            clientEventId, kept in tbl_inv_count_line_event: a key the count
+//            has seen before is a replay and changes nothing, even after a
+//            newer save of the same line (a late retry never overwrites a
+//            newer count). An item not on the count (found while counting)
+//            joins it.
 //   submit   (inventory.create) computes variance qty and value (at the
-//            current average) for the counted lines; uncounted lines stay
-//            out of the posting.
+//            current average) for the counted lines. A FULL count must have
+//            every line counted; a SELECTED count needs at least one, and its
+//            uncounted lines stay out of the posting.
 //   approve  (inventory.approve) every non-zero variance needs a reason;
 //            posts COUNT_IN / COUNT_OUT of counted − system_qty_at_count per
 //            line (the delta, so stock that moved during the count is kept),
-//            COUNT_IN at the current average. A hotel's first approved FULL
-//            count starts its stock (stock_started_at).
+//            COUNT_IN at the current average. A gain on an item with no cost
+//            at the hotel never posts at 0: it takes the approver's
+//            unitCosts[lineId], else the latest inbound cost of the item at
+//            any hotel of the company, else the approval is refused. A
+//            hotel's first approved FULL count starts its stock
+//            (stock_started_at).
 //   cancel   (inventory.approve) open or submitted; posts nothing.
 //
 // Blind counts hide systemQtyAtCount and the variances from callers without
 // inventory.approve at the hotel.
 //
 // Lock order: count row (FOR UPDATE) → per-hotel count advisory lock (when
-// items join) → doc sequence (start only) → postMovements (approve only).
+// items join) → doc sequence (start only) → balance rows (approve: created if
+// missing and locked in ledger order, so the cost decisions hold) →
+// postMovements (approve only).
 
-import { assertHotelPermission, hotelIdsWithPermission } from './scope.js';
+import { hotelIdsWithPermission } from './scope.js';
 import { nextDocNumber } from './docNumber.js';
 import { postMovements } from './ledger.js';
 import {
   MAX_LINES, PAGE_SIZE, positiveInt, invalid, notFound, conflict, num, money, iso, pageOf, requireUuid, toQty,
-  flag, assertDocAccess, holds, loadCompanyItems,
+  flag, assertDocAccess, holds, loadCompanyItems, lockBalances, hasNoCost,
 } from './stockCommon.js';
 
 export const COUNT_SCOPES = Object.freeze(['FULL', 'SELECTED']);
@@ -232,7 +242,8 @@ const lockHotelCounts = (t, hotelId) =>
 export async function startCount(t, user, input = {}) {
   const hotelId = positiveInt(input.hotelId);
   if (!hotelId) throw invalid('Choose a hotel', { field: 'hotelId' });
-  const { companyId } = await assertHotelPermission(t, user, { resource: 'inventory', action: 'create', hotelId });
+  // Out of the caller's sight (another company, or no read here): NOT_FOUND.
+  const { companyId } = await assertDocAccess(t, user, hotelId, 'create');
   const scope = input.scope;
   if (!COUNT_SCOPES.includes(scope)) throw invalid('Choose a full or a selected count', { field: 'scope' });
   const isBlind = flag(input.isBlind);
@@ -297,15 +308,18 @@ async function lockCount(t, user, countId, action, statuses) {
 /**
  * PUT /counts/:id/lines {lines:[{invItemId, countedQty, clientEventId}]}.
  * @returns {Promise<{count:object, replayed:boolean}>} replayed: every line
- *   was a repeat of an earlier save (nothing changed)
- * @throws {InventoryError} VALIDATION | NOT_FOUND | FORBIDDEN | CONFLICT (count
- *   not open; an added item is in another active count)
+ *   was a repeat of an earlier save of this count (nothing changed)
+ * @throws {InventoryError} VALIDATION (details {field:'lines', index}: bad
+ *   qty, an item or a clientEventId twice in one save, a key already used for
+ *   another item) | NOT_FOUND | FORBIDDEN | CONFLICT (count not open; an added
+ *   item is in another active count)
  */
 export async function saveCountLines(t, user, countId, lines) {
   const count = await lockCount(t, user, countId, 'create', ['open']);
   if (!Array.isArray(lines) || !lines.length) throw invalid('Nothing to save', { field: 'lines' });
   if (lines.length > MAX_LINES) throw invalid(`At most ${MAX_LINES} lines at once`, { field: 'lines' });
-  const seen = new Set();
+  const seenItems = new Set();
+  const seenEvents = new Set();
   const input = lines.map((l, index) => {
     const invItemId = positiveInt(l?.invItemId);
     if (!invItemId) throw invalid('Each line needs an item', { field: 'lines', index });
@@ -313,32 +327,44 @@ export async function saveCountLines(t, user, countId, lines) {
     if (countedQty == null || countedQty < 0) {
       throw invalid('Counted quantity must be 0 or more', { field: 'lines', index, invItemId });
     }
-    if (seen.has(invItemId)) throw invalid('The same item is on two lines', { field: 'lines', index, invItemId });
-    seen.add(invItemId);
-    return { index, invItemId, countedQty, clientEventId: requireUuid(l?.clientEventId) };
+    if (seenItems.has(invItemId)) throw invalid('The same item is on two lines', { field: 'lines', index, invItemId });
+    seenItems.add(invItemId);
+    const clientEventId = requireUuid(l?.clientEventId);
+    if (seenEvents.has(clientEventId)) {
+      throw invalid('Each line needs its own clientEventId', { field: 'lines', index, invItemId });
+    }
+    seenEvents.add(clientEventId);
+    return { index, invItemId, countedQty, clientEventId };
   });
 
-  const existing = await t.any(
-    `SELECT id, inv_item_id, client_event_id FROM tbl_inv_count_line WHERE count_id = $1`,
-    [count.id]
+  // Every key this count has applied before, whatever the line holds now.
+  const applied = new Map(
+    (
+      await t.any(
+        `SELECT e.client_event_id, l.inv_item_id
+           FROM tbl_inv_count_line_event e
+           JOIN tbl_inv_count_line l ON l.id = e.count_line_id
+          WHERE e.count_id = $1 AND e.client_event_id = ANY($2::uuid[])`,
+        [count.id, input.map((l) => l.clientEventId)]
+      )
+    ).map((r) => [r.client_event_id, Number(r.inv_item_id)])
   );
-  const byItem = new Map(existing.map((e) => [Number(e.inv_item_id), e]));
-  const byEvent = new Map(existing.filter((e) => e.client_event_id).map((e) => [e.client_event_id, e]));
-
   const toSave = [];
   for (const l of input) {
-    const prior = byEvent.get(l.clientEventId);
-    if (prior) {
-      if (Number(prior.inv_item_id) !== l.invItemId) {
-        throw invalid('That clientEventId was used for another item', { field: 'lines', index: l.index });
-      }
-      continue; // a replay of a save already applied
+    const priorItem = applied.get(l.clientEventId);
+    if (priorItem == null) {
+      toSave.push(l);
+    } else if (priorItem !== l.invItemId) {
+      throw invalid('That clientEventId was used for another item', { field: 'lines', index: l.index, invItemId: l.invItemId });
     }
-    toSave.push(l);
+    // else: a replay of a save already applied (possibly superseded since)
   }
   if (!toSave.length) return { count: await payloadFor(t, user, count.id, count.hotelId), replayed: true };
 
-  const added = toSave.filter((l) => !byItem.has(l.invItemId)).map((l) => l.invItemId);
+  const existing = new Set(
+    (await t.any(`SELECT inv_item_id FROM tbl_inv_count_line WHERE count_id = $1`, [count.id])).map((e) => Number(e.inv_item_id))
+  );
+  const added = toSave.filter((l) => !existing.has(l.invItemId)).map((l) => l.invItemId);
   if (added.length) {
     await loadCompanyItems(t, count.companyId, added);
     await lockHotelCounts(t, count.hotelId);
@@ -346,7 +372,10 @@ export async function saveCountLines(t, user, countId, lines) {
   }
 
   // The system quantity at the moment of counting.
+  const userId = positiveInt(user.id);
   const ids = toSave.map((l) => l.invItemId);
+  const qtys = toSave.map((l) => l.countedQty);
+  const events = toSave.map((l) => l.clientEventId);
   await t.none(
     `INSERT INTO tbl_inv_count_line (hospitality_company_id, count_id, inv_item_id)
      SELECT $1, $2, x FROM unnest($3::int[]) AS x
@@ -361,24 +390,56 @@ export async function saveCountLines(t, user, countId, lines) {
        FROM unnest($4::int[], $5::numeric[], $6::uuid[]) AS x(item, counted, event)
        LEFT JOIN tbl_inv_balance b ON b.hotel_id = $2 AND b.inv_item_id = x.item
       WHERE l.count_id = $1 AND l.inv_item_id = x.item`,
-    [count.id, count.hotelId, positiveInt(user.id), ids, toSave.map((l) => l.countedQty), toSave.map((l) => l.clientEventId)]
+    [count.id, count.hotelId, userId, ids, qtys, events]
   );
-  await t.none(`UPDATE tbl_inv_count SET updated_by = $2, updated_at = now() WHERE id = $1`, [count.id, positiveInt(user.id)]);
+  await t.none(
+    `INSERT INTO tbl_inv_count_line_event
+       (hospitality_company_id, count_id, count_line_id, client_event_id, counted_qty, applied_by)
+     SELECT $1, $2, l.id, x.event, x.counted, $3
+       FROM unnest($4::int[], $5::numeric[], $6::uuid[]) AS x(item, counted, event)
+       JOIN tbl_inv_count_line l ON l.count_id = $2 AND l.inv_item_id = x.item`,
+    [count.companyId, count.id, userId, ids, qtys, events]
+  );
+  await t.none(`UPDATE tbl_inv_count SET updated_by = $2, updated_at = now() WHERE id = $1`, [count.id, userId]);
   return { count: await payloadFor(t, user, count.id, count.hotelId), replayed: false };
 }
+
+const UNCOUNTED_LIST_MAX = 50;
 
 /**
  * POST /counts/:id/submit: freezes the variances (qty, and value at the
  * current average) of the counted lines.
  * @throws {InventoryError} NOT_FOUND | FORBIDDEN | CONFLICT (not open) |
- *   VALIDATION (nothing counted)
+ *   VALIDATION {field:'lines'}: nothing counted, or (FULL) lines left
+ *   uncounted: {uncounted:[{lineId, invItemId, displayName}] (first 50), uncountedTotal}
  */
 export async function submitCount(t, user, countId) {
   const count = await lockCount(t, user, countId, 'create', ['open']);
+  const uncounted = await t.any(
+    `SELECT l.id, l.inv_item_id, i.display_name
+       FROM tbl_inv_count_line l
+       JOIN tbl_inv_item i ON i.id = l.inv_item_id
+       LEFT JOIN tbl_inv_hotel_item hi ON hi.hotel_id = $2 AND hi.inv_item_id = l.inv_item_id
+      WHERE l.count_id = $1 AND l.counted_qty IS NULL
+      ORDER BY hi.bin_label NULLS LAST, i.display_name, l.id`,
+    [count.id, count.hotelId]
+  );
   const { n } = await t.one(
     `SELECT count(*)::int AS n FROM tbl_inv_count_line WHERE count_id = $1 AND counted_qty IS NOT NULL`,
     [count.id]
   );
+  if (count.scope === 'FULL' && uncounted.length) {
+    throw invalid(
+      `Count every item before submitting a full count: ${uncounted.length} not counted yet`,
+      {
+        field: 'lines',
+        uncounted: uncounted.slice(0, UNCOUNTED_LIST_MAX).map((r) => ({
+          lineId: Number(r.id), invItemId: Number(r.inv_item_id), displayName: r.display_name,
+        })),
+        uncountedTotal: uncounted.length,
+      }
+    );
+  }
   if (!n) throw invalid('Count at least one item before submitting', { field: 'lines' });
   await t.none(
     `UPDATE tbl_inv_count_line l
@@ -396,28 +457,56 @@ export async function submitCount(t, user, countId) {
   return payloadFor(t, user, count.id, count.hotelId);
 }
 
+/** Inbound movement types whose unit cost may value a gain elsewhere in the company. */
+const COST_SOURCES = ['GRN_IN', 'OPENING', 'ADJUST_IN', 'COUNT_IN'];
+
+/** {[lineId]: number > 0} → Map(lineId → cost); VALIDATION {field:'unitCosts', lineId} otherwise. */
+function parseUnitCosts(unitCosts) {
+  const out = new Map();
+  if (unitCosts == null) return out;
+  if (typeof unitCosts !== 'object' || Array.isArray(unitCosts)) {
+    throw invalid('unitCosts must map line ids to costs', { field: 'unitCosts' });
+  }
+  for (const [key, raw] of Object.entries(unitCosts)) {
+    if (raw == null || raw === '') continue;
+    const cost = toQty(raw);
+    if (cost == null || cost <= 0) {
+      throw invalid('Each unit cost must be a number above 0', { field: 'unitCosts', lineId: key });
+    }
+    out.set(Number(key), cost);
+  }
+  return out;
+}
+
 /**
- * POST /counts/:id/approve {reasons:{[lineId]:string}}: posts the deltas.
+ * POST /counts/:id/approve {reasons:{[lineId]:string}, unitCosts?:{[lineId]:number}}:
+ * posts the deltas.
+ *
+ * A gain on an item with no cost at the hotel (no balance, or an average of
+ * 0, read under the balance locks) is valued at unitCosts[lineId] (> 0), else
+ * at the latest inbound unit cost of the item at any hotel of the company,
+ * else the approval is refused. unitCosts for other lines are ignored.
+ *
  * @throws {InventoryError} NOT_FOUND | FORBIDDEN | CONFLICT (not submitted) |
- *   VALIDATION (details.lines: [{lineId, invItemId, displayName}] missing a
- *   reason) | NEGATIVE_STOCK
+ *   VALIDATION {field:'reasons', lines:[{lineId, invItemId, displayName}]}
+ *   (missing reasons, checked first) | VALIDATION {field:'unitCosts',
+ *   lines:[{lineId, invItemId, displayName}]} (gains with no cost to use) |
+ *   VALIDATION {field:'unitCosts', lineId} (a bad cost) | NEGATIVE_STOCK
  */
-export async function approveCount(t, user, countId, reasons = {}) {
+export async function approveCount(t, user, countId, reasons = {}, unitCosts = null) {
   const count = await lockCount(t, user, countId, 'approve', ['submitted']);
   if (reasons != null && (typeof reasons !== 'object' || Array.isArray(reasons))) {
     throw invalid('reasons must map line ids to text', { field: 'reasons' });
   }
+  const costsGiven = parseUnitCosts(unitCosts);
   const lines = await t.any(
     `SELECT l.id, l.inv_item_id, i.display_name, l.counted_qty::text AS counted_qty,
-            l.system_qty_at_count::text AS system_qty, l.reason,
-            b.inv_item_id IS NOT NULL AS has_balance, COALESCE(b.qty, 0)::text AS bal_qty,
-            COALESCE(b.avg_cost, 0)::text AS avg_cost
+            l.system_qty_at_count::text AS system_qty, l.reason
        FROM tbl_inv_count_line l
        JOIN tbl_inv_item i ON i.id = l.inv_item_id
-       LEFT JOIN tbl_inv_balance b ON b.hotel_id = $2 AND b.inv_item_id = l.inv_item_id
       WHERE l.count_id = $1 AND l.counted_qty IS NOT NULL
       ORDER BY l.inv_item_id`,
-    [count.id, count.hotelId]
+    [count.id]
   );
 
   const given = new Map();
@@ -436,21 +525,52 @@ export async function approveCount(t, user, countId, reasons = {}) {
     if (delta !== 0 && !reason) {
       missing.push({ lineId: Number(l.id), invItemId: Number(l.inv_item_id), displayName: l.display_name });
     }
-    return {
-      lineId: Number(l.id),
-      invItemId: Number(l.inv_item_id),
-      delta,
-      reason,
-      // A gain on an item with no cost here yet is valued at 0 (no average to use).
-      noCost: !l.has_balance || (Number(l.avg_cost) === 0 && Number(l.bal_qty) <= 0),
-    };
+    return { lineId: Number(l.id), invItemId: Number(l.inv_item_id), displayName: l.display_name, delta, reason };
   });
   if (missing.length) {
     throw invalid('Give a reason for every line with a difference', { field: 'reasons', lines: missing });
   }
 
-  const userId = positiveInt(user.id);
+  // The cost decisions are made under the balance locks (rows created when
+  // missing: every moving line posts), so a concurrent first receipt either
+  // commits before them (its average is used) or waits for this posting.
   const moving = work.filter((w) => w.delta !== 0);
+  const balances = await lockBalances(t, {
+    companyId: count.companyId, hotelId: count.hotelId, invItemIds: moving.map((w) => w.invItemId), create: true,
+  });
+  const noCost = moving.filter((w) => w.delta > 0 && hasNoCost(balances.get(w.invItemId)));
+  const costOf = new Map();
+  const needFallback = [];
+  for (const w of noCost) {
+    if (costsGiven.has(w.lineId)) costOf.set(w.lineId, costsGiven.get(w.lineId));
+    else needFallback.push(w);
+  }
+  if (needFallback.length) {
+    const latest = new Map(
+      (
+        await t.any(
+          `SELECT DISTINCT ON (inv_item_id) inv_item_id, unit_cost::text AS unit_cost
+             FROM tbl_inv_movement
+            WHERE hospitality_company_id = $1 AND inv_item_id = ANY($2::int[])
+              AND movement_type = ANY($3::text[]) AND unit_cost > 0
+            ORDER BY inv_item_id, posted_at DESC, id DESC`,
+          [count.companyId, needFallback.map((w) => w.invItemId), COST_SOURCES]
+        )
+      ).map((r) => [Number(r.inv_item_id), Number(r.unit_cost)])
+    );
+    const uncosted = [];
+    for (const w of needFallback) {
+      if (latest.has(w.invItemId)) costOf.set(w.lineId, latest.get(w.invItemId));
+      else uncosted.push({ lineId: w.lineId, invItemId: w.invItemId, displayName: w.displayName });
+    }
+    if (uncosted.length) {
+      throw invalid('Give a unit cost for items that have no cost anywhere in the company yet', {
+        field: 'unitCosts', lines: uncosted,
+      });
+    }
+  }
+
+  const userId = positiveInt(user.id);
   const posted = await postMovements(
     t,
     moving.map((w) => ({
@@ -459,7 +579,8 @@ export async function approveCount(t, user, countId, reasons = {}) {
       invItemId: w.invItemId,
       type: w.delta > 0 ? 'COUNT_IN' : 'COUNT_OUT',
       qty: w.delta,
-      unitCost: w.delta > 0 && w.noCost ? 0 : undefined,
+      // undefined: the hotel's average (present for every gain not in costOf)
+      unitCost: costOf.get(w.lineId),
       sourceType: 'CNT',
       sourceId: count.id,
       sourceLineId: w.lineId,

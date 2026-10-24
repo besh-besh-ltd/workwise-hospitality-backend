@@ -12,9 +12,10 @@ import { httpClient } from "../helpers/http.js";
 import { IDS } from "../fixtures/ids.js";
 import { grantRoleScope, revokeRoleScopes } from "../helpers/roleScope.js";
 import {
-  CO, A1, STORE, STORE_ID, CTRL, CTRL_ID, CTRL2_ID, grant, grantCast, makeItem, stockIn, balanceOf,
+  CO, A1, STORE, STORE_ID, CTRL, CTRL_ID, CTRL2, CTRL2_ID, grant, grantCast, makeItem, stockIn, move, balanceOf,
   movementsOf, setCompanySettings, thrownBy,
 } from "../helpers/invStockFixtures.js";
+import { startCount, cancelCount } from "../../app/services/inventory/countService.js";
 import {
   createAdjustment, approveAdjustment, rejectAdjustment, getAdjustment, listAdjustments,
 } from "../../app/services/inventory/adjustmentService.js";
@@ -139,6 +140,47 @@ describe("adjustments", () => {
   });
 });
 
+describe("freeze and cost guards", () => {
+  it("the freeze blocks approving an adjustment while a count is open", async () => {
+    await withTx(async (t) => {
+      await grantCast(t);
+      const item = await makeItem(t);
+      await stockIn(t, { invItemId: item, qty: 10, unitCost: 20 });
+      const { adjustment } = await createAdjustment(t, STORE, adj({ lines: [{ invItemId: item, qty: -2 }] }));
+      expect(adjustment.status).toBe("pending_approval");
+
+      const count = await startCount(t, STORE, { hotelId: A1, scope: "SELECTED", invItemIds: [item] });
+      await setCompanySettings(t, { countFreeze: true });
+      const locked = await thrownBy(t, (sp) => approveAdjustment(sp, CTRL, adjustment.id));
+      expect(locked.code).toBe("LOCKED");
+      expect(locked.details).toMatchObject({ countId: count.id });
+      expect((await getAdjustment(t, CTRL, adjustment.id)).status).toBe("pending_approval");
+
+      await cancelCount(t, CTRL, count.id);
+      expect((await approveAdjustment(t, CTRL, adjustment.id)).status).toBe("posted");
+      expect((await balanceOf(t, A1, item)).qty).toBe(8);
+    });
+  });
+
+  it("a gain never comes in at no cost", async () => {
+    await withTx(async (t) => {
+      await grantCast(t);
+      await setCompanySettings(t, { autoApproveLimit: 100000 });
+      const never = await makeItem(t, { name: "Never stocked" });
+      const free = await makeItem(t, { name: "Zero cost" });
+      await move(t, { invItemId: free, type: "COUNT_IN", qty: 5, unitCost: 0 });
+      expect(await balanceOf(t, A1, free)).toEqual({ qty: 5, avgCost: 0, value: 0 });
+
+      for (const [invItemId, reasonCode] of [[never, "FOUND"], [free, "CORRECTION"]]) {
+        const err = await thrownBy(t, (sp) => createAdjustment(sp, STORE, adj({ reasonCode, lines: [{ invItemId, qty: 1 }] })));
+        expect(err.code).toBe("VALIDATION");
+        expect(err.details).toEqual({ field: "lines", index: 0, invItemId });
+        expect(err.message).toMatch(/has no cost at this hotel yet/);
+      }
+    });
+  });
+});
+
 describe("approval over HTTP (committed)", () => {
   const scopes = [];
   let item;
@@ -200,6 +242,24 @@ describe("approval over HTTP (committed)", () => {
     // the activity trail records the approval with the hotel's scope
     const trail = await activityEvent("INV_ADJUSTMENT", id, "inventory_adjustment_approved");
     expect(trail).toMatchObject({ hospitality_company_id: CO, hotel_id: A1, entity_label: created.body.data.adjustmentNumber });
+  });
+
+  it("two concurrent approvals of one adjustment: one posts, the other is CONFLICT", async () => {
+    // 2 × 100 is over this describe's auto-approve limit of 100
+    const { adjustment } = await db.tx((t) => createAdjustment(t, CTRL, adj({ lines: [{ invItemId: item, qty: -2 }] })));
+    expect(adjustment.status).toBe("pending_approval");
+    const before = (await balanceOf(db, A1, item)).qty;
+    const results = await Promise.allSettled([
+      db.tx((t) => approveAdjustment(t, CTRL2, adjustment.id)),
+      db.tx((t) => approveAdjustment(t, CTRL2, adjustment.id)),
+    ]);
+    expect(results.map((r) => r.status).sort()).toEqual(["fulfilled", "rejected"]);
+    expect(results.find((r) => r.status === "fulfilled").value.status).toBe("posted");
+    const refused = results.find((r) => r.status === "rejected").reason;
+    expect(refused.code).toBe("CONFLICT");
+    expect(refused.details).toEqual({ status: "posted" });
+    expect(await movementsOf(db, { sourceType: "ADJ", sourceId: adjustment.id })).toHaveLength(1);
+    expect((await balanceOf(db, A1, item)).qty).toBe(before - 2);
   });
 
   it("a role without inventory.read cannot see an adjustment at all", async () => {

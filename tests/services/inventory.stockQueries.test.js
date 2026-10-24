@@ -147,6 +147,9 @@ describe("stock queries", () => {
       await stockIn(t, { hotelId: A2, invItemId: q, qty: 5, unitCost: 20 });
       await setLevels(t, { invItemId: p, reorderLevel: 10 });
       await setLevels(t, { hotelId: A2, invItemId: q, reorderLevel: 1 });
+      // below its level at A2, but A2's stock has not started: reorder alerts are off there
+      const r = await makeItem(t, { name: "Bleach" });
+      await setLevels(t, { hotelId: A2, invItemId: r, reorderLevel: 10 });
       await postOut(t, STORE, outDoc({ departmentId: FB, lines: [{ invItemId: p, qty: 2 }] }));
       await postOut(t, STORE, outDoc({ departmentId: HK, lines: [{ invItemId: p, qty: 1 }] }));
       await postOut(t, STORE, outDoc({ docType: "RETURN", departmentId: FB, lines: [{ invItemId: p, qty: 1 }] }));
@@ -204,6 +207,8 @@ describe("stock queries", () => {
       const a2 = await getOverview(t, CTRL, { hotelId: A2 });
       expect(a2.stockValueByHotel).toEqual([expect.objectContaining({ hotelId: A2, value: 100 })]);
       expect(a2).toMatchObject({ lowStockCount: 0, deliveries: { dueToday: 0, dueThisWeek: 1, overdue: 0 }, wastageThisMonth: 0 });
+      // the stock list still shows the truth of the shelf
+      expect((await getStock(t, CTRL, { hotelId: A2, belowReorder: "true" })).rows.map((x) => x.invItemId)).toEqual([r]);
       expect(a2.outThisMonthByDept).toEqual([]);
 
       // a storekeeper sees the same figures for their hotels

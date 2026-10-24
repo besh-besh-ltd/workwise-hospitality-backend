@@ -17,16 +17,22 @@
 // correction goes either way.
 //
 // Lock order: client-event advisory lock → doc sequence (nextDocNumber) →
-// postMovements (balances). Approval: adjustment row → postMovements.
+// balance rows (lockBalances, ledger order; the cost and value decisions are
+// read under them) → postMovements. Approval: adjustment row → balance rows →
+// postMovements.
+//
+// submit:false sends the adjustment for approval even when its value is under
+// the auto-approve limit.
 
 import { InventoryError } from './errors.js';
-import { assertHotelPermission, hotelIdsWithPermission } from './scope.js';
+import { hotelIdsWithPermission } from './scope.js';
 import { getEffectiveSettings } from './settings.js';
 import { nextDocNumber } from './docNumber.js';
 import { postMovements } from './ledger.js';
 import {
   MAX_LINES, PAGE_SIZE, positiveInt, invalid, notFound, conflict, num, money, iso, pageOf, requireUuid, toQty,
   optionalText, assertDocAccess, holds, loadCompanyItems, assertNotFrozen, approverIds, explainMissingCost,
+  lockBalances, hasNoCost,
 } from './stockCommon.js';
 
 export const ADJUSTMENT_REASONS = Object.freeze(['WASTAGE', 'BREAKAGE', 'EXPIRY', 'THEFT_LOSS', 'CORRECTION', 'FOUND']);
@@ -311,6 +317,22 @@ async function post(t, ctx, lines, items) {
 }
 
 /**
+ * Stock coming in is valued at the hotel's average: a gain on an item with no
+ * cost here (no balance row, or an average of 0) is refused rather than
+ * posted at 0. Pass balances read under lockBalances.
+ */
+function assertGainsHaveCost(lines, balances, items) {
+  for (const l of lines) {
+    if (l.qty > 0 && hasNoCost(balances.get(l.invItemId))) {
+      throw invalid(
+        `${items.get(l.invItemId).displayName} has no cost at this hotel yet: post it through a receipt or an opening import first`,
+        { field: 'lines', index: l.index, invItemId: l.invItemId }
+      );
+    }
+  }
+}
+
+/**
  * POST /adjustments.
  *
  * @param {{hotelId:number, reasonCode:string, remarks?:string, submit:boolean,
@@ -318,14 +340,16 @@ async function post(t, ctx, lines, items) {
  * @returns {Promise<{adjustment:object, replayed:boolean, needsApproval:boolean}>}
  *   adjustment.status is 'posted' when it was auto-approved, else
  *   'pending_approval' (needsApproval true: notify the approvers after commit).
- * @throws {InventoryError} VALIDATION | NOT_FOUND | FORBIDDEN | CONFLICT |
- *   LOCKED (count freeze) | NEGATIVE_STOCK (auto-post only)
+ * @throws {InventoryError} VALIDATION | NOT_FOUND (a hotel the caller can
+ *   neither read nor post at) | FORBIDDEN (can read it, cannot post) |
+ *   CONFLICT | LOCKED (count freeze) | NEGATIVE_STOCK (auto-post only)
  */
 export async function createAdjustment(t, user, input = {}) {
   const clientEventId = requireUuid(input.clientEventId);
   const hotelId = positiveInt(input.hotelId);
   if (!hotelId) throw invalid('Choose a hotel', { field: 'hotelId' });
-  const { companyId } = await assertHotelPermission(t, user, { resource: 'inventory', action: 'create', hotelId });
+  // Out of the caller's sight (another company, or no read here): NOT_FOUND.
+  const { companyId } = await assertDocAccess(t, user, hotelId, 'create');
 
   await t.one(`SELECT pg_advisory_xact_lock(hashtext('inv:adjustment'), hashtext($1))`, [clientEventId]);
   const prior = await replayAdjustment(t, user, clientEventId, { hotelId, companyId });
@@ -341,31 +365,17 @@ export async function createAdjustment(t, user, input = {}) {
 
   await assertNotFrozen(t, { companyId, hotelId });
 
-  // Estimate at the current average (read without locks: it only picks the
-  // route, the ledger values the posting under its own lock).
-  const balances = new Map(
-    (
-      await t.any(
-        `SELECT inv_item_id, qty::text AS qty, avg_cost::text AS avg_cost FROM tbl_inv_balance
-          WHERE hotel_id = $1 AND inv_item_id = ANY($2::int[])`,
-        [hotelId, lines.map((l) => l.invItemId)]
-      )
-    ).map((b) => [Number(b.inv_item_id), { qty: Number(b.qty), avg: Number(b.avg_cost) }])
-  );
-  for (const l of lines) {
-    const b = balances.get(l.invItemId);
-    if (l.qty > 0 && (!b || (b.avg === 0 && b.qty <= 0))) {
-      throw invalid(
-        `${items.get(l.invItemId).displayName} has no cost at this hotel yet: post it through a receipt or an opening import first`,
-        { field: 'lines', index: l.index, invItemId: l.invItemId }
-      );
-    }
-  }
-  const value = lines.reduce((s, l) => s + Math.abs(l.qty * (balances.get(l.invItemId)?.avg ?? 0)), 0);
+  const adjustmentNumber = await nextDocNumber(t, { hotelId, docType: 'ADJ' });
+
+  // Cost and value are read under the balance locks (ledger order), so the
+  // decisions below hold until postMovements.
+  const balances = await lockBalances(t, { companyId, hotelId, invItemIds: lines.map((l) => l.invItemId) });
+  assertGainsHaveCost(lines, balances, items);
+  const value = lines.reduce((s, l) => s + Math.abs(l.qty * (balances.get(l.invItemId)?.avgCost ?? 0)), 0);
   const { adjustmentAutoApproveLimit: limit } = await getEffectiveSettings(t, { companyId, hotelId });
+  // submit:false always goes for approval, whatever the value.
   const autoPost = input.submit === true && limit > 0 && Math.round(value * 10000) / 10000 <= limit;
 
-  const adjustmentNumber = await nextDocNumber(t, { hotelId, docType: 'ADJ' });
   const userId = positiveInt(user.id);
   const header = await t.one(
     `INSERT INTO tbl_inv_adjustment
@@ -450,6 +460,8 @@ export async function approveAdjustment(t, user, adjustmentId) {
     )
   ).map((l, index) => ({ index, lineId: Number(l.id), invItemId: Number(l.inv_item_id), qty: Number(l.qty) }));
   const items = await loadCompanyItems(t, adj.companyId, lines.map((l) => l.invItemId));
+  const balances = await lockBalances(t, { companyId: adj.companyId, hotelId: adj.hotelId, invItemIds: lines.map((l) => l.invItemId) });
+  assertGainsHaveCost(lines, balances, items);
   const userId = positiveInt(user.id);
   await post(t, { companyId: adj.companyId, hotelId: adj.hotelId, adjustmentId: adj.id, reasonCode: adj.reasonCode, userId }, lines, items);
 

@@ -8,15 +8,18 @@ import { describe, it, expect, beforeAll, afterAll } from "@jest/globals";
 import { randomUUID } from "crypto";
 import { db, withTx, closeDb, truncateDynamic } from "../setup/db.js";
 import { httpClient } from "../helpers/http.js";
-import { revokeRoleScopes } from "../helpers/roleScope.js";
+import { grantRoleScope, revokeRoleScopes } from "../helpers/roleScope.js";
+import { IDS } from "../fixtures/ids.js";
 import {
-  A1, A2, FB, HK, STORE, STORE_ID, CTRL, grantCast, makeItem, stockIn, move, balanceOf, movementsOf,
+  CO, A1, A2, FB, HK, STORE, STORE_ID, CTRL, asUser, grant, grantCast, makeItem, stockIn, move, balanceOf, movementsOf,
   setCompanySettings, thrownBy,
 } from "../helpers/invStockFixtures.js";
 import { postOut, getOut, listOut } from "../../app/services/inventory/outService.js";
-import { startCount, submitCount } from "../../app/services/inventory/countService.js";
+import { startCount, saveCountLines, submitCount } from "../../app/services/inventory/countService.js";
 import { createAdjustment } from "../../app/services/inventory/adjustmentService.js";
 
+/** No inventory role of their own in company A until a test grants one. */
+const NARROW_ID = IDS.users.a1_proc_techEval;
 const out = (over = {}) => ({
   hotelId: A1, docType: "OUT", departmentId: FB, clientEventId: randomUUID(), ...over,
 });
@@ -107,10 +110,10 @@ describe("mark out", () => {
       await postOut(t, STORE, out({ lines: [{ invItemId: item, qty: 4 }] }));
 
       // stock on hand: back at the current average, tagged with the department
-      const { doc } = await postOut(t, STORE, out({ docType: "RETURN", departmentId: HK, lines: [{ invItemId: item, qty: 1 }] }));
+      const { doc } = await postOut(t, STORE, out({ docType: "RETURN", lines: [{ invItemId: item, qty: 1 }] }));
       expect(doc.outNumber).toMatch(/^RET\/10101\//);
       expect(await movementsOf(t, { sourceType: "OUT", sourceId: doc.id })).toEqual([
-        expect.objectContaining({ type: "RETURN_IN", qty: 1, unit_cost: 100, department_id: HK }),
+        expect.objectContaining({ type: "RETURN_IN", qty: 1, unit_cost: 100, department_id: FB }),
       ]);
       expect((await balanceOf(t, A1, item)).qty).toBe(7);
 
@@ -125,11 +128,76 @@ describe("mark out", () => {
       ]);
       expect(await balanceOf(t, A1, item)).toEqual({ qty: 2, avgCost: 100, value: 200 });
 
-      // nothing ever marked out at this hotel: no cost to return at
+      // nothing ever marked out at this hotel: nothing to return
       const fresh = await makeItem(t, { name: "Fresh" });
       const err = await thrownBy(t, (sp) => postOut(sp, STORE, out({ docType: "RETURN", lines: [{ invItemId: fresh, qty: 1 }] })));
       expect(err.code).toBe("VALIDATION");
-      expect(err.details).toMatchObject({ field: "lines", invItemId: fresh });
+      expect(err.details).toMatchObject({ field: "lines", invItemId: fresh, maxReturnable: 0 });
+    });
+  });
+
+  it("a department returns at most what it was issued, net of earlier returns", async () => {
+    await withTx(async (t) => {
+      await grantCast(t);
+      const item = await makeItem(t, { name: "Linen", stockUom: "pcs" });
+      await stockIn(t, { invItemId: item, qty: 20, unitCost: 10 });
+      await postOut(t, STORE, out({ departmentId: FB, lines: [{ invItemId: item, qty: 5 }] }));
+      await postOut(t, STORE, out({ departmentId: FB, lines: [{ invItemId: item, qty: 3 }] }));
+      await postOut(t, STORE, out({ docType: "RETURN", departmentId: FB, lines: [{ invItemId: item, qty: 2 }] }));
+
+      // FB holds 5 + 3 − 2 = 6: 7 is one too many
+      const over = await thrownBy(t, (sp) => postOut(sp, STORE, out({ docType: "RETURN", departmentId: FB, lines: [{ invItemId: item, qty: 7 }] })));
+      expect(over.code).toBe("VALIDATION");
+      expect(over.details).toEqual({ field: "lines", index: 0, invItemId: item, maxReturnable: 6 });
+      expect(over.message).toMatch(/^Only 6 pcs of Linen was marked out to .+ here$/);
+
+      // a department that never took any returns nothing: that is a FOUND adjustment
+      const other = await thrownBy(t, (sp) => postOut(sp, STORE, out({ docType: "RETURN", departmentId: HK, lines: [{ invItemId: item, qty: 1 }] })));
+      expect(other.details).toMatchObject({ field: "lines", invItemId: item, maxReturnable: 0 });
+
+      // exactly the cap is fine, and then nothing more is returnable
+      await postOut(t, STORE, out({ docType: "RETURN", departmentId: FB, lines: [{ invItemId: item, qty: 6 }] }));
+      expect((await balanceOf(t, A1, item)).qty).toBe(20);
+      const after = await thrownBy(t, (sp) => postOut(sp, STORE, out({ docType: "RETURN", departmentId: FB, lines: [{ invItemId: item, qty: 0.5 }] })));
+      expect(after.details).toMatchObject({ maxReturnable: 0 });
+    });
+  });
+
+  it("an in-company hotel outside the caller's scope is 404 on create", async () => {
+    await withTx(async (t) => {
+      await grantCast(t);
+      const item = await makeItem(t);
+      await stockIn(t, { hotelId: A2, invItemId: item, qty: 5 });
+      // a storekeeper of A1 only
+      await grant(t, NARROW_ID, "Storekeeper", { hotelId: A1 });
+      const narrow = asUser(NARROW_ID);
+
+      const outErr = await thrownBy(t, (sp) => postOut(sp, narrow, out({ hotelId: A2, lines: [{ invItemId: item, qty: 1 }] })));
+      const adjErr = await thrownBy(t, (sp) => createAdjustment(sp, narrow, {
+        hotelId: A2, reasonCode: "WASTAGE", submit: true, clientEventId: randomUUID(), lines: [{ invItemId: item, qty: -1 }],
+      }));
+      const cntErr = await thrownBy(t, (sp) => startCount(sp, narrow, { hotelId: A2, scope: "SELECTED", invItemIds: [item] }));
+      expect([outErr, adjErr, cntErr].map((e) => [e.code, e.httpStatus])).toEqual([
+        ["NOT_FOUND", 404], ["NOT_FOUND", 404], ["NOT_FOUND", 404],
+      ]);
+
+      // at their own hotel it works
+      await stockIn(t, { invItemId: item, qty: 5 });
+      await postOut(t, narrow, out({ lines: [{ invItemId: item, qty: 1 }] }));
+
+      // once they can read A2 (but not post there), A2 answers FORBIDDEN instead
+      const reader = await t.one(
+        `INSERT INTO tbl_roles (title, description, created_by) VALUES ('C3 read only', 'out test', $1) RETURNING id`,
+        [STORE_ID]
+      );
+      await t.none(
+        `INSERT INTO tbl_role_permissions (role_id, permission_id)
+         SELECT $1, id FROM tbl_permissions WHERE resource::text = 'inventory' AND action::text = 'read'`,
+        [reader.id]
+      );
+      await grantRoleScope(t, { userId: NARROW_ID, roleId: Number(reader.id), companyId: CO, hotelId: A2 });
+      const seen = await thrownBy(t, (sp) => postOut(sp, narrow, out({ hotelId: A2, lines: [{ invItemId: item, qty: 1 }] })));
+      expect([seen.code, seen.httpStatus]).toEqual(["FORBIDDEN", 403]);
     });
   });
 
@@ -160,10 +228,7 @@ describe("mark out", () => {
       await postOut(t, STORE, out({ hotelId: A2, lines: [{ invItemId: item, qty: 1 }] }));
 
       // once the count is submitted, stock moves again
-      await t.none(
-        `UPDATE tbl_inv_count_line SET counted_qty = 9, system_qty_at_count = 9, counted_at = now() WHERE count_id = $1`,
-        [count.id]
-      );
+      await saveCountLines(t, STORE, count.id, [{ invItemId: item, countedQty: 9, clientEventId: randomUUID() }]);
       await submitCount(t, STORE, count.id);
       await postOut(t, STORE, out({ lines: [{ invItemId: item, qty: 1 }] }));
       expect((await balanceOf(t, A1, item)).qty).toBe(8);
@@ -239,5 +304,20 @@ describe("concurrency and replay (committed)", () => {
     expect([a.replayed, b.replayed].sort()).toEqual([false, true]);
     expect(await movementsOf(db, { sourceType: "OUT", sourceId: a.doc.id })).toHaveLength(1);
     expect((await balanceOf(db, A1, item)).qty).toBe(15);
+  });
+
+  it("two concurrent mark-outs draining one balance: one posts, the other is NEGATIVE_STOCK", async () => {
+    const lot = await makeItem(db, { name: "Last crate" });
+    await db.tx((t) => stockIn(t, { invItemId: lot, qty: 10, unitCost: 5 }));
+    const results = await Promise.allSettled([
+      db.tx((t) => postOut(t, STORE, out({ lines: [{ invItemId: lot, qty: 6 }] }))),
+      db.tx((t) => postOut(t, STORE, out({ departmentId: HK, lines: [{ invItemId: lot, qty: 6 }] }))),
+    ]);
+    expect(results.map((r) => r.status).sort()).toEqual(["fulfilled", "rejected"]);
+    const refused = results.find((r) => r.status === "rejected").reason;
+    expect(refused.code).toBe("NEGATIVE_STOCK");
+    expect(refused.details.lines).toEqual([expect.objectContaining({ invItemId: lot, available: 4, requested: 6 })]);
+    expect(await balanceOf(db, A1, lot)).toEqual({ qty: 4, avgCost: 5, value: 20 });
+    expect(await db.one(`SELECT count(*)::int AS n FROM tbl_inv_out_line WHERE inv_item_id = $1`, [lot])).toEqual({ n: 1 });
   });
 });

@@ -6,9 +6,11 @@
 import { describe, it, expect, beforeAll, afterAll } from "@jest/globals";
 import { randomUUID } from "crypto";
 import { db, withTx, closeDb, truncateDynamic } from "../setup/db.js";
+import { httpClient } from "../helpers/http.js";
+import { revokeRoleScopes } from "../helpers/roleScope.js";
 import {
-  A1, A2, FB, STORE, STORE_ID, CTRL, CTRL_ID, grantCast, makeItem, setLevels, stockIn, balanceOf, movementsOf,
-  thrownBy,
+  CO_B, A1, A2, A3, HB1, FB, STORE, STORE_ID, CTRL, CTRL_ID, grantCast, makeItem, setLevels, stockIn, balanceOf,
+  movementsOf, thrownBy,
 } from "../helpers/invStockFixtures.js";
 import {
   startCount, saveCountLines, submitCount, approveCount, cancelCount, getCount, listCounts,
@@ -94,11 +96,25 @@ describe("counts", () => {
       expect(replayed).toBe(false);
       expect(lineOf(recount, item)).toMatchObject({ countedQty: 6, systemQtyAtCount: 7, varianceQty: -1 });
 
+      // a late retry of the first save (its answer was lost) is still a replay: the recount stands
+      const late = await saveCountLines(t, STORE, count.id, [line(item, 9, key)]);
+      expect(late.replayed).toBe(true);
+      expect(lineOf(late.count, item)).toMatchObject({ countedQty: 6, systemQtyAtCount: 7 });
+
       // an item found during the count joins it
       const found = await makeItem(t, { name: "Found item" });
       await stockIn(t, { invItemId: found, qty: 1, unitCost: 10 });
       const { count: grown } = await saveCountLines(t, STORE, count.id, [line(found, 2)]);
       expect(lineOf(grown, found)).toMatchObject({ countedQty: 2, systemQtyAtCount: 1 });
+
+      // each line of a save has its own key, and a key belongs to one item
+      const twin = randomUUID();
+      const dup = await thrownBy(t, (sp) => saveCountLines(sp, STORE, count.id, [line(item, 5, twin), line(found, 3, twin)]));
+      expect(dup.code).toBe("VALIDATION");
+      expect(dup.details).toMatchObject({ field: "lines", index: 1 });
+      const reused = await thrownBy(t, (sp) => saveCountLines(sp, STORE, count.id, [line(found, 4, key)]));
+      expect(reused.code).toBe("VALIDATION");
+      expect(reused.details).toMatchObject({ field: "lines", index: 0, invItemId: found });
 
       // the same item cannot sit in two active counts
       const overlap = await thrownBy(t, (sp) => startCount(sp, STORE, { hotelId: A1, scope: "SELECTED", invItemIds: [found] }));
@@ -127,6 +143,7 @@ describe("counts", () => {
       const { count: asCounter } = await saveCountLines(t, STORE, count.id, [line(item, 8)]);
       expect(asCounter.isBlind).toBe(true);
       expect(lineOf(asCounter, item)).toMatchObject({ countedQty: 8, systemQtyAtCount: null, varianceQty: null, varianceValue: null });
+      expect(asCounter.summary).toEqual({ lineCount: 1, countedCount: 1, varianceLines: null, varianceValue: null });
       expect(asCounter.can).toEqual({ count: true, approve: false });
 
       const submitted = await submitCount(t, STORE, count.id);
@@ -136,6 +153,8 @@ describe("counts", () => {
       // the approver sees everything
       const asApprover = await getCount(t, CTRL, count.id);
       expect(lineOf(asApprover, item)).toMatchObject({ systemQtyAtCount: 10, varianceQty: -2, varianceValue: -10 });
+      expect(asApprover.summary).toEqual({ lineCount: 1, countedCount: 1, varianceLines: 1, varianceValue: -10 });
+      expect((await getCount(t, STORE, count.id)).summary).toMatchObject({ varianceLines: null, varianceValue: null });
       expect(asApprover.can).toEqual({ count: true, approve: true });
 
       const list = await listCounts(t, STORE, { hotelId: A1 });
@@ -221,6 +240,94 @@ describe("counts", () => {
     }
   });
 
+  it("a full count cannot be submitted with uncounted lines", async () => {
+    await withTx(async (t) => {
+      await grantCast(t);
+      const counted = await makeItem(t, { name: "Counted" });
+      const skipped = await makeItem(t, { name: "Skipped" });
+      await stockIn(t, { hotelId: A3, invItemId: counted, qty: 2 });
+      await stockIn(t, { hotelId: A3, invItemId: skipped, qty: 3 });
+      const count = await startCount(t, STORE, { hotelId: A3, scope: "FULL" });
+      await saveCountLines(t, STORE, count.id, [line(counted, 2)]);
+
+      const err = await thrownBy(t, (sp) => submitCount(sp, STORE, count.id));
+      expect(err.code).toBe("VALIDATION");
+      expect(err.details).toEqual({
+        field: "lines",
+        uncounted: [{ lineId: lineOf(count, skipped).id, invItemId: skipped, displayName: "Skipped" }],
+        uncountedTotal: 1,
+      });
+
+      await saveCountLines(t, STORE, count.id, [line(skipped, 0)]);
+      expect((await submitCount(t, STORE, count.id)).status).toBe("submitted");
+    });
+  });
+
+  it("a first full count of legacy stock with no cost anywhere needs a unit cost; a later receipt averages correctly", async () => {
+    await withTx(async (t) => {
+      await grantCast(t);
+      const legacy = await makeItem(t, { name: "Legacy rice" });
+      await setLevels(t, { hotelId: A2, invItemId: legacy, reorderLevel: 5 });
+      const count = await startCount(t, STORE, { hotelId: A2, scope: "FULL" });
+      await saveCountLines(t, STORE, count.id, [line(legacy, 50)]);
+      const submitted = await submitCount(t, STORE, count.id);
+      const lineId = lineOf(submitted, legacy).id;
+      const reasons = { [lineId]: "Opening stock on the shelf" };
+
+      // no cost at the hotel, nor anywhere in the company: refused, never posted at 0
+      const noCost = await thrownBy(t, (sp) => approveCount(sp, CTRL, count.id, reasons));
+      expect(noCost.code).toBe("VALIDATION");
+      expect(noCost.details).toEqual({ field: "unitCosts", lines: [{ lineId, invItemId: legacy, displayName: "Legacy rice" }] });
+      const zero = await thrownBy(t, (sp) => approveCount(sp, CTRL, count.id, reasons, { [lineId]: 0 }));
+      expect(zero.details).toMatchObject({ field: "unitCosts", lineId: String(lineId) });
+
+      const approved = await approveCount(t, CTRL, count.id, reasons, { [lineId]: 40 });
+      expect(approved.status).toBe("approved");
+      expect(lineOf(approved, legacy)).toMatchObject({ varianceQty: 50, varianceValue: 2000 });
+      expect(await movementsOf(t, { sourceType: "CNT", sourceId: count.id })).toEqual([
+        expect.objectContaining({ type: "COUNT_IN", inv_item_id: legacy, qty: 50, unit_cost: 40 }),
+      ]);
+      // the first receipt blends with the counted stock's cost, not with zero
+      await stockIn(t, { hotelId: A2, invItemId: legacy, qty: 50, unitCost: 60, type: "GRN_IN" });
+      expect(await balanceOf(t, A2, legacy)).toEqual({ qty: 100, avgCost: 50, value: 5000 });
+    });
+  });
+
+  it("a gain with no cost here takes the latest inbound cost at a sibling hotel, never another company's", async () => {
+    await withTx(async (t) => {
+      await grantCast(t);
+      const towel = await makeItem(t, { name: "Towel" });
+      const soap = await makeItem(t, { name: "Soap" });
+      const mat = await makeItem(t, { name: "Bath mat" });
+      await stockIn(t, { hotelId: A1, invItemId: towel, qty: 3, unitCost: 25 });
+      await stockIn(t, { hotelId: A1, invItemId: towel, qty: 2, unitCost: 35, type: "GRN_IN" });
+      await stockIn(t, { hotelId: A1, invItemId: soap, qty: 1, unitCost: 20 });
+      // company B stocks its own "Bath mat": its cost is never borrowed
+      const foreignMat = await makeItem(t, { companyId: CO_B, name: "Bath mat" });
+      await stockIn(t, { companyId: CO_B, hotelId: HB1, invItemId: foreignMat, qty: 1, unitCost: 999 });
+
+      const count = await startCount(t, STORE, { hotelId: A2, scope: "SELECTED", invItemIds: [towel, soap, mat] });
+      await saveCountLines(t, STORE, count.id, [line(towel, 4), line(soap, 2), line(mat, 1)]);
+      const submitted = await submitCount(t, STORE, count.id);
+      const id = (item) => lineOf(submitted, item).id;
+      const reasons = { [id(towel)]: "found", [id(soap)]: "found", [id(mat)]: "found" };
+
+      const err = await thrownBy(t, (sp) => approveCount(sp, CTRL, count.id, reasons));
+      expect(err.details).toEqual({ field: "unitCosts", lines: [{ lineId: id(mat), invItemId: mat, displayName: "Bath mat" }] });
+
+      // the approver's cost comes first; otherwise the company's latest inbound cost
+      await approveCount(t, CTRL, count.id, reasons, { [id(soap)]: 22, [id(mat)]: 12 });
+      const costs = Object.fromEntries(
+        (await movementsOf(t, { sourceType: "CNT", sourceId: count.id })).map((m) => [m.inv_item_id, [m.type, m.qty, m.unit_cost]])
+      );
+      expect(costs).toEqual({
+        [towel]: ["COUNT_IN", 4, 35],
+        [soap]: ["COUNT_IN", 2, 22],
+        [mat]: ["COUNT_IN", 1, 12],
+      });
+    });
+  });
+
   it("a selected spot check does not start the hotel's stock", async () => {
     await withTx(async (t) => {
       await grantCast(t);
@@ -233,5 +340,105 @@ describe("counts", () => {
       const row = await t.oneOrNone(`SELECT stock_started_at FROM tbl_inv_hotel_settings WHERE hotel_id = $1`, [A2]);
       expect(row?.stock_started_at ?? null).toBeNull();
     });
+  });
+});
+
+describe("committed: count approval racing a first receipt, and late retries over HTTP", () => {
+  let scopes = [];
+  beforeAll(async () => {
+    scopes = await grantCast(db);
+  });
+  afterAll(async () => {
+    await revokeRoleScopes(db, scopes);
+    await db.none(`DELETE FROM tbl_activity_events WHERE entity_type = ANY($1::text[])`, [["INV_COUNT"]]);
+    await truncateDynamic();
+  });
+
+  /** A submitted SELECTED count at A3 of one new item: system 0, counted 5. */
+  async function submittedCount(name) {
+    const item = await makeItem(db, { name });
+    const count = await db.tx((t) => startCount(t, STORE, { hotelId: A3, scope: "SELECTED", invItemIds: [item] }));
+    await db.tx((t) => saveCountLines(t, STORE, count.id, [line(item, 5)]));
+    const submitted = await db.tx((t) => submitCount(t, STORE, count.id));
+    return { item, countId: count.id, lineId: lineOf(submitted, item).id };
+  }
+  /** The item's first receipt at A3: 10 @ 100. */
+  const receipt = (item) => (t) => stockIn(t, { hotelId: A3, invItemId: item, qty: 10, unitCost: 100, type: "GRN_IN" });
+  /** Run `work` in a transaction that stays open until release(). */
+  function held(work) {
+    let release;
+    let ready;
+    const gate = new Promise((r) => { release = r; });
+    const started = new Promise((r) => { ready = r; });
+    const done = db.tx(async (t) => {
+      const result = await work(t);
+      ready();
+      await gate;
+      return result;
+    });
+    done.catch(() => ready());
+    return { started, release, done };
+  }
+  /** Still running after `ms`? */
+  async function stillPending(promise, ms = 300) {
+    let settled = false;
+    promise.then(() => { settled = true; }, () => { settled = true; });
+    await new Promise((r) => setTimeout(r, ms));
+    return !settled;
+  }
+
+  it("the receipt commits first: the count waits for it, then posts at the receipt's average", async () => {
+    const { item, countId, lineId } = await submittedCount("Race: receipt first");
+    const grn = held(receipt(item));
+    await grn.started;
+    // no unitCosts and no cost anywhere: only the receipt's average can value this gain
+    const approve = db.tx((t) => approveCount(t, CTRL, countId, { [lineId]: "Found in store" }));
+    expect(await stillPending(approve)).toBe(true);
+    grn.release();
+    await grn.done;
+    expect((await approve).status).toBe("approved");
+    expect(await balanceOf(db, A3, item)).toEqual({ qty: 15, avgCost: 100, value: 1500 });
+  });
+
+  it("the count commits first: the receipt waits for it, and the average blends both costs", async () => {
+    const { item, countId, lineId } = await submittedCount("Race: count first");
+    const approve = held((t) => approveCount(t, CTRL, countId, { [lineId]: "Found in store" }, { [lineId]: 80 }));
+    await approve.started;
+    const grn = db.tx(receipt(item));
+    expect(await stillPending(grn)).toBe(true);
+    approve.release();
+    await approve.done;
+    await grn;
+    const balance = await balanceOf(db, A3, item);
+    expect(balance.qty).toBe(15);
+    expect(balance.value).toBe(1400); // 5 × 80 + 10 × 100
+    expect(balance.avgCost).toBeCloseTo(93.3333, 3);
+  });
+
+  it("a late retry of an older line save answers replayed, no_op and keeps the newer count; one key per line", async () => {
+    const item = await makeItem(db, { name: "Retry item" });
+    const other = await makeItem(db, { name: "Other item" });
+    await db.tx((t) => stockIn(t, { hotelId: A3, invItemId: item, qty: 10 }));
+    const count = await db.tx((t) => startCount(t, STORE, { hotelId: A3, scope: "SELECTED", invItemIds: [item] }));
+    const store = await httpClient(STORE_ID);
+    const put = (lines) => store.put(`/api/v1/inventory/counts/${count.id}/lines`).send({ lines });
+
+    const e1 = randomUUID();
+    expect((await put([line(item, 9, e1)])).status).toBe(200);
+    const newer = await put([line(item, 6)]);
+    expect(newer.status).toBe(200);
+    expect(newer.body.data.replayed).toBeUndefined();
+
+    const late = await put([line(item, 9, e1)]);
+    expect(late.status).toBe(200);
+    expect(late.body.data).toMatchObject({ replayed: true, no_op: true });
+    expect(lineOf(late.body.data, item).countedQty).toBe(6);
+    expect(await db.one(`SELECT counted_qty::float AS q FROM tbl_inv_count_line WHERE count_id = $1`, [count.id])).toEqual({ q: 6 });
+
+    // the same key on two lines of one save is a 400, not a 500
+    const twin = randomUUID();
+    const dup = await put([line(item, 5, twin), line(other, 1, twin)]);
+    expect(dup.status).toBe(400);
+    expect(dup.body).toMatchObject({ code: "VALIDATION", details: { field: "lines", index: 1 } });
   });
 });

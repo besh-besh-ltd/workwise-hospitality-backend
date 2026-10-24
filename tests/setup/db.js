@@ -200,6 +200,7 @@ const DYNAMIC_TABLES = [
   // Inventory / receiving (20261024100100-100300), children before parents.
   // TRUNCATE skips row triggers, so the append-only ledger clears here even
   // though its trigger rejects every DELETE.
+  "tbl_inv_count_line_event",
   "tbl_inv_count_line",
   "tbl_inv_count",
   "tbl_inv_adjustment_line",

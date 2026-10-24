@@ -156,6 +156,38 @@ export async function assertNotFrozen(t, { companyId, hotelId }) {
 }
 
 /**
+ * Lock the hotel's balance rows of `invItemIds` FOR UPDATE in the ledger's
+ * order (hotel, item), so a cost decision made on them holds until
+ * postMovements runs in the same transaction. With `create`, missing rows are
+ * inserted first (as the ledger would), so even an item's first stock is
+ * serialised against a concurrent receipt; only pass it when every one of
+ * those items is about to post.
+ * @returns {Promise<Map<number,{qty:number, avgCost:number}>>} existing (or created) rows
+ */
+export async function lockBalances(t, { companyId, hotelId, invItemIds, create = false }) {
+  const ids = [...new Set(invItemIds)].sort((a, b) => a - b);
+  if (!ids.length) return new Map();
+  if (create) {
+    await t.none(
+      `INSERT INTO tbl_inv_balance (hotel_id, inv_item_id, hospitality_company_id)
+       SELECT $1, x, $3 FROM unnest($2::int[]) AS x ORDER BY x
+       ON CONFLICT (hotel_id, inv_item_id) DO NOTHING`,
+      [hotelId, ids, companyId]
+    );
+  }
+  const rows = await t.any(
+    `SELECT inv_item_id, qty::text AS qty, avg_cost::text AS avg_cost FROM tbl_inv_balance
+      WHERE hotel_id = $1 AND inv_item_id = ANY($2::int[])
+      ORDER BY inv_item_id FOR UPDATE`,
+    [hotelId, ids]
+  );
+  return new Map(rows.map((r) => [Number(r.inv_item_id), { qty: Number(r.qty), avgCost: Number(r.avg_cost) }]));
+}
+
+/** No usable cost at the hotel: no balance row, or an average of 0. */
+export const hasNoCost = (balance) => !balance || !(balance.avgCost > 0);
+
+/**
  * Active buyer-side users holding inventory.approve at the hotel (a role scope
  * with hotel_id NULL covers every hotel of its company). Super admins are not
  * counted: they are platform staff, not the hotel's approvers.

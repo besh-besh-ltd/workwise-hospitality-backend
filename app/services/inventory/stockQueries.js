@@ -299,7 +299,9 @@ export async function getStockItem(t, user, { hotelId, invItemId } = {}) {
  * narrowed to hotelId when given).
  *
  * - stockValueByHotel: Σ balance value per hotel (every readable hotel, 0 when empty)
- * - lowStockCount: (hotel, item) pairs at or below their reorder level (as the stock list)
+ * - lowStockCount: (hotel, item) pairs at or below their reorder level (as the
+ *   stock list's belowReorder), at hotels whose stock has started only (spec
+ *   §13: reorder alerts are off until then)
  * - deliveries: open / partial plan rows (tbl_po_delivery) of live, non-legacy
  *   POs by IST due date: dueToday, dueThisWeek (today … today+6), overdue
  *   (unallocated rows belong to no hotel and are not counted)
@@ -339,6 +341,7 @@ export async function getOverview(t, user, { hotelId } = {}) {
           `SELECT count(*) AS n
              FROM tbl_inv_hotel_item hi
              JOIN tbl_inv_item i ON i.id = hi.inv_item_id
+             JOIN tbl_inv_hotel_settings hs ON hs.hotel_id = hi.hotel_id AND hs.stock_started_at IS NOT NULL
              LEFT JOIN tbl_inv_balance b ON b.hotel_id = hi.hotel_id AND b.inv_item_id = hi.inv_item_id
             WHERE hi.hotel_id = ANY($1::int[])
               AND hi.reorder_level IS NOT NULL
