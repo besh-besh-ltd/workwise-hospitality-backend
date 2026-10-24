@@ -16,6 +16,7 @@ import { db, closeDb, truncateDynamic } from "../setup/db.js";
 import { IDS } from "../fixtures/ids.js";
 import { makeRFQ } from "../factories/rfq.js";
 import { httpClient } from "../helpers/http.js";
+import { grantRoleScope, revokeRoleScopes } from "../helpers/roleScope.js";
 import s3Client from "../../app/config/s3config.js";
 import { generateReceiveToken } from "../../app/helper/receiveToken.js";
 import { COMMERCIAL_KEY } from "../../app/helper/receiveTokenView.js";
@@ -33,6 +34,7 @@ const A2 = IDS.hotels.A2;
 const ADMIN = IDS.users.companyA_admin; // CEO, company-wide: grn.create at every A hotel
 const INITIATOR = IDS.users.a1_proc_buyer; // raised the POs
 const VENDOR = IDS.users.vendor_alpha;
+const CTRL = IDS.users.multiHotel; // given Inventory Controller (grn.approve) to reverse a receipt
 
 const BASE = "/api/v1/inventory/token";
 const PRICE_A = 4321.77;
@@ -47,16 +49,24 @@ let nextVariantIdx = 0;
 let TODAY;
 let initiatorEmail;
 let adminName;
+let ctrlClient;
+let posterName; // CTRL's name: posts the reversal
+const scopeIds = [];
 let catVariant; // a catalogue variant with a category, kept out of `variants`
 let catCategory;
 const prevUserType = {};
 
-// Count S3 writes, to prove a refused upload stores nothing.
+// Count S3 writes, to prove a refused upload stores nothing, and deletes, to
+// prove an upload that fails to record is removed again.
 const realSend = s3Client.send;
 let s3Puts = 0;
+let s3Deletes = 0;
 
 beforeAll(async () => {
   await truncateDynamic();
+  // GRN ids restart after the truncate, so trail rows an earlier suite left for
+  // its GRNs would match this suite's GRN ids. No GRN exists now: all are stale.
+  await db.none(`DELETE FROM tbl_activity_events WHERE entity_type = 'GRN'`);
   const cat = await db.one(
     `SELECT pv.id, pc.category_id FROM tbl_product_variant pv
        JOIN tbl_product_categories pc ON pc.product_id = pv.product_id
@@ -74,17 +84,25 @@ beforeAll(async () => {
   await db.none(`UPDATE tbl_users SET user_type = 3, status = 1 WHERE id = $1`, [VENDOR]);
   initiatorEmail = (await db.one(`SELECT email FROM tbl_users WHERE id = $1`, [INITIATOR])).email;
   adminName = (await db.one(`SELECT name FROM tbl_users WHERE id = $1`, [ADMIN])).name;
+  const controller = Number((await db.one(
+    `SELECT id FROM tbl_roles WHERE title = 'Inventory Controller' AND created_by IS NULL`
+  )).id);
+  scopeIds.push(await grantRoleScope(db, { userId: CTRL, roleId: controller, companyId: CO }));
+  posterName = (await db.one(`SELECT name FROM tbl_users WHERE id = $1`, [CTRL])).name;
   anon = await httpClient(null);
   admin = await httpClient(ADMIN);
+  ctrlClient = await httpClient(CTRL);
   s3Client.send = function countingSend(command, ...rest) {
     const name = command?.constructor?.name || "";
     if (/^(Put|CreateMultipartUpload|UploadPart)/.test(name)) s3Puts += 1;
+    if (name === "DeleteObjectCommand") s3Deletes += 1;
     return realSend.call(this, command, ...rest);
   };
 });
 
 afterAll(async () => {
   s3Client.send = realSend;
+  await revokeRoleScopes(db, scopeIds);
   const grnIds = (await db.any(`SELECT id FROM tbl_grn`)).map((r) => Number(r.id));
   if (grnIds.length) {
     await db.none(`DELETE FROM tbl_activity_events WHERE entity_type = 'GRN' AND entity_id = ANY($1::bigint[])`, [grnIds]);
@@ -187,10 +205,10 @@ const receipt = (lines, extra = {}) => ({ receivedAt: TODAY, clientEventId: rand
 
 const getContext = (token) => anon.get(`${BASE}/receive-context`).set("X-Receive-Token", token);
 const postReceipt = (token, body) => anon.post(`${BASE}/grn`).set("X-Receive-Token", token).send(body);
-const upload = (token, grnId, name = "challan.pdf") =>
+const upload = (token, grnId, name = "challan.pdf", kind = "CHALLAN") =>
   anon.post(`${BASE}/grn/${grnId}/attachments`)
     .set("X-Receive-Token", token)
-    .field("kind", "CHALLAN")
+    .field("kind", kind)
     .attach("file", Buffer.from("%PDF-1.4 challan"), { filename: name, contentType: "application/pdf" });
 
 /** A receipt a buyer user posts through the buyer route. */
@@ -213,11 +231,15 @@ function allKeys(value, out = []) {
   return out;
 }
 
-/** The response leaks no price key, no price value and no buyer contact. */
+/**
+ * The response leaks no price key, no price value, no buyer contact and no
+ * buyer user (postedBy, receivedByName, ...).
+ */
 function expectNoPrices(body) {
   const keys = allKeys(body);
   expect(keys.filter((k) => PRICE_KEY.test(k))).toEqual([]);
   expect(keys.filter((k) => COMMERCIAL_KEY.test(k))).toEqual([]);
+  expect(keys.filter((k) => /[a-z]By(Name)?$/.test(k))).toEqual([]);
   const text = JSON.stringify(body);
   for (const leak of [String(PRICE_A), String(PRICE_B), initiatorEmail, adminName]) {
     expect(text).not.toContain(leak);
@@ -565,13 +587,49 @@ describe("token refusals", () => {
     expect(JSON.stringify(hijack.body)).not.toContain(buyerGrn.grnNumber);
     expect(await grnRows(mine.poId)).toHaveLength(1);
 
-    const own = await postReceipt(token, receipt([line(mine.lineIds[0], 2)]));
+    // Nor post its lines over a buyer's draft that carries the key (in any case).
+    const draftRes = await admin.post("/api/v1/inventory/grn")
+      .send({ poId: mine.poId, hotelId: A1, post: false, ...receipt([line(mine.lineIds[0], 3)]) });
+    expect(draftRes.status).toBe(201);
+    const draft = draftRes.body.data;
+    const draftState = async () => ({
+      grn: await db.one(`SELECT status, received_by_token_id, posted_at FROM tbl_grn WHERE id = $1`, [draft.id]),
+      lines: await db.any(
+        `SELECT id, po_line_id, received_qty::text, accepted_qty::text, rejected_qty::text FROM tbl_grn_line
+          WHERE grn_id = $1 ORDER BY id`,
+        [draft.id]
+      ),
+    });
+    const draftBefore = await draftState();
+    expect(draftBefore.grn).toEqual({ status: "draft", received_by_token_id: null, posted_at: null });
+    expect(draftBefore.lines).toHaveLength(1);
+    for (const key of [draft.clientEventId, draft.clientEventId.toUpperCase()]) {
+      const takeover = await postReceipt(token, receipt([line(mine.lineIds[0], 1)], { clientEventId: key }));
+      expect(takeover.status).toBe(409);
+      expect(takeover.body).toMatchObject({
+        code: "CONFLICT", message: "This scan session belongs to another receipt", details: { field: "clientEventId" },
+      });
+    }
+    expect(await draftState()).toEqual(draftBefore);
+    expect(await balanceOf(A1, mine.variants[0])).toBe(1); // the buyer's posted receipt only
+
+    const ownBody = receipt([line(mine.lineIds[0], 2)]);
+    const own = await postReceipt(token, ownBody);
     expect(own.status).toBe(201);
     const ok = await upload(token, own.body.data.id, "photo.pdf");
     expect(ok.status).toBe(201);
     expect(ok.body.data).toEqual({ id: expect.any(Number), fileName: "photo.pdf", kind: "CHALLAN", url: expect.any(String) });
     expect(await db.one(`SELECT uploaded_by FROM tbl_grn_attachment WHERE id = $1`, [ok.body.data.id]))
       .toEqual({ uploaded_by: null });
+
+    // A file stored but then refused (an unknown kind) is removed from S3 again.
+    const deletesBefore = s3Deletes;
+    const bogus = await upload(token, own.body.data.id, "bogus.pdf", "BOGUS");
+    expect(bogus.status).toBe(400);
+    expect(bogus.body).toMatchObject({ code: "VALIDATION", details: { field: "kind" } });
+    expect(s3Deletes - deletesBefore).toBe(1);
+    expect(await db.any(`SELECT id FROM tbl_grn_attachment WHERE grn_id = $1`, [own.body.data.id]))
+      .toEqual([{ id: ok.body.data.id }]);
 
     // A buyer's file on the link's own receipt (a priced invoice, say) is never listed back.
     await db.none(
@@ -582,6 +640,19 @@ describe("token refusals", () => {
     const receipts = (await getContext(token)).body.data.receipts;
     expect(receipts.map((r) => r.id)).toEqual([own.body.data.id]);
     expect(receipts[0].attachments.map((a) => a.id)).toEqual([ok.body.data.id]);
+
+    // After a buyer reverses the link's receipt, a replay shows the reversal
+    // but not who at the buyer posted it.
+    const reversed = await ctrlClient.post(`/api/v1/inventory/grn/${own.body.data.id}/reverse`)
+      .send({ reason: "Counted twice", lines: "all" });
+    expect(reversed.status).toBe(201);
+    const replay = await postReceipt(token, ownBody);
+    expect(replay.status).toBe(200);
+    expect(replay.body.data.id).toBe(own.body.data.id);
+    expect(replay.body.data.reversals).toEqual([expect.objectContaining({ id: reversed.body.data.id })]);
+    expect(posterName).toBeTruthy();
+    expect(JSON.stringify(replay.body)).not.toContain(posterName);
+    expectNoPrices(replay.body);
   });
 });
 

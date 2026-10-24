@@ -8,12 +8,17 @@
 //   - the PO is always the token's (a different poId in a body is NOT_FOUND);
 //   - the hotel is always the token's (a body hotelId is overridden);
 //   - attachments go only onto GRNs this token posted.
-// Every payload passes through redactForReceiveToken (no price, cost, value,
-// tax or buyer-contact key at any depth). Drafts are not offered to a token:
-// it posts straight away, and the buyer's drafts at the hotel stay hidden.
+// Every payload passes through tokenView: redactForReceiveToken (no price,
+// cost, value, tax or buyer-contact key at any depth) plus a token-only strip
+// of the camelCase "who" keys (postedBy, receivedByName, ...), so no buyer
+// user's id or name reaches a link, including on reversals. Drafts are not
+// offered to a token: it posts straight away, and the buyer's drafts at the
+// hotel stay hidden.
 //
 // A link only receives (spec §10.3: "the token path is not extended to
-// mark-out or counts"), and never edits the buyer's stock catalogue:
+// mark-out or counts"), and never maps items or sets conversions (posting does
+// still create the stock item row for a product on first receipt, as any
+// receipt does):
 //   - no mark-out on arrival: the context offers no departments and no
 //     mark-out default, and a line asking for one is refused;
 //   - no item mapping (refused) and no unit conversions: a supplied uomFactor
@@ -22,6 +27,7 @@
 //     UOM_FACTOR_REQUIRED "Ask the buyer to set the unit conversion …".
 
 import { InventoryError } from './errors.js';
+import { clientEventIdOf } from './grnCommon.js';
 import {
   getReceiveContext,
   postGrn,
@@ -33,6 +39,26 @@ import {
 import { getPoContext, listPoLines } from './planCore.js';
 import { RECEIVE_TOKEN_TTL_DAYS } from '../../helper/receiveToken.js';
 import { redactForReceiveToken } from '../../helper/receiveTokenView.js';
+
+// camelCase keys naming a buyer user: postedBy, postedByName, receivedBy,
+// receivedByName, and any later createdBy / uploadedByName alike.
+const USER_IDENTITY_KEY = /[a-z]By(Name)?$/;
+
+const isPlainObject = (v) =>
+  v !== null && typeof v === 'object' && [Object.prototype, null].includes(Object.getPrototypeOf(v));
+
+function stripUserIdentity(value) {
+  if (Array.isArray(value)) return value.map(stripUserIdentity);
+  if (!isPlainObject(value)) return value;
+  const out = {};
+  for (const [key, v] of Object.entries(value)) {
+    if (!USER_IDENTITY_KEY.test(key)) out[key] = stripUserIdentity(v);
+  }
+  return out;
+}
+
+/** A payload as a link may see it: no commercial, buyer-contact or buyer-user key at any depth. */
+const tokenView = (value) => stripUserIdentity(redactForReceiveToken(value));
 
 const notFound = (what = 'Purchase order not found') => new InventoryError('NOT_FOUND', what);
 
@@ -242,7 +268,7 @@ export async function getTokenReceiveContext(t, receiveToken) {
     reason = notReceivableReason(err);
     out = await closedContext(t, poId, hotelId);
   }
-  return redactForReceiveToken({
+  return tokenView({
     ...out,
     // No mark-out from a link: no default to pre-fill, no departments to pick.
     lines: out.lines.map((l) => ({ ...l, defaultMarkOutOnArrival: false })),
@@ -262,10 +288,26 @@ export async function getTokenReceiveContext(t, receiveToken) {
 async function tokenGrnView(t, grn) {
   const own = (await tokenAttachments(t, [grn.id])).get(grn.id) || [];
   const ownIds = new Set(own.map((a) => a.id));
-  return redactForReceiveToken({
+  return tokenView({
     ...grn,
     attachments: (grn.attachments || []).filter((a) => ownIds.has(a.id)),
   });
+}
+
+const scanSessionTaken = () =>
+  new InventoryError('CONFLICT', 'This scan session belongs to another receipt', { field: 'clientEventId' });
+
+/**
+ * A clientEventId already on a GRN this link did not post (a buyer's draft, a
+ * buyer's receipt, another link's receipt) is not this link's to replay or to
+ * post over: postGrn would otherwise post the link's lines over a buyer draft
+ * that carries the key. Only a receipt this link posted replays.
+ */
+async function assertOwnScanSession(t, tokenId, clientEventId) {
+  const key = clientEventIdOf(clientEventId);
+  if (!key) return;
+  const row = await t.oneOrNone(`SELECT received_by_token_id FROM tbl_grn WHERE client_event_id = $1`, [key]);
+  if (row && Number(row.received_by_token_id) !== tokenId) throw scanSessionTaken();
 }
 
 /**
@@ -288,6 +330,7 @@ export async function postTokenGrn(t, receiveToken, input = {}) {
   }
   if (input.poId != null && input.poId !== '' && positiveInt(input.poId) !== poId) throw notFound();
   const lines = linkLines(input);
+  await assertOwnScanSession(t, tokenId, input.clientEventId);
 
   let result;
   try {
@@ -304,10 +347,13 @@ export async function postTokenGrn(t, receiveToken, input = {}) {
     throw err;
   }
   const { grn } = result;
-  // A replay can only ever return a receipt this link posted.
-  if (Number(grn.receivedByTokenId) !== tokenId) {
-    throw new InventoryError('CONFLICT', 'This scan session belongs to another receipt', { field: 'clientEventId' });
-  }
+  // A replay can only ever return a receipt this link posted, and a new post
+  // must be a GRN this request created (a buyer draft carries its creator; a
+  // link's own receipt has none). The second check covers a buyer draft saved
+  // with the same key between the check above and postGrn's lookup; throwing
+  // rolls back the post over it.
+  const row = await t.one(`SELECT created_by, received_by_token_id FROM tbl_grn WHERE id = $1`, [grn.id]);
+  if (Number(row.received_by_token_id) !== tokenId || row.created_by != null) throw scanSessionTaken();
   return {
     grn: await tokenGrnView(t, grn),
     replayed: result.replayed === true,
@@ -337,7 +383,7 @@ export async function addTokenGrnAttachment(t, receiveToken, grnId, file) {
   const { viaToken } = tokenBinding(receiveToken);
   await assertTokenGrn(t, receiveToken, grnId);
   const out = await addGrnAttachment(t, SITE_REP_ACTOR, Number(grnId), file, { viaToken });
-  return { ...out, attachment: redactForReceiveToken(out.attachment) };
+  return { ...out, attachment: tokenView(out.attachment) };
 }
 
 export default { getTokenReceiveContext, postTokenGrn, assertTokenGrn, addTokenGrnAttachment };

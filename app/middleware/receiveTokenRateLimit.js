@@ -22,6 +22,12 @@
 // LIMITS: per process (a second instance keeps its own counts; a shared store
 // such as Redis is the follow-up if the backend is scaled out), and at most
 // `maxKeys` tokens are tracked (oldest evicted first).
+//
+// KNOWN GAP (accepted for now): unknown tokens are counted too, so about 10k
+// distinct well-formed garbage tokens evict a real token's bucket; the holder
+// of a valid link can reset their own cap for about 10k requests' cost each
+// time. Follow-up: cap the buckets held for misses (hashes that match no
+// token) separately, per process, so garbage can't evict a live link's count.
 
 import { logger } from '../util/logger.js';
 import {
