@@ -22,6 +22,7 @@ import {
   loadDeliveries, loadPoLineRolls, loadDispatches, loadVendorDocuments, parseDay, parseQty, ensureCurrentPlan,
 } from './planService.js';
 import { INVALID_PO_STATUSES_FOR_VENDOR } from '../../util/constants.js';
+import { loadInvoices } from './invoiceService.js';
 
 const SCALE = 10000;
 const toQ = (v) => {
@@ -274,6 +275,24 @@ export async function cancelDispatch(t, vendorUser, poId, dispatchId) {
     [did]
   );
   if (received) throw new InventoryError('CONFLICT', 'Goods have been received against this dispatch', { dispatchId: did });
+  // A billed dispatch stays: withdrawing it would leave its invoice billing a
+  // delivery that never went. (raiseInvoice takes the same PO lock.)
+  const billed = await t.oneOrNone(
+    `SELECT invoice_number FROM tbl_purchase_order_document
+      WHERE dispatch_id = $1 AND document_type = 'invoice'
+      ORDER BY id
+      LIMIT 1`,
+    [did]
+  );
+  if (billed) {
+    throw new InventoryError(
+      'CONFLICT',
+      billed.invoice_number
+        ? `Invoice ${billed.invoice_number} has been raised against this dispatch, so it can't be withdrawn`
+        : "An invoice has been raised against this dispatch, so it can't be withdrawn",
+      { dispatchId: did }
+    );
+  }
   await t.none(
     `UPDATE tbl_po_dispatch SET status = 'cancelled', updated_at = now(), updated_by = $2 WHERE id = $1`,
     [did, positiveInt(vendorUser?.id)]
@@ -284,8 +303,9 @@ export async function cancelDispatch(t, vendorUser, poId, dispatchId) {
 
 /**
  * The vendor's Deliveries tab (contract: GET /vendor/po/:poId/deliveries):
- * the plan, the PO lines' open quantities, dispatch notes, GRNs, returns and
- * short-closes. No prices, rates, costs or values; no buyer staff names.
+ * the plan, the PO lines' open quantities, dispatch notes, GRNs, returns,
+ * short-closes and the vendor's own invoices (C4). No prices, rates, costs or
+ * values; no buyer staff names.
  * @throws InventoryError NOT_FOUND when the PO is not the vendor's.
  */
 export async function getVendorDeliveries(t, vendorUser, poId) {
@@ -297,11 +317,12 @@ export async function getVendorDeliveries(t, vendorUser, poId) {
   const hotels = fresh.hotelIds.length
     ? await t.any(`SELECT id, name FROM tbl_hospitality_company_hotels WHERE id = ANY($1::int[]) ORDER BY id`, [fresh.hotelIds])
     : [];
-  const [deliveries, poLines, dispatches, docs] = await Promise.all([
+  const [deliveries, poLines, dispatches, docs, invoices] = await Promise.all([
     loadDeliveries(t, fresh),
     loadPoLineRolls(t, id),
     loadDispatches(t, id),
     loadVendorDocuments(t, id),
+    loadInvoices(t, id),
   ]);
   return {
     poId: id,
@@ -316,6 +337,7 @@ export async function getVendorDeliveries(t, vendorUser, poId) {
     grns: docs.grns,
     rtvs: docs.rtvs,
     shortCloses: docs.shortCloses,
+    invoices,
   };
 }
 

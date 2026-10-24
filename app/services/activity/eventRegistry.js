@@ -329,10 +329,12 @@ export const EVENTS = [
     entity: { type: 'PO', id: B('po_id') }, scope: SCOPE.entity('PO'),
     summary: (c) => `${c.actor} recorded goods receipt against purchase order ${c.entityLabel}`,
   }),
+  // The controller hands over the hotel the invoice bills (its dispatch's, else
+  // the PO's own), so an invoice for a second hotel files under that hotel.
   e({
     method: 'POST', path: '/po/raiseInvoice', key: 'po_invoice_raised',
     category: CATEGORIES.ORDERS, severity: 'notable',
-    entity: { type: 'PO', id: B('po_id') }, scope: SCOPE.entity('PO'),
+    entity: { type: 'PO', id: B('po_id') }, scope: [SCOPE.detail(), SCOPE.entity('PO')],
     summary: (c) => `${c.actor} raised an invoice against purchase order ${c.entityLabel}`,
   }),
   // Site rep link issued: a receiving link minted for, and emailed to, someone

@@ -319,7 +319,14 @@ describe("vendor dispatch notes", () => {
       const atA1 = plan.deliveries.find((d) => d.hotelId === A1);
       const dl = (poLineId) => atA1.lines.find((l) => l.poLineId === poLineId).id;
 
-      await createDispatch(t, vendor, po.poId, note({ deliveryId: atA1.id, lines: [{ poLineId: l1, qty: 6 }, { poLineId: l2, qty: 6 }] }));
+      const sent = await createDispatch(t, vendor, po.poId, note({ deliveryId: atA1.id, lines: [{ poLineId: l1, qty: 6 }, { poLineId: l2, qty: 6 }] }));
+      // The vendor's own invoice for that delivery (C4).
+      await t.none(
+        `INSERT INTO tbl_purchase_order_document
+           (purchase_order_id, document_type, document_url, uploaded_by, invoice_number, invoice_date, invoice_amount, dispatch_id)
+         VALUES ($1, 'invoice', 'https://example.test/inv.pdf', $2, 'INV-77', '2030-01-04', 70500, $3)`,
+        [po.poId, VENDOR, sent.id]
+      );
       const grn = await fx.postedGrn(t, {
         poId: po.poId, hotelId: A1,
         lines: [
@@ -364,10 +371,15 @@ describe("vendor dispatch notes", () => {
       expect(view.shortCloses).toEqual([expect.objectContaining({
         hotelName: "Hotel A-1", qty: 4, reasonCode: "no_longer_needed", remarks: "Menu changed", actedAt: expect.any(String),
       })]);
+      // invoiceAmount is the vendor's own billed figure (it typed it in), not a
+      // buyer price, which is why its key does not match the scan below.
+      expect(view.invoices).toEqual([expect.objectContaining({
+        invoiceNumber: "INV-77", invoiceDate: "2030-01-04", invoiceAmount: 70500, dispatchId: sent.id,
+      })]);
 
       // ... and nothing about money or the buyer's people.
       const priceKeys = allKeys(view).filter((k) => /price|rate|cost|value/i.test(k));
-      expect(allKeys(view)).toEqual(expect.arrayContaining(["deliveries", "dispatches", "grns", "rtvs", "shortCloses"]));
+      expect(allKeys(view)).toEqual(expect.arrayContaining(["deliveries", "dispatches", "grns", "rtvs", "shortCloses", "invoices"]));
       expect(priceKeys).toEqual([]);
       const text = JSON.stringify(view);
       const names = await t.any(`SELECT name FROM tbl_users WHERE id = ANY($1::int[]) AND name IS NOT NULL`, [[BUYER, ADMIN]]);

@@ -1088,16 +1088,19 @@ export async function getPODetailFull(po_id, scope, viewer = null) {
     callOffSupplier = { supplier, placeCode, taxSplit };
   }
 
-  // Documents: tbl_purchase_order_document + the PO PDF itself.
+  // Documents: tbl_purchase_order_document + the PO PDF itself. A PO takes
+  // one invoice per delivery, so each is named by its number and amount.
   const docRows = await db.any(
-    `SELECT id, document_type, document_url, created_at
+    `SELECT id, document_type, document_url, created_at,
+            invoice_number, invoice_date::text AS invoice_date,
+            invoice_amount::text AS invoice_amount, dispatch_id
      FROM tbl_purchase_order_document
      WHERE purchase_order_id = $1
      ORDER BY created_at DESC`,
     [poId]
   );
   const docs = docRows.map((d) => ({
-    name: `${d.document_type === "grn" ? "GRN" : "Invoice"} document`,
+    name: documentName(d),
     type: d.document_type,
     size: null, // file size not stored
     kind: d.document_type,
@@ -1694,6 +1697,23 @@ export function effectiveApproverStatus(rowStatus, stepStatus, rule) {
 //
 // This mirrors the `comparison` gate in getPODetailFull, which suppresses
 // competitors' quote amounts on the same path for the same reason.
+/** "₹70,500" / "₹99.90" from a numeric text; null when absent. Display only. */
+function inrAmount(text) {
+  if (text == null || text === "") return null;
+  const n = Number(text);
+  if (!Number.isFinite(n)) return null;
+  const whole = Number.isInteger(n);
+  return `₹${n.toLocaleString("en-IN", { minimumFractionDigits: whole ? 0 : 2, maximumFractionDigits: 2 })}`;
+}
+
+/** A PO document's display name: "Invoice INV-1001 · ₹4,500"; a file-only invoice is "Invoice document". */
+function documentName(d) {
+  if (d.document_type === "grn") return "GRN document";
+  if (d.document_type !== "invoice" || !d.invoice_number) return "Invoice document";
+  const amount = inrAmount(d.invoice_amount);
+  return amount ? `Invoice ${d.invoice_number} · ${amount}` : `Invoice ${d.invoice_number}`;
+}
+
 async function buildAuditTrail(po, docRows = [], { isVendorView = false } = {}) {
   const workflow = [];
   const activity = [];
@@ -2018,7 +2038,10 @@ async function buildAuditTrail(po, docRows = [], { isVendorView = false } = {}) 
   }
 
   // ---- 3) Vendor + logistics lifecycle ----
-  const invoiceDoc = docRows.find((d) => d.document_type === "invoice");
+  // "Invoice raised" happened with the FIRST invoice; later deliveries add more.
+  const invoiceDoc = docRows
+    .filter((d) => d.document_type === "invoice")
+    .reduce((first, d) => (!first || new Date(d.created_at) < new Date(first.created_at) ? d : first), null);
   const grnDoc = docRows.find((d) => d.document_type === "grn");
   // 'approved' = the vendor has accepted (acceptPO flips acceptance_pending→approved,
   // and call-offs reach 'approved' only via acceptance) — so an accepted PO must
