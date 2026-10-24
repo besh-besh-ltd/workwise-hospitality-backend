@@ -3274,8 +3274,9 @@ export const handleRaiseInvoice = async (po_id, invoice_url, vendor_id) => {
  *
  * Kept from the old handler: grn_document_url is stored as before (a
  * tbl_purchase_order_document 'grn' row, same shape) and also as an OTHER
- * attachment on the new GRN; the PO approval-history 'grn' row; the return
- * value (that document row, or null). The old GRN email is replaced by the
+ * attachment on the new GRN; the PO approval-history 'grn' row (now written by
+ * the posting, for every first receipt); the return value (that document row,
+ * or null). The old GRN email is replaced by the
  * inventory GRN notice (notifyGrnPosted), sent after COMMIT, so the vendor is
  * not told twice.
  *
@@ -3313,22 +3314,8 @@ export const handleMarkGRN = async (po_id, grn_document_url, user_id, remarks, u
       );
     }
 
-    const txn = await t.oneOrNone(
-      `SELECT id FROM tbl_approval_hierarchy_transactions
-      WHERE hierarchy_type = 'po'
-      AND target_entity_id = $1`,
-      [po_id]
-    );
-
-    if (txn) {
-      await t.none(
-        `INSERT INTO tbl_approval_hierarchy_history
-        (approval_transaction_id, approved_by, action, remarks)
-        VALUES ($1, $2, $3, $4)`,
-        [txn.id, user_id, 'grn', remarks]
-      );
-    }
-
+    // The PO timeline 'grn' history row is written by the posting itself
+    // (grnService recordLegacyGrnTimeline), for this shim and Receive alike.
     return { grn, document };
   });
 

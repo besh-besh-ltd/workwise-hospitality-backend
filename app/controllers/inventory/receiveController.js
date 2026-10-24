@@ -15,7 +15,7 @@ import db from '../../config/dbConn.js';
 import s3Client from '../../config/s3config.js';
 import { logError } from '../../helper/common.js';
 import { sendInventoryError, InventoryError } from '../../services/inventory/errors.js';
-import { notifyGrnPosted, notifyGrnRejections } from '../../services/inventory/notifier.js';
+import { notifyGrnPosted } from '../../services/inventory/notifier.js';
 import { getAwaitingDeliveries as awaitingList } from '../../services/inventory/awaiting.js';
 import {
   getReceiveContext as receiveContext,
@@ -54,20 +54,13 @@ function grnActivity(res, grn, extra = {}) {
   };
 }
 
-/** After COMMIT: receipt notices. Never throws; a notice failure is logged. */
+/** After COMMIT: the receipt notice. Never throws; a notice failure is logged. */
 async function afterPost(grn) {
   if (!grn?.id || grn.status === 'draft') return;
   try {
     await notifyGrnPosted(db, { grnId: grn.id });
   } catch (err) {
     logError('inventory: GRN posted notice failed', err);
-  }
-  if (grn.docType === 'RECEIPT' && (grn.lines || []).some((l) => Number(l.rejectedQty) > 0)) {
-    try {
-      await notifyGrnRejections(db, { grnId: grn.id });
-    } catch (err) {
-      logError('inventory: GRN rejection notice failed', err);
-    }
   }
 }
 

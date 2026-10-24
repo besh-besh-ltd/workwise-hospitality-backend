@@ -17,7 +17,10 @@ import { IDS } from "../fixtures/ids.js";
 import { makeRFQ } from "../factories/rfq.js";
 import { httpClient } from "../helpers/http.js";
 import { grantRoleScope, revokeRoleScopes } from "../helpers/roleScope.js";
-import { postGrn, getGrn, SITE_REP_ACTOR } from "../../app/services/inventory/grnService.js";
+import {
+  postGrn, getGrn, saveGrnDraft, postLegacyFullReceipt, SITE_REP_ACTOR,
+} from "../../app/services/inventory/grnService.js";
+import { setUomFactor } from "../../app/services/inventory/uom.js";
 import { resolveItemForVariant } from "../../app/services/inventory/items.js";
 import { ensureDefaultPlan } from "../../app/services/inventory/planCore.js";
 import { postMovements } from "../../app/services/inventory/ledger.js";
@@ -464,6 +467,53 @@ describe("receiving against the plan", () => {
     expect(res.body.data.lines[0]).toMatchObject({ unitCost: 90, stockQty: 6 });
     expect(await balanceOf(A2, variant)).toEqual({ qty: 6, avgCost: 90 });
   });
+
+  it("a dispatch-linked delivery is drawn first and the dispatch becomes received", async () => {
+    const { poId, lineIds: [line] } = await makePo({ lines: [{ qty: 10 }] });
+    const [, later] = await insertPlan(poId, [
+      { hotelId: A1, phaseNo: 1, dueDate: addDays(TODAY, 5), lines: [{ poLineId: line, planned: 4 }] },
+      { hotelId: A1, phaseNo: 2, dueDate: addDays(TODAY, 20), lines: [{ poLineId: line, planned: 6 }] },
+    ]);
+    const dispatch = await db.one(
+      `INSERT INTO tbl_po_dispatch (dispatch_number, hospitality_company_id, po_id, vendor_id, delivery_id, hotel_id, status, created_by)
+       VALUES ($1, $2, $3, $4, $5, $6, 'in_transit', $4) RETURNING id`,
+      [`DSP-B1-${tag()}`, CO, poId, VENDOR, later, A1]
+    );
+    await db.none(
+      `INSERT INTO tbl_po_dispatch_line (hospitality_company_id, dispatch_id, po_line_id, qty) VALUES ($1, $2, $3, 5)`,
+      [CO, dispatch.id, line]
+    );
+
+    // Without the dispatch, 5 would go to phase 1 (due first) before phase 2.
+    const res = await recv.post("/api/v1/inventory/grn")
+      .send(grnInput(poId, A1, [grnLine(line, 5)], { dispatchId: dispatch.id }));
+    expect(res.status).toBe(201);
+    expect(res.body.data.lines[0].allocations.map((a) => [a.phaseNo, a.acceptedQty])).toEqual([[2, 5]]);
+    expect(await planRows(poId)).toEqual([
+      expect.objectContaining({ hotel_id: A1, phase_no: 1, planned: 4, accepted: 0 }),
+      expect.objectContaining({ hotel_id: A1, phase_no: 2, planned: 6, accepted: 5 }),
+    ]);
+    expect((await db.one(`SELECT status FROM tbl_po_dispatch WHERE id = $1`, [dispatch.id])).status).toBe("received");
+  });
+
+  it("company tolerance applies when the item sets none", async () => {
+    const { poId, lineIds: [line], variants: [v] } = await makePo({ lines: [{ qty: 10 }] });
+    await db.none(
+      `INSERT INTO tbl_inv_company_settings (hospitality_company_id, over_receipt_tolerance_pct) VALUES ($1, 10)
+       ON CONFLICT (hospitality_company_id) DO UPDATE SET over_receipt_tolerance_pct = 10`,
+      [CO]
+    );
+    try {
+      const over = await recv.post("/api/v1/inventory/grn").send(grnInput(poId, A1, [grnLine(line, 12)]));
+      expect(over.status).toBe(409);
+      expect(over.body).toMatchObject({ code: "OVER_RECEIPT", details: { poLineId: line, maxAcceptable: 11 } });
+      const res = await recv.post("/api/v1/inventory/grn").send(grnInput(poId, A1, [grnLine(line, 11)]));
+      expect(res.status).toBe(201);
+      expect(await balanceOf(A1, v)).toMatchObject({ qty: 11 });
+    } finally {
+      await db.none(`DELETE FROM tbl_inv_company_settings WHERE hospitality_company_id = $1`, [CO]);
+    }
+  });
 });
 
 describe("receive context", () => {
@@ -482,7 +532,7 @@ describe("receive context", () => {
     expect(ctx.lines[0]).toMatchObject({
       poLineId: line, unit: "Kg", invItemId: null, stockUom: null, uomFactor: 1, needsUomFactor: false,
       trackExpiry: false, plannedAtHotel: 3, openAtHotel: 3, maxAcceptable: 3, defaultMarkOutOnArrival: false,
-      barcodes: [], unitCost: 100,
+      barcodes: [], costPerPoUnit: 100,
     });
     expect(ctx.draft).toBeNull();
   });
@@ -554,6 +604,69 @@ describe("concurrency and replay", () => {
 
     expect(await grnCount(poId)).toBe(1);
     expect(await balanceOf(A1, v)).toMatchObject({ qty: 3 });
+  });
+
+  it("same-hotel receipts on an unsplit multi-hotel PO serialise on the PO row", async () => {
+    const { poId, lineIds: [line], variants: [v] } = await makePo({ hotel: A1, mappedHotels: [A1, A2], lines: [{ qty: 10 }] });
+    await db.tx((t) => ensureDefaultPlan(t, poId, { userId: BUYER }));
+
+    const pair = (qty) => {
+      const gate = barrier(2);
+      const receive = () => db.tx(async (t) => {
+        await t.one("SELECT 1");
+        await gate();
+        return postGrn(t, { id: RECV }, {
+          input: { poId, hotelId: A1, receivedAt: TODAY, clientEventId: randomUUID(), lines: [grnLine(line, qty)] },
+        });
+      });
+      return Promise.allSettled([receive(), receive()]);
+    };
+
+    // Room for both: both post, one after the other.
+    const first = await pair(3);
+    expect(first.map((r) => r.status)).toEqual(["fulfilled", "fulfilled"]);
+
+    // 4 left: one posts, the other is refused cleanly (never a deadlock or a 500).
+    const second = await pair(3);
+    expect(second.filter((r) => r.status === "fulfilled")).toHaveLength(1);
+    const refused = second.filter((r) => r.status === "rejected");
+    expect(refused).toHaveLength(1);
+    expect(refused[0].reason).toMatchObject({
+      name: "InventoryError", code: "OVER_RECEIPT", details: { poLineId: line, maxAcceptable: 1 },
+    });
+
+    expect(await balanceOf(A1, v)).toMatchObject({ qty: 9 });
+    expect(await grnCount(poId)).toBe(3);
+  });
+
+  it("PUT {post:true} and POST /post on one draft never deadlock", async () => {
+    const { poId, lineIds: [line], variants: [v] } = await makePo({ lines: [{ qty: 10 }] });
+    const draft = await recv.post("/api/v1/inventory/grn").send({ ...grnInput(poId, A1, [grnLine(line, 2)]), post: false });
+    expect(draft.status).toBe(201);
+    const id = draft.body.data.id;
+
+    const gate = barrier(2);
+    const viaPut = () => db.tx(async (t) => {
+      await t.one("SELECT 1");
+      await gate();
+      await saveGrnDraft(t, { id: RECV }, { hotelId: A1, lines: [grnLine(line, 3)] }, { grnId: id });
+      return postGrn(t, { id: RECV }, { grnId: id });
+    });
+    const viaPost = () => db.tx(async (t) => {
+      await t.one("SELECT 1");
+      await gate();
+      return postGrn(t, { id: RECV }, { grnId: id });
+    });
+    const results = await Promise.allSettled([viaPut(), viaPost()]);
+
+    // Whichever goes second sees a posted GRN: a replay, or "only a draft can be edited".
+    for (const r of results.filter((x) => x.status === "rejected")) {
+      expect(r.reason).toMatchObject({ name: "InventoryError", code: "CONFLICT" });
+    }
+    expect(results.some((r) => r.status === "fulfilled")).toBe(true);
+    expect((await db.one(`SELECT status FROM tbl_grn WHERE id = $1`, [id])).status).toBe("posted");
+    expect(await grnCount(poId)).toBe(1);
+    expect([2, 3]).toContain((await balanceOf(A1, v)).qty);
   });
 });
 
@@ -642,6 +755,45 @@ describe("stock options", () => {
     ]);
     expect((await balanceOf(A1, v)).qty).toBe(4);
   });
+
+  it("an existing unit conversion is never overwritten from a receipt", async () => {
+    const { poId, lineIds: [line], variants: [v] } = await makePo({ lines: [{ qty: 2, unit: "box" }] });
+    const item = await makeItem(v, { stockUom: "piece" });
+    await db.tx((t) => setUomFactor(t, { invItemId: item, uomLabel: "box", factor: 12, userId: BUYER }));
+
+    // Not even a receiver who may set conversions can change one in passing.
+    const mismatch = await recv.post("/api/v1/inventory/grn")
+      .send(grnInput(poId, A1, [grnLine(line, 2, 0, { uomFactor: 10 })]));
+    expect(mismatch.status).toBe(400);
+    expect(mismatch.body).toMatchObject({
+      code: "VALIDATION",
+      details: { code_detail: "UOM_FACTOR_MISMATCH", poLineId: line, currentFactor: 12, suppliedFactor: 10 },
+    });
+    expect(await grnCount(poId)).toBe(0);
+    const uom = await db.one(`SELECT factor_to_stock::float8 AS f FROM tbl_inv_item_uom WHERE inv_item_id = $1`, [item]);
+    expect(uom.f).toBe(12);
+
+    // Repeating the stored factor is fine, even for someone who could not set one.
+    const same = await limited.post("/api/v1/inventory/grn")
+      .send(grnInput(poId, A1, [grnLine(line, 2, 0, { uomFactor: 12 })]));
+    expect(same.status).toBe(201);
+    expect(same.body.data.lines[0]).toMatchObject({ uomFactor: 12, stockQty: 24 });
+  });
+
+  it("mapping to another company's stock item is 404", async () => {
+    const { poId, lineIds: [line] } = await makePo({ lines: [{ qty: 2 }] });
+    const foreignItem = await db.tx((t) => resolveItemForVariant(t, {
+      companyId: IDS.hospitality.B, productVariantId: nextVariant(), createIfMissing: true, userId: BUYER, defaultUom: "kg",
+    }));
+
+    const posted = await recv.post("/api/v1/inventory/grn")
+      .send(grnInput(poId, A1, [grnLine(line, 2, 0, { mapToInvItemId: foreignItem.id })]));
+    expect(posted.status).toBe(404);
+    const draft = await recv.post("/api/v1/inventory/grn")
+      .send({ ...grnInput(poId, A1, [grnLine(line, 2, 0, { mapToInvItemId: foreignItem.id })]), post: false });
+    expect(draft.status).toBe(404);
+    expect(await grnCount(poId)).toBe(0);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -713,6 +865,83 @@ describe("reversal", () => {
     expect(reread.body.data.status).toBe("posted");
     expect(await balanceOf(A1, v)).toMatchObject({ qty: 4 });
   });
+
+  it("reversing a line marked out on arrival returns it at the mark-out cost, same batch", async () => {
+    const { poId, lineIds: [line], variants: [v] } = await makePo({ lines: [{ qty: 5, price: 160 }] });
+    const invItemId = await makeItem(v, { stockUom: "kg" });
+    // The store already holds 10 @ 100.
+    await db.tx((t) => postMovements(t, [{
+      companyId: CO, hotelId: A1, invItemId, type: "GRN_IN", qty: 10, unitCost: 100,
+      sourceType: "TEST", sourceId: 1, postedBy: RECV,
+    }]));
+
+    const expiry = addDays(TODAY, 90);
+    const posted = await recv.post("/api/v1/inventory/grn").send(grnInput(poId, A1, [
+      grnLine(line, 5, 0, { markOutDepartmentId: FB, batchNo: "LOT-9", expiryDate: expiry }),
+    ]));
+    expect(posted.status).toBe(201);
+    // In at 160, out to F&B at the new average: (1000 + 800) / 15 = 120.
+    expect(await movementsOfGrn(posted.body.data.id)).toEqual([
+      expect.objectContaining({ movement_type: "GRN_IN", qty: 5, unit_cost: 160 }),
+      expect.objectContaining({ movement_type: "MARK_OUT", qty: -5, unit_cost: 120, department_id: FB }),
+    ]);
+    expect(await balanceOf(A1, v)).toEqual({ qty: 10, avgCost: 120 });
+
+    const res = await ctrl.post(`/api/v1/inventory/grn/${posted.body.data.id}/reverse`).send({ reason: "Wrong PO", lines: "all" });
+    expect(res.status).toBe(201);
+    const moves = await db.any(
+      `SELECT movement_type, qty::float8 AS qty, unit_cost::float8 AS unit_cost, department_id, batch_no,
+              expiry_date::text AS expiry_date, reason_code
+         FROM tbl_inv_movement WHERE source_type = 'GRN' AND source_id = $1 ORDER BY id`,
+      [res.body.data.id]
+    );
+    expect(moves).toEqual([
+      { movement_type: "RETURN_IN", qty: 5, unit_cost: 120, department_id: FB, batch_no: "LOT-9", expiry_date: expiry, reason_code: "GRN_REVERSAL" },
+      { movement_type: "GRN_REVERSAL", qty: -5, unit_cost: 160, department_id: null, batch_no: "LOT-9", expiry_date: expiry, reason_code: null },
+    ]);
+
+    // 10 @ 100 stays 10 @ 100, and the batch nets to nothing.
+    const balance = await db.one(
+      `SELECT qty::float8 AS qty, avg_cost::float8 AS avg, value::float8 AS value
+         FROM tbl_inv_balance WHERE hotel_id = $1 AND inv_item_id = $2`,
+      [A1, invItemId]
+    );
+    expect(balance).toEqual({ qty: 10, avg: 100, value: 1000 });
+    const batch = await db.one(
+      `SELECT SUM(qty)::float8 AS qty FROM tbl_inv_movement WHERE hotel_id = $1 AND inv_item_id = $2 AND batch_no = 'LOT-9'`,
+      [A1, invItemId]
+    );
+    expect(batch.qty).toBe(0);
+  });
+
+  it("reversal cannot take back what is being returned to the vendor (RTV_COVERED)", async () => {
+    const { poId, lineIds: [line], variants: [v] } = await makePo({ lines: [{ qty: 10 }] });
+    const posted = await recv.post("/api/v1/inventory/grn").send(grnInput(poId, A1, [grnLine(line, 10)]));
+    expect(posted.status).toBe(201);
+    const grn = posted.body.data;
+    const rtv = await db.one(
+      `INSERT INTO tbl_rtv (rtv_number, hospitality_company_id, po_id, grn_id, hotel_id, disposition, status, created_by)
+       VALUES ($1, $2, $3, $4, $5, 'CREDIT', 'draft', $6) RETURNING id`,
+      [`RTV-B1-${tag()}`, CO, poId, grn.id, A1, CTRL]
+    );
+    await db.none(
+      `INSERT INTO tbl_rtv_line (hospitality_company_id, rtv_id, grn_line_id, qty, reason) VALUES ($1, $2, $3, 3, 'damaged')`,
+      [CO, rtv.id, grn.lines[0].id]
+    );
+
+    const all = await ctrl.post(`/api/v1/inventory/grn/${grn.id}/reverse`).send({ reason: "Wrong PO", lines: "all" });
+    expect(all.status).toBe(409);
+    expect(all.body).toMatchObject({
+      code: "CONFLICT",
+      details: { reason: "RTV_COVERED", grnLineId: grn.lines[0].id, returnedQty: 3, maxReversible: 7 },
+    });
+    expect(await balanceOf(A1, v)).toMatchObject({ qty: 10 });
+
+    const seven = await ctrl.post(`/api/v1/inventory/grn/${grn.id}/reverse`)
+      .send({ reason: "Wrong PO", lines: [{ grnLineId: grn.lines[0].id, qty: 7 }] });
+    expect(seven.status).toBe(201);
+    expect(await balanceOf(A1, v)).toMatchObject({ qty: 3 });
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -741,6 +970,38 @@ describe("PO side effects", () => {
     expect((await poState(poId)).delivery_plan_locked_at).toBeNull();
     expect((await recv.post("/api/v1/inventory/grn").send(grnInput(poId, A1, [grnLine(line, 1)]))).status).toBe(201);
     expect((await poState(poId)).delivery_plan_locked_at).not.toBeNull();
+  });
+
+  it("first receipt writes the legacy PO timeline 'GRN Marked' row, once", async () => {
+    const { poId, lineIds: [line] } = await makePo({ lines: [{ qty: 10 }] });
+    const txn = await db.one(
+      `INSERT INTO tbl_approval_hierarchy_transactions (hierarchy_type, target_entity_id, company_id, initiated_by, status, meta)
+       VALUES ('po', $1, $2, $3, 'approved', '{}'::jsonb) RETURNING id`,
+      [poId, IDS.companies.A, BUYER]
+    );
+    try {
+      const first = await recv.post("/api/v1/inventory/grn")
+        .send(grnInput(poId, A1, [grnLine(line, 4)], { remarks: "First lot" }));
+      expect(first.status).toBe(201);
+      const second = await recv.post("/api/v1/inventory/grn").send(grnInput(poId, A1, [grnLine(line, 2)]));
+      expect(second.status).toBe(201);
+
+      const rows = await db.any(
+        `SELECT approved_by, remarks FROM tbl_approval_hierarchy_history
+          WHERE approval_transaction_id = $1 AND action = 'grn'`,
+        [txn.id]
+      );
+      expect(rows).toEqual([{ approved_by: RECV, remarks: "First lot" }]);
+
+      const detail = await buyer.get(`/api/v1/po/${poId}`);
+      expect(detail.status).toBe(200);
+      expect(detail.body.data.approval_history).toEqual([
+        expect.objectContaining({ action: "grn", approved_by: RECV, remarks: "First lot" }),
+      ]);
+    } finally {
+      await db.none(`DELETE FROM tbl_approval_hierarchy_history WHERE approval_transaction_id = $1`, [txn.id]);
+      await db.none(`DELETE FROM tbl_approval_hierarchy_transactions WHERE id = $1`, [txn.id]);
+    }
   });
 });
 
@@ -775,6 +1036,35 @@ describe("access", () => {
     expect((await foreign.get(`/api/v1/inventory/grn/${posted.body.data.id}`)).status).toBe(404);
     const list = await foreign.get("/api/v1/inventory/grn").query({ poId: mine.poId });
     expect(list.body.data).toEqual({ rows: [], total: 0 });
+  });
+
+  it("moving a draft to another hotel needs grn.create there", async () => {
+    const { poId, lineIds: [line] } = await makePo({ hotel: A1, mappedHotels: [A1, A2], lines: [{ qty: 10 }] });
+    const editor = Number((await db.one(
+      `INSERT INTO tbl_roles (title, description, created_by) VALUES ('B1 GRN editor', 'inventory.grn test', $1) RETURNING id`,
+      [BUYER]
+    )).id);
+    madeRoles.push(editor);
+    await db.none(
+      `INSERT INTO tbl_role_permissions (role_id, permission_id)
+       SELECT $1, id FROM tbl_permissions WHERE resource::text = 'grn' AND action::text IN ('read', 'update')`,
+      [editor]
+    );
+    // LIMITED may edit GRNs at A2 but not start one there.
+    const scope = await grantRoleScope(db, { userId: LIMITED, roleId: editor, companyId: CO, hotelId: A2 });
+    try {
+      const draft = await limited.post("/api/v1/inventory/grn").send({ ...grnInput(poId, A1, [grnLine(line, 2)]), post: false });
+      expect(draft.status).toBe(201);
+      const moved = await limited.put(`/api/v1/inventory/grn/${draft.body.data.id}`).send({ hotelId: A2, lines: [grnLine(line, 2)] });
+      expect(moved.status).toBe(403);
+      expect(moved.body.code).toBe("FORBIDDEN");
+
+      const byReceiver = await recv.put(`/api/v1/inventory/grn/${draft.body.data.id}`).send({ hotelId: A2, lines: [grnLine(line, 2)] });
+      expect(byReceiver.status).toBe(200);
+      expect(byReceiver.body.data).toMatchObject({ hotelId: A2, status: "draft" });
+    } finally {
+      await revokeRoleScopes(db, [scope]);
+    }
   });
 });
 
@@ -930,5 +1220,85 @@ describe("legacy markGRN shim", () => {
     expect(res.status).toBe(409);
     expect(res.body.code).toBe("USE_RECEIVE");
     expect(await grnCount(poId)).toBe(0);
+  });
+
+  it("old GRN links keep working: the site-rep token posts the full receipt over HTTP", async () => {
+    const { poId, variants: [v] } = await makePo({ lines: [{ qty: 6 }] });
+    const secret = `tok-${randomUUID()}`;
+    const token = await db.one(
+      `INSERT INTO tbl_token_login_data (token_type, entity_id, name, email, phone, added_by, token)
+       VALUES ('GRN', $1, 'Gate (site)', 'gate@site.test', '9999999999', $2, $3) RETURNING id`,
+      [poId, BUYER, secret]
+    );
+    const anon = await httpClient(null);
+
+    const wrong = await anon.post("/api/v1/po/markGRN?token=not-the-token").send({ po_id: poId, grn_document_url: "", remarks: "x" });
+    expect(wrong.status).toBe(403);
+    expect(await grnCount(poId)).toBe(0);
+
+    const res = await anon.post(`/api/v1/po/markGRN?token=${secret}`)
+      .send({ po_id: poId, grn_document_url: "", remarks: "Delivered at the gate" });
+    expect(res.status).toBe(200);
+    expect(res.body.status).toBe(1);
+    const grn = await db.one(
+      `SELECT status, hotel_id, posted_by, received_by_token_id FROM tbl_grn WHERE po_id = $1 AND doc_type = 'RECEIPT'`,
+      [poId]
+    );
+    expect(grn).toEqual({ status: "posted", hotel_id: A1, posted_by: null, received_by_token_id: Number(token.id) });
+    expect(await balanceOf(A1, v)).toMatchObject({ qty: 6 });
+    expect((await poState(poId)).status).toBe("GRN");
+  });
+
+  it("legacy full receipt checks the caller before the PO's state", async () => {
+    const { poId, lineIds: [line] } = await makePo({ hotel: A2, lines: [{ qty: 3 }] });
+    expect((await recv.post("/api/v1/inventory/grn").send(grnInput(poId, A2, [grnLine(line, 3)]))).status).toBe(201);
+
+    // Fully received, but a caller without grn.create there hears 403 / 404, not 409.
+    await expect(db.tx((t) => postLegacyFullReceipt(t, { id: LIMITED }, { poId })))
+      .rejects.toMatchObject({ code: "FORBIDDEN" });
+    await expect(db.tx((t) => postLegacyFullReceipt(t, { id: FOREIGN }, { poId })))
+      .rejects.toMatchObject({ code: "NOT_FOUND" });
+    await expect(db.tx((t) => postLegacyFullReceipt(t, { id: RECV }, { poId })))
+      .rejects.toMatchObject({ code: "CONFLICT", details: { reason: "PO_NOT_RECEIVABLE" } });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// activity trail
+// ---------------------------------------------------------------------------
+
+describe("activity trail", () => {
+  /** The newest activity event for a GRN, polled: capture runs after the response. */
+  async function grnEvent(grnId, timeoutMs = 5000) {
+    const deadline = Date.now() + timeoutMs;
+    for (;;) {
+      const row = await db.oneOrNone(
+        `SELECT event_key, summary FROM tbl_activity_events
+          WHERE entity_type = 'GRN' AND entity_id = $1 ORDER BY id DESC LIMIT 1`,
+        [grnId]
+      );
+      if (row || Date.now() > deadline) return row;
+      await new Promise((r) => setTimeout(r, 100));
+    }
+  }
+
+  it("POST /grn with post:true is logged as a posting; a draft as started", async () => {
+    const { poId, lineIds: [line] } = await makePo({ lines: [{ qty: 4 }] });
+    const posted = await recv.post("/api/v1/inventory/grn").send(grnInput(poId, A1, [grnLine(line, 2)]));
+    expect(posted.status).toBe(201);
+    const draft = await recv.post("/api/v1/inventory/grn").send({ ...grnInput(poId, A1, [grnLine(line, 1)]), post: false });
+    expect(draft.status).toBe(201);
+    try {
+      const postedEvent = await grnEvent(posted.body.data.id);
+      expect(postedEvent).toMatchObject({ event_key: "inventory_grn_created" });
+      expect(postedEvent.summary.endsWith(` posted goods receipt note ${posted.body.data.grnNumber}`)).toBe(true);
+      const draftEvent = await grnEvent(draft.body.data.id);
+      expect(draftEvent.summary).toMatch(/ started a goods receipt note GRN draft #\d+$/);
+    } finally {
+      await db.none(
+        `DELETE FROM tbl_activity_events WHERE entity_type = 'GRN' AND entity_id = ANY($1::bigint[])`,
+        [[posted.body.data.id, draft.body.data.id]]
+      );
+    }
   });
 });

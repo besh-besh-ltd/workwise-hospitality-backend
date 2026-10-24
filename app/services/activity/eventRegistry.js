@@ -842,13 +842,14 @@ export const EVENTS = [
     method: 'POST', path: '/inventory/grn', key: 'inventory_grn_created',
     category: CATEGORIES.RECEIPT, severity: 'notable',
     entity: { type: 'GRN', id: R() }, scope: SCOPE.detail(),
-    summary: (c) => `${c.actor} started a goods receipt note${c.entityLabel ? ` ${c.entityLabel}` : ''}`,
+    // post:true creates and posts in one request: logged as the posting.
+    summary: (c) => `${c.actor} ${c.detail?.posted ? 'posted' : 'started a'} goods receipt note${c.entityLabel ? ` ${c.entityLabel}` : ''}`,
   }),
   e({
     method: 'PUT', path: '/inventory/grn/:id', key: 'inventory_grn_updated',
     category: CATEGORIES.RECEIPT, severity: 'routine',
     entity: { type: 'GRN', id: P('id') }, scope: SCOPE.detail(),
-    summary: (c) => `${c.actor} edited a draft goods receipt note${c.entityLabel ? ` ${c.entityLabel}` : ''}`,
+    summary: (c) => `${c.actor} ${c.detail?.posted ? 'posted' : 'edited a draft'} goods receipt note${c.entityLabel ? ` ${c.entityLabel}` : ''}`,
   }),
   e({
     method: 'POST', path: '/inventory/grn/:id/post', key: 'inventory_grn_posted',

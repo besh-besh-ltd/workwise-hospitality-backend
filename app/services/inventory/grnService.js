@@ -9,9 +9,13 @@
 //   2. its delivery lines    (SELECT … FOR UPDATE ORDER BY id)
 //   3. the doc sequence row  (nextDocNumber)
 //   4. stock balances        (postMovements, called once)
-// Over-receipt is checked on the locked delivery lines, so two receivers
-// posting against the same PO line serialise and the second sees the first's
-// receipt (Review Focus 1).
+// The PO row lock (step 1) is the serialisation point: every posting, draft
+// edit and reversal on a PO takes it first, so two receivers on the same PO
+// run one after the other and the second checks over-receipt against the
+// first's committed receipt (Review Focus 1). The delivery-line locks (step 2)
+// are a second guard for writers that touch the plan without the PO lock.
+// Items are resolved in product-variant order inside that, so lazy item
+// creation never locks in opposite orders.
 //
 // Quantities are handled as integers of 1/10000 (NUMERIC(18,4)) so sums and
 // tolerance checks have no float drift. Plan quantities (planned, accepted,
@@ -21,8 +25,7 @@
 // user's role scopes (assertHotelPermission, company + hotel axes). A hotel
 // outside the PO's hotel set, a foreign PO or a foreign GRN is NOT_FOUND.
 //
-// Services never respond. Notifications (notifyGrnPosted / notifyGrnRejections)
-// are sent by the caller AFTER commit.
+// Services never respond. The caller sends notifyGrnPosted AFTER commit.
 
 import { InventoryError } from './errors.js';
 import { assertHotelPermission, hotelIdsWithPermission } from './scope.js';
@@ -660,10 +663,19 @@ async function resolvePostLine(t, { ctx, hotelId, poLine, line, receivedAt, user
   let factor = await resolveUomFactor(t, { invItemId: item.id, uomLabel: poUnit });
   if (line.uomFactor != null && !sameUom(poUnit, item.stockUom)) {
     const supplied = round6(line.uomFactor);
-    if (factor == null || Math.abs(factor - supplied) > 1e-9) {
+    if (factor == null) {
+      // First receipt in this unit: the receiver may set the conversion.
       await requireInventoryUpdate();
       const saved = await setUomFactor(t, { invItemId: item.id, uomLabel: poUnit, factor: supplied, userId });
       factor = saved.factor;
+    } else if (Math.abs(factor - supplied) > 1e-9) {
+      // An existing conversion is never overwritten from a receipt: changing it
+      // would silently revalue every later receipt in this unit.
+      throw invalid(
+        `${item.displayName} is already set to ${factor} ${item.stockUom} per ${normalizeUomLabel(poUnit) || 'PO unit'}; ` +
+          'ask your inventory controller to change the unit conversion',
+        { code_detail: 'UOM_FACTOR_MISMATCH', poLineId: poLine.id, currentFactor: factor, suppliedFactor: supplied }
+      );
     }
   }
   if (factor == null && accepting) {
@@ -903,12 +915,18 @@ async function postCore(t, actor, { ctx, hotelId, header, lines, grnId = null, c
 
   const requireInventoryUpdate = inventoryUpdateGate(t, actor, hotelId, viaToken);
   const warnings = [];
-  const resolved = [];
-  for (const line of active) {
-    resolved.push(await resolvePostLine(t, {
+  // Items are resolved (and lazily created / mapped) in product-variant order,
+  // so two receipts creating the same items take those row locks in the same
+  // order. The lines keep their input order.
+  const resolveOrder = active
+    .map((line, index) => ({ line, index, variantId: poLines.get(line.poLineId).productVariantId ?? 0 }))
+    .sort((a, b) => a.variantId - b.variantId || a.index - b.index);
+  const resolved = new Array(active.length);
+  for (const { line, index } of resolveOrder) {
+    resolved[index] = await resolvePostLine(t, {
       ctx, hotelId, poLine: poLines.get(line.poLineId), line, receivedAt, userId,
       requireInventoryUpdate, warnings, settings,
-    }));
+    });
   }
 
   // Over-receipt, per PO line across the whole GRN, on the locked plan.
@@ -1013,8 +1031,34 @@ async function postCore(t, actor, { ctx, hotelId, header, lines, grnId = null, c
   );
 
   await afterReceiptChange(t, poId, { dispatchId: dispatch?.id ?? null, userId });
+  await recordLegacyGrnTimeline(t, ctx.po, { userId, remarks: header.remarks });
   const grn = await getGrnPayload(t, id, { hidePrices: !!viaToken });
   return { grn: { ...grn, warnings }, replayed: false, created: !grnId };
+}
+
+/**
+ * PO timeline "GRN Marked" for a PO on the legacy approval flow
+ * (approval_instance_id IS NULL): the first posted receipt writes the same
+ * 'grn' tbl_approval_hierarchy_history row the old markGRN wrote, so
+ * getPODetailsById keeps showing it. Later receipts add nothing (one row per
+ * PO approval transaction). approved_by -1 = a GRN-token site rep, as before.
+ */
+async function recordLegacyGrnTimeline(t, po, { userId, remarks }) {
+  if (po.approval_instance_id != null) return;
+  const txn = await t.oneOrNone(
+    `SELECT id FROM tbl_approval_hierarchy_transactions
+      WHERE hierarchy_type = 'po' AND target_entity_id = $1
+      ORDER BY id DESC LIMIT 1`,
+    [po.id]
+  );
+  if (!txn) return;
+  await t.none(
+    `INSERT INTO tbl_approval_hierarchy_history (approval_transaction_id, approved_by, action, remarks)
+     SELECT $1, $2, 'grn', $3
+      WHERE NOT EXISTS (SELECT 1 FROM tbl_approval_hierarchy_history
+                         WHERE approval_transaction_id = $1 AND action = 'grn')`,
+    [txn.id, userId ?? -1, remarks ?? null]
+  );
 }
 
 /** Roll-ups and side effects of any posted receipt or reversal (same tx). */
@@ -1137,14 +1181,19 @@ export async function saveGrnDraft(t, user, input = {}, { grnId = null, viaToken
   let id = grnId == null ? null : positiveInt(grnId);
 
   if (grnId != null) {
-    const grn = await loadGrnRow(t, grnId, { forUpdate: true });
-    await assertGrnAccess(t, user, grn, 'update', { viaToken });
+    // Same lock order as posting (PO row, then the GRN row): PUT {post:true}
+    // and POST /:id/post on one draft must not lock in opposite orders.
+    const first = await loadGrnRow(t, grnId);
+    await assertGrnAccess(t, user, first, 'update', { viaToken });
+    ctx = await getPoContext(t, first.po_id, { forUpdate: true });
+    const grn = await loadGrnRow(t, first.id, { forUpdate: true });
+    if (Number(grn.hotel_id) !== Number(first.hotel_id)) await assertGrnAccess(t, user, grn, 'update', { viaToken });
     if (grn.status !== 'draft' || grn.doc_type !== 'RECEIPT') {
       throw new InventoryError('CONFLICT', 'Only a draft GRN can be edited', { grnId: grn.id, status: grn.status });
     }
-    ctx = await getPoContext(t, grn.po_id);
     hotelId = viaToken ? Number(grn.hotel_id) : header.hotelId ?? Number(grn.hotel_id);
-    if (hotelId !== Number(grn.hotel_id)) await assertReceiveAccess(t, user, ctx, hotelId, { action: 'update' });
+    // Moving a draft to another hotel starts a receipt there: grn.create at the target.
+    if (hotelId !== Number(grn.hotel_id)) await assertReceiveAccess(t, user, ctx, hotelId, { action: 'create' });
     if (header.clientEventId && grn.client_event_id && header.clientEventId !== grn.client_event_id) {
       header.clientEventId = null; // a draft keeps the key it was created with
     }
@@ -1219,7 +1268,8 @@ export async function discardGrn(t, user, grnId) {
  * GRN whose lines name the receipt line they reverse (reverses_grn_line_id)
  * and whose allocations are negative, latest phase first; posts GRN_REVERSAL
  * at the receipt's unit cost (a line marked out on arrival first takes its
- * mark-out back with RETURN_IN). Refused (NEGATIVE_STOCK, details name the
+ * mark-out back with RETURN_IN at the mark-out cost, same batch and expiry,
+ * reason GRN_REVERSAL). Refused (NEGATIVE_STOCK, details name the
  * item and the shortfall) when the stock has already been marked out, and
  * (CONFLICT) below what returns to vendor already cover.
  *
@@ -1414,11 +1464,31 @@ export async function reverseGrn(t, user, { grnId, reason, lines } = {}) {
         sourceLineId: revLineId,
         postedBy: userId,
       };
+      const batch = { batchNo: l.batch_no, expiryDate: l.expiry_date };
       if (l.mark_out_department_id != null) {
-        // Marked out on arrival: the department hands it back first.
-        movements.push({ ...base, type: 'RETURN_IN', qty: qStr(stockQ), departmentId: Number(l.mark_out_department_id) });
+        // Marked out on arrival: the department hands it back first, at the
+        // cost it was marked out at (the average then, not the receipt cost),
+        // so RETURN_IN + GRN_REVERSAL undo GRN_IN + MARK_OUT exactly.
+        const markOut = await t.oneOrNone(
+          `SELECT unit_cost::text AS unit_cost
+             FROM tbl_inv_movement
+            WHERE hospitality_company_id = $1 AND source_type = 'GRN' AND source_line_id = $2
+              AND movement_type = 'MARK_OUT'
+            ORDER BY id
+            LIMIT 1`,
+          [companyId, lineId]
+        );
+        movements.push({
+          ...base,
+          ...batch,
+          type: 'RETURN_IN',
+          qty: qStr(stockQ),
+          unitCost: numOrNull(markOut?.unit_cost) ?? base.unitCost,
+          departmentId: Number(l.mark_out_department_id),
+          reasonCode: 'GRN_REVERSAL',
+        });
       }
-      movements.push({ ...base, type: 'GRN_REVERSAL', qty: qStr(-stockQ), batchNo: l.batch_no, expiryDate: l.expiry_date });
+      movements.push({ ...base, ...batch, type: 'GRN_REVERSAL', qty: qStr(-stockQ) });
     }
   }
 
@@ -1736,7 +1806,9 @@ export async function listGrns(t, user, { hotelId, poId, from, to, status, page 
  * Everything the Receive screen needs for one PO at one hotel
  * (api-contract ReceiveContext). The hotel is the one asked for, else the only
  * one the user can receive at; with several and none asked for, `hotel` is
- * null and `lines` empty (the screen asks the user to pick).
+ * null and `lines` empty (the screen asks the user to pick). Each line carries
+ * `costPerPoUnit` (stock cost per PO unit, GST in when the hotel says so;
+ * omitted when prices are hidden).
  *
  * @param {object} t transaction (a default plan may be created)
  * @param {object} user req.user (ignored with viaToken)
@@ -1864,7 +1936,7 @@ export async function getReceiveContext(t, user, { poId, hotelId = null } = {}, 
     };
     if (!hidePrices && l.productVariantId) {
       const cost = await resolvePoLineUnitCost(t, { poLineId: l.id, hotelId: hotel, companyId: ctx.companyId });
-      line.unitCost = cost.costPerPoUnit;
+      line.costPerPoUnit = cost.costPerPoUnit;
     }
     out.lines.push(line);
     if (!item && l.productVariantId) {
@@ -1932,6 +2004,23 @@ const useReceive = (message, details = {}) =>
   new InventoryError('USE_RECEIVE', message, details, 409);
 
 /**
+ * Early gate for the legacy full receipt, before the receiving hotel is known:
+ * a token must be a GRN token of this PO; a buyer must hold grn.create at one
+ * of the PO's hotels (else NOT_FOUND outside the company, FORBIDDEN inside).
+ * The hotel-level check still runs once the hotel is picked.
+ */
+async function assertLegacyCaller(t, actor, ctx, viaToken) {
+  if (viaToken) {
+    await assertToken(t, viaToken, ctx.po.id, null);
+    return;
+  }
+  const allowed = new Set(await hotelIdsWithPermission(t, actor, 'grn', 'create'));
+  if (ctx.hotelIds.some((h) => allowed.has(h))) return;
+  await assertReceiveAccess(t, actor, ctx, ctx.hotelIds[0], { action: 'create' });
+  throw new InventoryError('FORBIDDEN', 'You do not have permission to receive this purchase order');
+}
+
+/**
  * The legacy one-click "mark GRN": a posted GRN accepting every open qty at
  * the PO's single receiving hotel. Refuses with 409 USE_RECEIVE when that is
  * not a safe guess: open quantity at more than one hotel (an unsplit
@@ -1949,6 +2038,9 @@ export async function postLegacyFullReceipt(t, user, { poId, remarks = null } = 
   if (!ctx.companyId) throw notFound('Purchase order not found');
   const viaToken = user?.is_token_user ? { tokenId: user.tokenLoginId } : null;
   const actor = viaToken ? SITE_REP_ACTOR : user;
+  // Who may receive at all comes before what state the PO is in: a caller
+  // without access hears 404/403, never the PO's receipt state.
+  await assertLegacyCaller(t, actor, ctx, viaToken);
   assertReceivable(ctx);
 
   const hasPlan = await t.oneOrNone(`SELECT 1 FROM tbl_po_delivery WHERE po_id = $1 LIMIT 1`, [ctx.po.id]);
