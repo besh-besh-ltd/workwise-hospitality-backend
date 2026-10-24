@@ -42,10 +42,20 @@ export class InventoryError extends Error {
 }
 
 /**
- * Answer a request that failed. InventoryError → its HTTP status with
- * {status, message, code, details} (status 2 for NOT_FOUND, else 0); anything
- * else is logged and answered with the house 500 {status:3, message:'Something
- * went wrong'} (internals never reach the client).
+ * Answer a request that failed, the way the house sendError does:
+ * - InventoryError → its HTTP status, {status, message, code, details}
+ *   (status 2 for NOT_FOUND, else 0);
+ * - PoAccessError (assertPoAccess) → 404 {status:2, message:'Not found'};
+ * - PoWritePermissionError (assertPoInitiateAccess) → 403 {status:0, message, code};
+ * - AuthorizationError (authorizationService) → its .status, {status:0, message, code};
+ * - anything else is logged and answered 500 {status:3, message:'Something
+ *   went wrong'} (internals never reach the client).
+ *
+ * The PO and authorization errors are recognised by name, not instanceof:
+ * importing purchaseOrderModel here would hang the whole PO model graph
+ * (cron, mail, approvals) off every inventory service, and would close an
+ * import cycle once the legacy markGRN shim in purchaseOrderModel calls the
+ * inventory services. Each name is declared exactly once in app/.
  */
 export function sendInventoryError(res, err) {
   if (err instanceof InventoryError) {
@@ -55,6 +65,16 @@ export function sendInventoryError(res, err) {
       code: err.code,
       details: err.details,
     });
+  }
+  switch (err instanceof Error ? err.name : null) {
+    case 'PoAccessError':
+      return res.status(404).json({ status: 2, message: 'Not found' });
+    case 'PoWritePermissionError':
+      return res.status(403).json({ status: 0, message: err.message, code: err.code });
+    case 'AuthorizationError':
+      return res.status(err.status || 403).json({ status: 0, message: err.message, code: err.code });
+    default:
+      break;
   }
   logError('inventory request failed', err);
   return res.status(500).json({ status: 3, message: 'Something went wrong' });

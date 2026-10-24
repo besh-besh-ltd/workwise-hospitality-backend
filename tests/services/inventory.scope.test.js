@@ -20,6 +20,8 @@ import {
 import { nextDocNumber } from "../../app/services/inventory/docNumber.js";
 import { getEffectiveSettings } from "../../app/services/inventory/settings.js";
 import { InventoryError, sendInventoryError } from "../../app/services/inventory/errors.js";
+import { PoAccessError, PoWritePermissionError } from "../../app/models/purchaseOrderModel.js";
+import { AuthorizationError } from "../../app/services/authorizationService.js";
 
 // Mapped to company A (hotel A1) and holding only Tech Approver there: no grn
 // or inventory permission anywhere until a test grants one.
@@ -287,6 +289,33 @@ describe("error envelope", () => {
     sendInventoryError(forbidden, new InventoryError("FORBIDDEN", "No permission", { hotelId: 1 }));
     expect(forbidden.statusCode).toBe(403);
     expect(forbidden.body).toMatchObject({ status: 0, code: "FORBIDDEN", details: { hotelId: 1 } });
+  });
+
+  // The B-wave controllers reuse assertPoAccess / assertPoInitiateAccess and
+  // the house scope checks, so their refusals answer the way PO routes do.
+  it("a PO outside the caller's scope is a plain 404", () => {
+    const res = fakeRes();
+    sendInventoryError(res, new PoAccessError());
+    expect(res.statusCode).toBe(404);
+    expect(res.body).toEqual({ status: 2, message: "Not found" });
+  });
+
+  it("a PO the caller can see but not initiate is a 403 with its code", () => {
+    const res = fakeRes();
+    sendInventoryError(res, new PoWritePermissionError());
+    expect(res.statusCode).toBe(403);
+    expect(res.body).toEqual({
+      status: 0,
+      message: "You do not have permission to initiate this purchase order.",
+      code: "PO_WRITE_PERMISSION_REQUIRED",
+    });
+  });
+
+  it("an authorization refusal keeps its own status and code", () => {
+    const res = fakeRes();
+    sendInventoryError(res, new AuthorizationError("Not in your scope", { process_id: 7 }));
+    expect(res.statusCode).toBe(403);
+    expect(res.body).toEqual({ status: 0, message: "Not in your scope", code: "PROCESS_NOT_IN_USER_SCOPE" });
   });
 
   it("anything else is a 500 without internals", () => {

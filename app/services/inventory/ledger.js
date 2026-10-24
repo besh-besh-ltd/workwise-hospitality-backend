@@ -14,14 +14,24 @@
 //   4. Apply the movements in input order (a receipt followed by a mark-out
 //      on arrival of the same item is fine), running the negative-stock guard
 //      on every outbound movement. All short movements are reported in one
-//      NEGATIVE_STOCK error, and nothing is written.
+//      NEGATIVE_STOCK error, and nothing is written. GRN_REVERSAL and RTV_OUT
+//      are guarded even when the company allows negative stock (spec: a
+//      reversal that would drive stock negative is blocked); the check runs
+//      here, under the lock, because a caller's pre-check would race.
 //   5. Insert the movement rows (with qty_after / avg_cost_after) and write the
 //      final balance per (hotel, item).
+//
+// Caller rules: call postMovements once per transaction (the lock order is
+// only global within one call); take nextDocNumber BEFORE postMovements (so
+// every poster takes the sequence lock, then the balance locks); and rely on
+// the quantity invariant only (balance.qty = Σ movement.qty), not on value.
 //
 // Valuation: moving weighted average per (hotel, item), numeric(18,4).
 //   - Inbound (GRN_IN, RETURN_IN, ADJUST_IN, COUNT_IN, OPENING > 0) at its
 //     unitCost: value += qty·cost; avg = value / qty. When nothing (or a
-//     deficit) was on hand, avg = cost.
+//     deficit) was on hand, avg = cost. RETURN_IN, COUNT_IN and ADJUST_IN may
+//     omit unitCost: they are then valued at the avg read under the lock
+//     (VALIDATION when there is none yet: avg 0 with nothing on hand).
 //   - Outbound (MARK_OUT, ADJUST_OUT, COUNT_OUT, OPENING < 0) at the current
 //     avg, which does not change. The movement that empties the balance takes
 //     exactly the value left, so no rounding residue stays on a zero balance.
@@ -29,9 +39,10 @@
 //     else at avg. At a given cost the rest is re-averaged:
 //     avg = (value − qty·cost) / qty_new while qty_new > 0 (the value is
 //     floored at 0, so avg never goes negative); avg is unchanged otherwise.
-//   With stock never negative, balance.value = Σ movement.value except where a
-//   reversal at receipt cost empties the balance (that price variance is
-//   written off) or the floor applies.
+//   Only the quantity reconciles exactly. Value is written off (balance.value
+//   ≠ Σ movement.value) when a reversal at receipt cost takes more than the
+//   remaining value (floor at 0) or empties the balance, and when a receipt
+//   lands on a negative balance (avg resets to cost).
 //
 // Arithmetic is exact fixed-point (BigInt, 4 decimals, half away from zero:
 // what Postgres does when it stores numeric(18,4)); no float rounding drift.
@@ -48,6 +59,10 @@ export const OUTBOUND_TYPES = Object.freeze(['GRN_REVERSAL', 'RTV_OUT', 'MARK_OU
 export const MOVEMENT_TYPES = Object.freeze([...INBOUND_TYPES, ...OUTBOUND_TYPES, 'OPENING']);
 /** Outbound types valued at the movement's unitCost when one is given. */
 const AT_GIVEN_COST = new Set(['GRN_REVERSAL', 'RTV_OUT']);
+/** Outbound types that may never drive stock negative, whatever the settings. */
+const ALWAYS_GUARDED = new Set(['GRN_REVERSAL', 'RTV_OUT']);
+/** Inbound types valued at the current average when unitCost is omitted. */
+const COST_DEFAULTS_TO_AVG = new Set(['RETURN_IN', 'COUNT_IN', 'ADJUST_IN']);
 
 // ---------------------------------------------------------------------------
 // numeric(18,4) as BigInt "ten-thousandths"
@@ -132,7 +147,9 @@ function normalise(m, index) {
     unitCost = toScaled(m.unitCost);
     if (unitCost === null || unitCost < 0n) throw fail('unitCost', 'Unit cost must be a number of 0 or more');
   }
-  if (qty > 0n && unitCost === null) throw fail('unitCost', `${type} needs a unit cost`);
+  if (qty > 0n && unitCost === null && !COST_DEFAULTS_TO_AVG.has(type)) {
+    throw fail('unitCost', `${type} needs a unit cost`);
+  }
 
   const optionalId = (field) => {
     if (m[field] == null) return null;
@@ -285,15 +302,19 @@ async function negativeStockError(t, shortfalls) {
  *   productVariantId?:number, type:string, qty:number|string, unitCost?:number|string,
  *   departmentId?:number, batchNo?:string, expiryDate?:string, sourceType:string,
  *   sourceId:number, sourceLineId?:number, reasonCode?:string, postedBy:number|null}>} movements
- *   qty is signed, in stock units. unitCost is per stock unit; required when
- *   qty > 0; used on GRN_REVERSAL / RTV_OUT when given; ignored otherwise.
+ *   qty is signed, in stock units. unitCost is per stock unit: required for
+ *   GRN_IN and OPENING > 0; optional for RETURN_IN / COUNT_IN / ADJUST_IN
+ *   (default: the current avg); used on GRN_REVERSAL / RTV_OUT when given;
+ *   ignored on the other outbound types.
  * @returns {Promise<object[]>} the written rows in input order (zero-qty
  *   movements are not written), numbers as JS numbers. See rowToMovement.
- * @throws {InventoryError} VALIDATION (details {index, field}) or
+ * @throws {InventoryError} VALIDATION (details {index, field}, plus hotelId /
+ *   invItemId when a defaulted unit cost has no average to fall back on) or
  *   NEGATIVE_STOCK (details {hotelId, invItemId, itemName, available,
  *   requested, lines:[{index, hotelId, invItemId, sourceLineId, itemName,
  *   available, requested}]}: the first short movement at the top level, every
- *   short movement in lines). Nothing is written when it throws.
+ *   short movement in lines). GRN_REVERSAL / RTV_OUT are guarded even when the
+ *   company allows negative stock. Nothing is written when it throws.
  */
 export async function postMovements(t, movements) {
   if (!t?.ctx?.inTransaction) {
@@ -343,7 +364,8 @@ export async function postMovements(t, movements) {
   }
 
   const allowNegative = new Map();
-  for (const companyId of new Set(lines.filter((l) => l.qty < 0n).map((l) => l.companyId))) {
+  const settingMatters = lines.filter((l) => l.qty < 0n && !ALWAYS_GUARDED.has(l.type));
+  for (const companyId of new Set(settingMatters.map((l) => l.companyId))) {
     allowNegative.set(companyId, (await getEffectiveSettings(t, { companyId })).allowNegativeStock);
   }
 
@@ -382,7 +404,8 @@ export async function postMovements(t, movements) {
   for (const line of lines) {
     const k = keyOf(line.hotelId, line.invItemId);
     const balance = state.get(k);
-    if (line.qty < 0n && balance.qty + line.qty < 0n && !allowNegative.get(line.companyId)) {
+    const guarded = ALWAYS_GUARDED.has(line.type) || !allowNegative.get(line.companyId);
+    if (line.qty < 0n && balance.qty + line.qty < 0n && guarded) {
       // Not applied: later movements see the stock this one could not take.
       shortfalls.push({
         index: line.index,
@@ -394,7 +417,19 @@ export async function postMovements(t, movements) {
       });
       continue;
     }
-    const { unitCost, value, next } = apply(balance, line);
+    let costed = line;
+    if (line.qty > 0n && line.unitCost === null) {
+      // RETURN_IN / COUNT_IN / ADJUST_IN without a cost: the average under the lock.
+      if (balance.avg === 0n && balance.qty <= 0n) {
+        throw new InventoryError(
+          'VALIDATION',
+          'This item has no average cost at this hotel yet: enter a unit cost',
+          { index: line.index, field: 'unitCost', hotelId: line.hotelId, invItemId: line.invItemId }
+        );
+      }
+      costed = { ...line, unitCost: balance.avg };
+    }
+    const { unitCost, value, next } = apply(balance, costed);
     state.set(k, next);
     posted.push({ ...line, unitCost, value, qtyAfter: next.qty, avgCostAfter: next.avg });
   }

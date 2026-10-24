@@ -147,6 +147,94 @@ describe("valuation", () => {
     });
   });
 
+  it("a reversal dearer than the remaining value writes the difference off", async () => {
+    await withTx(async (t) => {
+      // 10 @100 + 5 @400 = 3000 over 15 (avg 200). Mark out 9 at 200 leaves
+      // 6 units worth 1200. Reversing the dearer lot at its receipt cost takes
+      // 2000 out of 1200: the balance value floors at 0 (avg 0) and the 800
+      // gap is written off. Quantity still reconciles; value does not.
+      const item = await makeItem(t);
+      await postMovements(t, [mv(item, "GRN_IN", 10, { unitCost: 100 }), mv(item, "GRN_IN", 5, { unitCost: 400 })]);
+      await postMovements(t, [mv(item, "MARK_OUT", -9, { departmentId: DEPT })]);
+
+      const [rev] = await postMovements(t, [mv(item, "GRN_REVERSAL", -5, { unitCost: 400 })]);
+      expect(rev).toMatchObject({ qty: -5, unitCost: 400, value: -2000, qtyAfter: 1, avgCostAfter: 0 });
+      expect(await balanceOf(t, item)).toEqual({ qty: 1, avgCost: 0, value: 0 });
+
+      // A reversal that empties the balance keeps the average and zeroes the value.
+      const other = await makeItem(t, "Ledger write-off to zero");
+      await postMovements(t, [mv(other, "GRN_IN", 10, { unitCost: 100 }), mv(other, "GRN_IN", 10, { unitCost: 200 })]);
+      await postMovements(t, [mv(other, "MARK_OUT", -10, { departmentId: DEPT })]); // 1500 left
+      const [empty] = await postMovements(t, [mv(other, "GRN_REVERSAL", -10, { unitCost: 200 })]);
+      expect(empty).toMatchObject({ value: -2000, qtyAfter: 0, avgCostAfter: 150 });
+      expect(await balanceOf(t, other)).toEqual({ qty: 0, avgCost: 150, value: 0 });
+
+      const sums = await t.any(
+        `SELECT m.inv_item_id, sum(m.qty)::text AS qty, sum(m.value)::text AS value,
+                b.qty::text AS b_qty, b.value::text AS b_value
+           FROM tbl_inv_movement m
+           JOIN tbl_inv_balance b ON b.hotel_id = m.hotel_id AND b.inv_item_id = m.inv_item_id
+          WHERE m.hotel_id = $1 AND m.inv_item_id = ANY($2::int[])
+          GROUP BY m.inv_item_id, b.qty, b.value
+          ORDER BY m.inv_item_id`,
+        [HOTEL, [item, other]]
+      );
+      expect(sums.map((s) => [s.qty === s.b_qty, Number(s.value), Number(s.b_value)])).toEqual([
+        [true, -800, 0],
+        [true, -500, 0],
+      ]);
+    });
+  });
+
+  it("returns, count gains and found stock default to the average cost", async () => {
+    await withTx(async (t) => {
+      const item = await makeItem(t);
+      await receiveTwoLots(t, item); // 20 @150
+      await postMovements(t, [mv(item, "MARK_OUT", -5, { departmentId: DEPT })]);
+
+      const rows = await postMovements(t, [
+        mv(item, "RETURN_IN", 2, { departmentId: DEPT }),
+        mv(item, "COUNT_IN", 1),
+        mv(item, "ADJUST_IN", 1, { reasonCode: "FOUND" }),
+      ]);
+      expect(rows.map((r) => [r.type, r.unitCost, r.value, r.qtyAfter])).toEqual([
+        ["RETURN_IN", 150, 300, 17],
+        ["COUNT_IN", 150, 150, 18],
+        ["ADJUST_IN", 150, 150, 19],
+      ]);
+      expect(await balanceOf(t, item)).toEqual({ qty: 19, avgCost: 150, value: 2850 });
+
+      // Everything issued: the average is still known, so a return values at it.
+      await postMovements(t, [mv(item, "MARK_OUT", -19, { departmentId: DEPT })]);
+      const [back] = await postMovements(t, [mv(item, "RETURN_IN", 1, { departmentId: DEPT })]);
+      expect(back).toMatchObject({ unitCost: 150, value: 150, qtyAfter: 1, avgCostAfter: 150 });
+
+      // An explicit unit cost still wins.
+      const [priced] = await postMovements(t, [mv(item, "RETURN_IN", 1, { unitCost: 50, departmentId: DEPT })]);
+      expect(priced).toMatchObject({ unitCost: 50, value: 50, qtyAfter: 2, avgCostAfter: 100 });
+    });
+  });
+
+  it("without an average cost yet, a unit cost is required", async () => {
+    await withTx(async (t) => {
+      const item = await makeItem(t);
+      for (const type of ["RETURN_IN", "COUNT_IN", "ADJUST_IN"]) {
+        const err = await thrownBy(t, (sp) => postMovements(sp, [mv(item, type, 1)]));
+        expect(err).toBeInstanceOf(InventoryError);
+        expect(err.code).toBe("VALIDATION");
+        expect(err.details).toMatchObject({ index: 0, field: "unitCost", hotelId: HOTEL, invItemId: item });
+        expect(err.message).toMatch(/unit cost/i);
+      }
+      // A receipt or an opening balance never falls back to the average.
+      await postMovements(t, [mv(item, "GRN_IN", 4, { unitCost: 25 })]);
+      for (const type of ["GRN_IN", "OPENING"]) {
+        const err = await thrownBy(t, (sp) => postMovements(sp, [mv(item, type, 1)]));
+        expect(err.details).toMatchObject({ index: 0, field: "unitCost" });
+      }
+      expect(await movementsOf(t, item)).toHaveLength(1);
+    });
+  });
+
   it("receipt then mark out on arrival in one call nets to zero", async () => {
     await withTx(async (t) => {
       const item = await makeItem(t);
@@ -232,6 +320,34 @@ describe("guards", () => {
 
       expect(out).toMatchObject({ qty: -16, unitCost: 150, value: -2400, qtyAfter: -1 });
       expect(await balanceOf(t, item)).toMatchObject({ qty: -1, avgCost: 150 });
+    });
+  });
+
+  it("reversals and returns to vendor never go negative, even when negative stock is allowed", async () => {
+    await withTx(async (t) => {
+      await t.none(
+        `INSERT INTO tbl_inv_company_settings (hospitality_company_id, allow_negative_stock)
+         VALUES ($1, true)
+         ON CONFLICT (hospitality_company_id) DO UPDATE SET allow_negative_stock = true`,
+        [CO]
+      );
+      const item = await makeItem(t);
+      await postMovements(t, [mv(item, "GRN_IN", 10, { unitCost: 100 })]);
+      await postMovements(t, [mv(item, "MARK_OUT", -6, { departmentId: DEPT })]);
+
+      const reversal = await thrownBy(t, (sp) =>
+        postMovements(sp, [mv(item, "GRN_REVERSAL", -10, { unitCost: 100, sourceType: "GRN" })])
+      );
+      expect(reversal).toBeInstanceOf(InventoryError);
+      expect(reversal.code).toBe("NEGATIVE_STOCK");
+      expect(reversal.details).toMatchObject({ invItemId: item, available: 4, requested: 10 });
+
+      const rtv = await thrownBy(t, (sp) => postMovements(sp, [mv(item, "RTV_OUT", -5, { sourceType: "RTV" })]));
+      expect(rtv.code).toBe("NEGATIVE_STOCK");
+
+      // The setting still lets an ordinary mark-out through.
+      const [out] = await postMovements(t, [mv(item, "MARK_OUT", -5, { departmentId: DEPT })]);
+      expect(out.qtyAfter).toBe(-1);
     });
   });
 
