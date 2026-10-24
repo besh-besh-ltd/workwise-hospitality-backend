@@ -27,6 +27,13 @@ import { cleanRefTitle } from "../helper/poReference.js";
 import { getRfqPoCoverage, classifyInitiateKind, getPoApprovalInitiators } from "./po/poInitiateGuide.js";
 import { poHeldSql } from "../services/po/poHold.js";
 
+// Today's calendar day in IST. Prod and CI sessions run in UTC, so a bare
+// CURRENT_DATE is yesterday until 05:30 IST.
+const IST_TODAY = `(CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Kolkata')::date`;
+
+// PO statuses after the vendor accepted: only then can a delivery be late.
+const VENDOR_ACCEPTED_PO_STATUSES = new Set(["approved", "dispatched", "GRN", "invoice_raised"]);
+
 // ---------------------------------------------------------------------------
 // Status bucket mapping (UI bucket -> raw po_status enum value[])
 // ---------------------------------------------------------------------------
@@ -2364,6 +2371,19 @@ async function fetchTrackingRows(scope, { search = "", vendorId, dateFrom, dateT
 
   const whereClause = `WHERE ${conditions.join(" AND ")}`;
 
+  // Dates come back as YYYY-MM-DD text: a pg DATE parsed into a JS Date lands
+  // on the Node process's local midnight, a day early once shifted to UTC on
+  // any machine east of Greenwich.
+  //
+  // ETA (spec §7.6) = the next open delivery: a plan row still open or
+  // partial, with a due date, on a PO whose receiving is live (not received /
+  // closed short, not completed). A go-live backlog PO (receipt_legacy with
+  // nothing received) is live too; a legacy-received one is 'received'. The
+  // earliest such date on or after today (IST) wins, so a late phase doesn't
+  // hide the next one due; with only late phases left, the earliest of those.
+  // `overdue_phases` / `overdue_phase_no` count the open phases past their IST
+  // due date (buildTrackingRow turns them into "Phase N overdue"). With no
+  // open dated phase the row falls back to the payment-milestone date.
   const rows = await db.any(
     `SELECT ${poCoreSelect(1)},
         EXISTS (SELECT 1 FROM tbl_purchase_order_document d
@@ -2374,9 +2394,25 @@ async function fetchTrackingRows(scope, { search = "", vendorId, dateFrom, dateT
            WHERE m.po_id = po.id AND m.status <> 'deleted')::int AS milestone_total,
         (SELECT COUNT(*) FROM tbl_payment_milestone m
            WHERE m.po_id = po.id AND m.status = 'achieved')::int AS milestone_done,
-        (SELECT MIN(m.due_date) FROM tbl_payment_milestone m
-           WHERE m.po_id = po.id AND m.status NOT IN ('deleted','achieved')) AS next_due
+        (SELECT MIN(m.due_date)::text FROM tbl_payment_milestone m
+           WHERE m.po_id = po.id AND m.status NOT IN ('deleted','achieved')) AS next_due,
+        dlv.next_delivery_due,
+        dlv.overdue_phases,
+        dlv.overdue_phase_no
      ${poCoreJoins()}
+     LEFT JOIN LATERAL (
+       SELECT COALESCE(MIN(pd.due_date) FILTER (WHERE pd.due_date >= ${IST_TODAY}), MIN(pd.due_date))::text
+                AS next_delivery_due,
+              (COUNT(*) FILTER (WHERE pd.due_date < ${IST_TODAY}))::int AS overdue_phases,
+              (ARRAY_AGG(pd.phase_no ORDER BY pd.due_date, pd.phase_no)
+                 FILTER (WHERE pd.due_date < ${IST_TODAY}))[1] AS overdue_phase_no
+         FROM tbl_po_delivery pd
+        WHERE pd.po_id = po.id
+          AND pd.status IN ('open', 'partial')
+          AND pd.due_date IS NOT NULL
+          AND po.receipt_status NOT IN ('received', 'closed_short')
+          AND po.status <> 'completed'
+     ) dlv ON TRUE
      ${whereClause}
      ORDER BY po.created_at DESC`,
     values
@@ -2463,7 +2499,22 @@ function buildTrackingRow(r) {
   else if (r.next_due && new Date(r.next_due) < new Date()) paymentStatus = "overdue";
 
   const completed = r.status === "completed";
-  const overdue = !!(r.next_due && new Date(r.next_due) < new Date() && !completed);
+  // The ETA column and its overdue colour follow the next open delivery when
+  // there is one, else the payment milestone (see fetchTrackingRows). A
+  // delivery is only late once the vendor has accepted the PO: a PO still
+  // sent / awaiting acceptance shows its ETA but is never overdue. When a
+  // phase is late the date stays the next one due and eta_label (the line
+  // under it) says which phase is late; otherwise eta_label is the date.
+  const etaDay = r.next_delivery_due || r.next_due || null;
+  const lateDeliveries = r.next_delivery_due && VENDOR_ACCEPTED_PO_STATUSES.has(String(r.status))
+    ? Number(r.overdue_phases) || 0
+    : 0;
+  const overdue = r.next_delivery_due
+    ? lateDeliveries > 0
+    : !!(r.next_due && new Date(r.next_due) < new Date() && !completed);
+  let etaLabel = etaDay;
+  if (lateDeliveries === 1) etaLabel = `Phase ${r.overdue_phase_no} overdue`;
+  else if (lateDeliveries > 1) etaLabel = `${lateDeliveries} phases overdue`;
 
   return {
     id: m.id,
@@ -2480,8 +2531,8 @@ function buildTrackingRow(r) {
     grn_status: grnStatus,
     invoice_status: invoiceStatus,
     payment_status: paymentStatus,
-    eta_delivery: r.next_due ? new Date(r.next_due).toISOString() : null,
-    eta_label: r.next_due ? new Date(r.next_due).toISOString().slice(0, 10) : null,
+    eta_delivery: etaDay ? new Date(`${etaDay}T00:00:00Z`).toISOString() : null,
+    eta_label: etaLabel,
     overdue,
     completed,
   };
