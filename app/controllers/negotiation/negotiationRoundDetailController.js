@@ -116,6 +116,7 @@ const pick = (obj, keys) => {
 export const deriveActions = ({
   state, permissions, locked, vendorApprovalSummary, hasResponses,
   viewerUserId = null, createdByUserId = null, isPendingForMe = false,
+  sourceType = 'RFQ',
 }) => {
   const p = permissions || {};
   const s = String(state || '');
@@ -152,6 +153,31 @@ export const deriveActions = ({
   const isCreator =
     viewerUserId != null && createdByUserId != null &&
     Number(viewerUserId) === Number(createdByUserId);
+
+  // ARC rounds: only what the /arc-v2 round API honours. Approve and reject
+  // are decided by the approval engine alone (no module permission — policy
+  // approvers may hold none), so they follow the caller's own pending seat.
+  // That API has no per-line or per-vendor verdicts, no withdraw and no quote
+  // submission step; close and next round are its COMM_WRITE gate, which
+  // `permissions` already reflects for ARC.
+  if (sourceType === 'ARC') {
+    return {
+      can_approve: preApproval && isPendingForMe,
+      can_reject: preApproval && isPendingForMe,
+      can_approve_line: false,
+      can_reject_line: false,
+      can_withdraw: false,
+      can_approve_vendor: false,
+      can_reject_vendor: false,
+      can_resubmit_vendor: false,
+      can_close:
+        !!p.update &&
+        [NEG_STATE.OPEN_WITH_VENDORS, NEG_STATE.READY_FOR_DECISION, NEG_STATE.NO_VENDOR_RESPONSE].includes(s),
+      can_create_next_round: !!p.create && canCreateNext,
+      can_view_quotes: !!p.read && !locked,
+      can_submit_quotes_for_approval: false,
+    };
+  }
 
   return {
     // Gated on the VIEWER'S OWN pending record in the approval instance, not
@@ -284,6 +310,7 @@ const negotiationRoundDetailController = {
           vendorApprovalSummary: payload.approval?.vendor_approvals ?? null,
           hasResponses: payload.totals?.lines_responded > 0,
           isPendingForMe: payload.approval?.is_pending_for_me === true,
+          sourceType: detail.parent.source_type,
           viewerUserId: req.user?.id ?? null,
           // `created_by` is an object {user_id, name, …}; the flat column is
           // the fallback shape.

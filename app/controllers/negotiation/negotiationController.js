@@ -2101,6 +2101,16 @@ const NegotiationController = {
         });
       }
 
+      // The cancel below closes a NEGOTIATION approval instance; an ARC round's
+      // is ARC_NEGOTIATION, which would be left PENDING on a cancelled round.
+      // The rate contract flow has no withdraw — an approver rejects instead.
+      if (round.source_type === 'ARC') {
+        return res.status(400).json({
+          status: 2,
+          message: 'Rounds on a rate contract cannot be withdrawn. An approver can reject it, or it lapses at its deadline.'
+        });
+      }
+
       if (round.status !== 'PENDING_APPROVAL') {
         return res.status(400).json({
           status: 2,

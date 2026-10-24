@@ -79,6 +79,53 @@ export const negotiationReadScopeSql = (alias, userParam) =>
           AND (_urs.process_id IS NULL OR _urs.process_id = ${alias}.process_id)
      ))`;
 
+// The caller holds a live seat on the approval of any negotiation round of the
+// ARC whose id is `arcIdExpr`. A REMOVED seat does not count.
+export const arcNegotiationSeatSql = (arcIdExpr, userParam) =>
+  `EXISTS (
+       SELECT 1
+         FROM tbl_negotiation_rounds _snr
+         JOIN tbl_approval_instances _sai
+           ON _sai.entity_type = 'ARC_NEGOTIATION' AND _sai.entity_id = _snr.id
+         JOIN tbl_approval_instance_steps _sas ON _sas.approval_instance_id = _sai.id
+         JOIN tbl_approval_step_approvers _ssa ON _ssa.approval_instance_step_id = _sas.id
+        WHERE _snr.source_type = 'ARC'
+          AND _snr.source_id = ${arcIdExpr}
+          AND _ssa.approver_user_id = ${userParam}::int
+          AND _ssa.removed_at IS NULL
+     )`;
+
+// Read scope for ARC rounds on the shared negotiation screens (`alias` is a
+// tbl_arc row). The people who work an ARC negotiation are ARC users, and most
+// hold no negotiation role: the commercial evaluators who open the rounds have
+// arc-comm.*, and the approvers come from the ARC_NEGOTIATION policy, which may
+// name someone with no module role at all (see arcPermission.js). So on top of
+// negotiation.read this admits arc-comm read/evaluate/approve and arc.admin in
+// the ARC's own four-axis scope — exactly what the /arc-v2 evaluation endpoints
+// already let them read — and anyone seated on one of the ARC's round approvals.
+// The listings keep negotiationReadScopeSql.
+export const arcNegotiationReadScopeSql = (alias, userParam) =>
+  `(${userParam}::int IS NULL OR EXISTS (
+       SELECT 1
+         FROM tbl_user_role_scopes _urs
+         JOIN tbl_role_permissions _rp ON _rp.role_id = _urs.role_id
+         JOIN tbl_permissions _p       ON _p.id = _rp.permission_id
+        WHERE _urs.user_id = ${userParam}::int
+          AND (
+            (_p.resource = 'negotiation'::resource_type AND _p.action = 'read')
+            OR (_p.resource = 'arc-comm'::resource_type AND _p.action IN ('read', 'evaluate', 'approve'))
+            OR (_p.resource = 'arc'::resource_type AND _p.action = 'admin')
+          )
+          AND _urs.company_id = ${alias}.hospitality_company_id
+          AND (_urs.hotel_id IS NULL OR _urs.hotel_id = ${alias}.hotel_id)
+          AND (
+            ${alias}.department_id IS NULL
+            OR _urs.department_id IS NULL
+            OR _urs.department_id = ${alias}.department_id
+          )
+          AND (_urs.process_id IS NULL OR _urs.process_id = ${alias}.process_id)
+     ) OR ${arcNegotiationSeatSql(`${alias}.id`, userParam)})`;
+
 // ============= MULTI-PRODUCT ROUND HELPERS =============
 // A round either targets a single product (legacy: rfq_product_id NOT NULL,
 // per-vendor fields in vendor_approvals[].negotiation_fields) or multiple
@@ -1189,7 +1236,7 @@ const negotiationModel = {
         WHERE nr.id = $2::int
           AND (
             (rfq.id IS NOT NULL AND ${negotiationReadScopeSql('rfq', '$1')})
-            OR (a.id IS NOT NULL AND ${negotiationReadScopeSql('a', '$1')})
+            OR (a.id IS NOT NULL AND ${arcNegotiationReadScopeSql('a', '$1')})
           )`,
       [Number(userId), Number(roundId)]
     );
@@ -1249,7 +1296,7 @@ const negotiationModel = {
         WHERE nr.id = ANY($2::int[])
           AND (
             (rfq.id IS NOT NULL AND ${negotiationReadScopeSql('rfq', '$1')})
-            OR (a.id IS NOT NULL AND ${negotiationReadScopeSql('a', '$1')})
+            OR (a.id IS NOT NULL AND ${arcNegotiationReadScopeSql('a', '$1')})
           )
         ORDER BY nr.round_number ASC, nr.id ASC`,
       [userId == null ? null : Number(userId), ids]
@@ -1351,7 +1398,7 @@ const negotiationModel = {
           )
           AND (
             (rfq.id IS NOT NULL AND ${negotiationReadScopeSql('rfq', '$5')})
-            OR (a.id IS NOT NULL AND ${negotiationReadScopeSql('a', '$5')})
+            OR (a.id IS NOT NULL AND ${arcNegotiationReadScopeSql('a', '$5')})
           )
         ORDER BY nr.round_number ASC, nr.id ASC`,
       [sourceType, Number(sourceId), products, items, userId == null ? null : Number(userId)]
@@ -1391,7 +1438,7 @@ const negotiationModel = {
           AND nr.source_id = $2::int
           AND (
             (rfq.id IS NOT NULL AND ${negotiationReadScopeSql('rfq', '$3')})
-            OR (a.id IS NOT NULL AND ${negotiationReadScopeSql('a', '$3')})
+            OR (a.id IS NOT NULL AND ${arcNegotiationReadScopeSql('a', '$3')})
           )`,
       [sourceType, Number(sourceId), userId == null ? null : Number(userId)]
     );
@@ -1454,7 +1501,7 @@ const negotiationModel = {
           AND nr.source_id = $2::int
           AND (
             (rfq.id IS NOT NULL AND ${negotiationReadScopeSql('rfq', '$3')})
-            OR (a.id IS NOT NULL AND ${negotiationReadScopeSql('a', '$3')})
+            OR (a.id IS NOT NULL AND ${arcNegotiationReadScopeSql('a', '$3')})
           )`,
       [sourceType, Number(sourceId), userId == null ? null : Number(userId)]
     );
@@ -1733,34 +1780,32 @@ const negotiationModel = {
   /**
    * The caller's negotiation.* permissions IN THE SCOPE OF one round's parent.
    * Same 4-axis matrix as the read gate, just not pinned to action='read'.
+   * ARC rounds answer from the ARC grants instead (see the ARC variant below).
    * `userId` null = super admin → everything.
    */
   getNegotiationPermissionsForRound: async (userId, roundId) => {
     const all = { read: true, create: true, update: true, approve: true, delete: true };
     if (userId == null) return all;
+    const source = await db.oneOrNone(
+      `SELECT source_type FROM tbl_negotiation_rounds WHERE id = $1::int`,
+      [Number(roundId)]
+    );
+    if (source?.source_type === 'ARC') {
+      return negotiationModel.getArcNegotiationPermissionsForRound(userId, roundId);
+    }
     const rows = await db.any(
       `SELECT DISTINCT _p.action::text AS action
          FROM tbl_negotiation_rounds nr
-         LEFT JOIN tbl_rfq rfq ON rfq.id = nr.rfq_id
-         LEFT JOIN tbl_arc a   ON a.id = nr.source_id AND nr.source_type = 'ARC'
+         JOIN tbl_rfq rfq ON rfq.id = nr.rfq_id
          JOIN tbl_user_role_scopes _urs ON _urs.user_id = $1::int
          JOIN tbl_role_permissions _rp  ON _rp.role_id = _urs.role_id
          JOIN tbl_permissions _p        ON _p.id = _rp.permission_id
         WHERE nr.id = $2::int
           AND _p.resource = 'negotiation'::resource_type
-          AND (
-            (rfq.id IS NOT NULL
-             AND _urs.company_id = rfq.hospitality_company_id
-             AND (_urs.hotel_id IS NULL OR _urs.hotel_id = rfq.hotel_id)
-             AND (rfq.department_id IS NULL OR _urs.department_id IS NULL OR _urs.department_id = rfq.department_id)
-             AND (_urs.process_id IS NULL OR _urs.process_id = rfq.process_id))
-            OR
-            (a.id IS NOT NULL
-             AND _urs.company_id = a.hospitality_company_id
-             AND (_urs.hotel_id IS NULL OR _urs.hotel_id = a.hotel_id)
-             AND (a.department_id IS NULL OR _urs.department_id IS NULL OR _urs.department_id = a.department_id)
-             AND (_urs.process_id IS NULL OR _urs.process_id = a.process_id))
-          )`,
+          AND _urs.company_id = rfq.hospitality_company_id
+          AND (_urs.hotel_id IS NULL OR _urs.hotel_id = rfq.hotel_id)
+          AND (rfq.department_id IS NULL OR _urs.department_id IS NULL OR _urs.department_id = rfq.department_id)
+          AND (_urs.process_id IS NULL OR _urs.process_id = rfq.process_id)`,
       [Number(userId), Number(roundId)]
     );
     const granted = new Set(rows.map((r) => r.action));
@@ -1770,6 +1815,56 @@ const negotiationModel = {
       update: granted.has('update'),
       approve: granted.has('approve'),
       delete: granted.has('delete'),
+    };
+  },
+
+  /**
+   * The same five flags for an ARC round, read off the ARC grants in the ARC's
+   * own 4-axis scope — the people who work these rounds are ARC users and
+   * mostly hold no negotiation role (see arcNegotiationReadScopeSql).
+   *
+   *   read            negotiation.read, arc-comm read|evaluate|approve,
+   *                   arc.admin, or a live seat on one of the ARC's round
+   *                   approvals
+   *   create, update  arc-comm.evaluate | arc.admin — the ARC round API's own
+   *                   write gate (COMM_WRITE in routes/arc_v2/evaluationRoutes.js)
+   *   approve         arc-comm.approve | negotiation.approve. Informational:
+   *                   the ARC approve API is decided by the approval engine
+   *                   alone, so the page gates approval on the caller's pending
+   *                   seat, not on this flag.
+   *   delete          never — nothing deletes an ARC round.
+   */
+  getArcNegotiationPermissionsForRound: async (userId, roundId) => {
+    const row = await db.oneOrNone(
+      `SELECT ARRAY(
+                SELECT DISTINCT _p.resource::text || '.' || _p.action::text
+                  FROM tbl_user_role_scopes _urs
+                  JOIN tbl_role_permissions _rp ON _rp.role_id = _urs.role_id
+                  JOIN tbl_permissions _p       ON _p.id = _rp.permission_id
+                 WHERE _urs.user_id = $1::int
+                   AND _p.resource IN ('negotiation'::resource_type, 'arc-comm'::resource_type, 'arc'::resource_type)
+                   AND _urs.company_id = a.hospitality_company_id
+                   AND (_urs.hotel_id IS NULL OR _urs.hotel_id = a.hotel_id)
+                   AND (a.department_id IS NULL OR _urs.department_id IS NULL OR _urs.department_id = a.department_id)
+                   AND (_urs.process_id IS NULL OR _urs.process_id = a.process_id)
+              ) AS grants,
+              ${arcNegotiationSeatSql('a.id', '$1')} AS seated
+         FROM tbl_negotiation_rounds nr
+         JOIN tbl_arc a ON a.id = nr.source_id
+        WHERE nr.id = $2::int
+          AND nr.source_type = 'ARC'`,
+      [Number(userId), Number(roundId)]
+    );
+    const g = new Set(row?.grants || []);
+    const evaluate = g.has('arc-comm.evaluate') || g.has('arc.admin');
+    return {
+      read:
+        g.has('negotiation.read') || g.has('arc-comm.read') || g.has('arc-comm.evaluate') ||
+        g.has('arc-comm.approve') || g.has('arc.admin') || row?.seated === true,
+      create: evaluate,
+      update: evaluate,
+      approve: g.has('arc-comm.approve') || g.has('negotiation.approve'),
+      delete: false,
     };
   },
 

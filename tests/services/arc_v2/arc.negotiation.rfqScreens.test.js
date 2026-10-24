@@ -10,6 +10,10 @@
 // /negotiation/rounds/:id/detail and the approval page). This suite pins what
 // those screens read for an ARC round:
 //   - the command center reads ARC targets (item and ARC-level);
+//   - ARC users reach it without a negotiation role (arc-comm.* in the ARC's
+//     scope, or a seat on one of the ARC's round approvals), outsiders do not;
+//   - the actions it offers are ones the ARC API honours (no per-line verdicts,
+//     no withdraw), and POST /negotiation/rounds/:id/withdraw refuses ARC rounds;
 //
 // The round needs a real PENDING approval step, so the ARC_NEGOTIATION policy
 // names an approver who is not the creator (same shape as
@@ -32,12 +36,18 @@ const VENDOR_A = IDS.users.vendor_alpha;
 const VENDOR_B = IDS.users.vendor_beta;
 const CATEGORY = TEST_CATEGORIES.beverages;
 
+// Fresh users with no roles at all. OUTSIDER is mapped to the ARC's hotel but
+// holds nothing; SEATED_ONLY is written onto the round's approval step after
+// creation — a policy approver whose role was revoked mid-flight.
+const OUTSIDER    = 649901;
+const SEATED_ONLY = 649902;
+
 const POLICY_ID = 64991;
 const E = "/api/v1/arc-v2/evaluation";
 const H = (hours) => new Date(Date.now() + hours * 3600_000).toISOString();
 
 describe("ARC negotiation on the RFQ screens", () => {
-  let buyerClient, approverClient;
+  let buyerClient, approverClient, outsiderClient, seatedOnlyClient;
   let arcId, itemAId, itemBId, roundId;
 
   beforeAll(async () => {
@@ -98,8 +108,26 @@ describe("ARC negotiation on the RFQ screens", () => {
       [qB.id, itemAId, itemBId]
     );
 
-    buyerClient    = await httpClient(BUYER);
-    approverClient = await httpClient(APPROVER);
+    for (const [id, name] of [[OUTSIDER, "RFQS Outsider"], [SEATED_ONLY, "RFQS Seated Only"]]) {
+      await db.none(
+        `INSERT INTO tbl_users (id, name, email, status, user_type, company_id, created_at, updated_at)
+         VALUES ($1, $2, $3, 1, 2, $4, now(), now())
+         ON CONFLICT (id) DO UPDATE SET user_type = 2, status = 1`,
+        [id, name, `arcrfqs.${id}@test.local`, IDS.companies.A]
+      );
+      await db.none(
+        `INSERT INTO tbl_hospitality_user_mappings
+           (user_id, hospitality_company_id, hospitality_hotel_id, mapping_type, created_by)
+         VALUES ($1, $2, $3, 1, $4)
+         ON CONFLICT ON CONSTRAINT uq_hospitality_user_mapping DO NOTHING`,
+        [id, HC, HOTEL, IDS.users.superAdmin]
+      );
+    }
+
+    buyerClient      = await httpClient(BUYER);
+    approverClient   = await httpClient(APPROVER);
+    outsiderClient   = await httpClient(OUTSIDER);
+    seatedOnlyClient = await httpClient(SEATED_ONLY);
 
     // Item A targets vendor A only; an ARC-level ask (payment terms) to vendor A.
     const res = await buyerClient
@@ -113,6 +141,16 @@ describe("ARC negotiation on the RFQ screens", () => {
       });
     expect(res.status).toBe(200);
     roundId = Number(res.body.data.id);
+
+    await db.none(
+      `INSERT INTO tbl_approval_step_approvers (approval_instance_step_id, approver_user_id, status)
+       SELECT s.id, $2, 'PENDING'
+         FROM tbl_approval_instance_steps s
+         JOIN tbl_approval_instances i ON i.id = s.approval_instance_id
+        WHERE i.entity_type = 'ARC_NEGOTIATION' AND i.entity_id = $1
+        ORDER BY s.step_order LIMIT 1`,
+      [roundId, SEATED_ONLY]
+    );
   });
 
   afterAll(async () => {
@@ -138,6 +176,8 @@ describe("ARC negotiation on the RFQ screens", () => {
     await db.none(`DELETE FROM tbl_approval_policy_steps WHERE approval_policy_id=$1`, [POLICY_ID]);
     await db.none(`DELETE FROM tbl_approval_policies WHERE id=$1`, [POLICY_ID]);
     await cleanupArcEvalPerms(db, [BUYER]);
+    await db.none(`DELETE FROM tbl_hospitality_user_mappings WHERE user_id = ANY($1::int[])`, [[OUTSIDER, SEATED_ONLY]]);
+    await db.none(`DELETE FROM tbl_users WHERE id = ANY($1::int[])`, [[OUTSIDER, SEATED_ONLY]]);
   });
 
   const detail = (client, id = roundId) => client.get(`/api/v1/negotiation/rounds/${id}/detail`);
@@ -158,6 +198,115 @@ describe("ARC negotiation on the RFQ screens", () => {
       const line = res.body.data.lines.find((l) => l.is_rfq_level && l.vendor_id === VENDOR_A);
       expect(line).toBeDefined();
       expect(line.text_targets).toEqual(expect.arrayContaining([expect.objectContaining({ name: "payment_terms", target: "45 days" })]));
+    });
+  });
+
+  describe("command center access", () => {
+    test("an ARC commercial evaluator with no negotiation role can open the round", async () => {
+      const res = await detail(buyerClient);
+      expect(res.status).toBe(200);
+      expect(res.body.data.round.round_id).toBe(roundId);
+    });
+
+    test("an approver seated on the round whose roles were revoked can still open it", async () => {
+      const res = await detail(seatedOnlyClient);
+      expect(res.status).toBe(200);
+    });
+
+    test("a seat removed from the approval no longer opens the round", async () => {
+      const seat = `UPDATE tbl_approval_step_approvers SET removed_at = $2
+                     WHERE approver_user_id = $1
+                       AND approval_instance_step_id IN (
+                         SELECT s.id FROM tbl_approval_instance_steps s
+                           JOIN tbl_approval_instances i ON i.id = s.approval_instance_id
+                          WHERE i.entity_type = 'ARC_NEGOTIATION' AND i.entity_id = $3)`;
+      await db.none(seat, [SEATED_ONLY, new Date(), roundId]);
+      try {
+        const res = await detail(seatedOnlyClient);
+        expect(res.status).toBe(403);
+      } finally {
+        await db.none(seat, [SEATED_ONLY, null, roundId]);
+      }
+    });
+
+    test("a user with no ARC scope and no seat is refused", async () => {
+      const res = await detail(outsiderClient);
+      expect(res.status).toBe(403);
+    });
+
+    test("the seat on this ARC does not open rounds of another ARC", async () => {
+      // Same hotel, department and process — only the seat differs.
+      const otherArc = await db.one(
+        `INSERT INTO tbl_arc
+           (arc_number,title,category_id,hospitality_company_id,hotel_id,department_id,process_id,status,
+            submission_start_at,submission_end_at,contract_start_at,contract_end_at,created_by,eligibility_type)
+         SELECT 'ARC-NEG-RFQS-2','Other ARC',category_id,hospitality_company_id,hotel_id,department_id,process_id,status,
+                submission_start_at,submission_end_at,contract_start_at,contract_end_at,created_by,eligibility_type
+           FROM tbl_arc WHERE id = $1
+         RETURNING id`,
+        [arcId]
+      );
+      const other = await db.one(
+        `INSERT INTO tbl_negotiation_rounds (source_type, source_id, round_number, status, end_date, created_by, products)
+         VALUES ('ARC', $1, 1, 'PENDING_APPROVAL', NOW() + INTERVAL '1 day', $2, '[]'::jsonb)
+         RETURNING id, source_id`,
+        [otherArc.id, BUYER]
+      );
+      try {
+        const res = await detail(seatedOnlyClient, Number(other.id));
+        expect(res.status).toBe(403);
+      } finally {
+        await db.none(`DELETE FROM tbl_negotiation_rounds WHERE id = $1`, [other.id]);
+        await db.none(`DELETE FROM tbl_arc WHERE id = $1`, [other.source_id]);
+      }
+    });
+  });
+
+  describe("command center actions", () => {
+    test("the pending approver may approve or reject the round, but not per line and not withdraw", async () => {
+      const res = await detail(approverClient);
+      expect(res.status).toBe(200);
+      const a = res.body.data.actions;
+      expect(a.can_approve).toBe(true);
+      expect(a.can_reject).toBe(true);
+      expect(a.can_approve_line).toBe(false);
+      expect(a.can_reject_line).toBe(false);
+      expect(a.can_withdraw).toBe(false);
+      expect(a.can_approve_vendor).toBe(false);
+      expect(a.can_reject_vendor).toBe(false);
+      expect(a.can_resubmit_vendor).toBe(false);
+      expect(a.can_submit_quotes_for_approval).toBe(false);
+    });
+
+    test("a seated approver whose roles were revoked still gets approve (the ARC approve API is engine-gated)", async () => {
+      const res = await detail(seatedOnlyClient);
+      expect(res.body.data.actions.can_approve).toBe(true);
+    });
+
+    test("the creator who is not an approver gets no approve, no withdraw, and no next round while pending", async () => {
+      const res = await detail(buyerClient);
+      const a = res.body.data.actions;
+      expect(a.can_approve).toBe(false);
+      expect(a.can_reject).toBe(false);
+      expect(a.can_withdraw).toBe(false);
+      expect(a.can_create_next_round).toBe(false);
+    });
+  });
+
+  describe("withdraw", () => {
+    test("POST /negotiation/rounds/:id/withdraw refuses an ARC round and leaves it awaiting approval", async () => {
+      const res = await buyerClient
+        .post(`/api/v1/negotiation/rounds/${roundId}/withdraw`)
+        .send({ remarks: "changed my mind" });
+      expect(res.status).toBe(400);
+      expect(res.body.message).toMatch(/rate contract/i);
+      const round = await db.one(`SELECT status FROM tbl_negotiation_rounds WHERE id = $1`, [roundId]);
+      expect(round.status).toBe("PENDING_APPROVAL");
+      const inst = await db.one(
+        `SELECT status FROM tbl_approval_instances WHERE entity_type = 'ARC_NEGOTIATION' AND entity_id = $1`,
+        [roundId]
+      );
+      expect(inst.status).toBe("PENDING");
     });
   });
 });
