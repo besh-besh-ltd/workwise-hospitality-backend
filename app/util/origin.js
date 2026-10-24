@@ -27,7 +27,7 @@ const origin = (app) => {
     );
     res.setHeader(
       'Access-Control-Allow-Headers',
-      'Content-Type, Authorization, LoginType, RefererUrl, AccessToken, appVersion'
+      'Content-Type, Authorization, LoginType, RefererUrl, AccessToken, appVersion, X-Receive-Token'
     );
     next();
   });
