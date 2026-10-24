@@ -86,7 +86,7 @@ async function emailContext(t, poId, hotelId) {
  *   hotelId is required when the PO delivers to more than one hotel and must be
  *   one of them; a single-hotel PO defaults to its hotel.
  * @returns {Promise<{siteRep:object, revokedIds:number[], companyId:number|null,
- *   hotelId:number, emailSent:boolean}>}
+ *   hotelId:number, poNumber:string|null, emailSent:boolean}>}
  * @throws PoAccessError (404) when the caller cannot see the PO;
  *   InventoryError VALIDATION | FORBIDDEN | CONFLICT.
  */
@@ -185,6 +185,7 @@ export async function issueSiteRepToken(user, input = {}, { conn = db } = {}) {
     revokedIds: issued.revokedIds,
     companyId: issued.companyId,
     hotelId: issued.hotelId,
+    poNumber: issued.mail?.po_number ?? null,
     emailSent: emailSent === true,
   };
 }

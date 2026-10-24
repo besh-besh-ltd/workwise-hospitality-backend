@@ -23,8 +23,9 @@ import { deriveScope } from "./poDashboardController.js";
 import { handleCallOffRejection, notifyCallOffRejected } from "../../services/callOffPoService.js";
 import { deferJson, isDeferred, sendDeferred } from "../../helper/deferredResponse.js";
 import { poFieldsFor } from "../../services/po/buyerOnlyPoFields.js";
-import { isOwnS3Url } from "../../helper/s3Urls.js";
-import { sendInventoryError } from "../../services/inventory/errors.js";
+import { normalizeOwnS3Url } from "../../helper/s3Urls.js";
+import { InventoryError, sendInventoryError } from "../../services/inventory/errors.js";
+import { redactForReceiveToken } from "../../helper/receiveTokenView.js";
 
 // Tiny tagged-error class for controllers that need to map a thrown
 // failure mode to a specific HTTP status code (instead of the historic
@@ -157,8 +158,11 @@ export const getPODetails = async (req, res) => {
 
         // Vendors and GRN token users get the row without buyer-only fields
         // (replaces_po_id: the rejected PO this one re-awards, often another
-        // vendor's).
-        const result = poFieldsFor(req.user, await getPODetailsById(po_id, id));
+        // vendor's; site_rep(s): who holds receive links). A token holder gets
+        // less again: no prices, taxes or totals at any depth, no buyer
+        // contacts, no priced documents (redactForReceiveToken).
+        const row = poFieldsFor(req.user, await getPODetailsById(po_id, id));
+        const result = req.user.is_token_user ? redactForReceiveToken(row) : row;
 
         // Additively merge the new contract-shaped detail-full object under a
         // `detail` key so the new PO Detail page can consume the structured
@@ -1545,8 +1549,10 @@ export const raiseInvoice = async (req, res) => {
     if (!(await guardPo(req, res, po_id))) return;
 
     // Only a file we stored: a pasted third-party link would be emailed to the
-    // buyer team and shown on the PO as "the invoice".
-    if (!isOwnS3Url(invoice_url)) {
+    // buyer team and shown on the PO as "the invoice". The normalized href is
+    // what gets stored.
+    const invoiceHref = normalizeOwnS3Url(invoice_url);
+    if (!invoiceHref) {
       return res.status(400).json({
         status: 0,
         message: 'Please upload the invoice again: the file link is not one of ours.',
@@ -1554,13 +1560,14 @@ export const raiseInvoice = async (req, res) => {
       });
     }
 
-    const result = await handleRaiseInvoice(po_id, invoice_url, id);
+    const result = await handleRaiseInvoice(po_id, invoiceHref, id);
     return res.json({
       status: 1,
       message: 'Invoice has been raised for this PO.',
       data: result
     });
   } catch (error) {
+    if (error instanceof InventoryError) return sendInventoryError(res, error);
     logError('raiseInvoice failed', error);
     return res.status(500).json({
       status: 0,
@@ -1632,6 +1639,21 @@ export const addSiteRepresentative = async (req, res) => {
   } catch (error) {
     return sendInventoryError(res, error);
   }
+
+  // Activity trail: "Site rep link issued", filed under the link's hotel. Who
+  // the link went to stays out of the trail (it names an outsider's email).
+  res.locals.activityDetail = {
+    scope: {
+      hospitalityCompanyId: result.companyId,
+      hotelId: result.hotelId,
+      entityLabel: result.poNumber,
+    },
+    metadata: {
+      token_id: result.siteRep?.id ?? null,
+      revoked_token_ids: result.revokedIds,
+      email_sent: result.emailSent,
+    },
+  };
 
   return res.json({
     status: 1,

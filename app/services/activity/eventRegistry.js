@@ -335,6 +335,15 @@ export const EVENTS = [
     entity: { type: 'PO', id: B('po_id') }, scope: SCOPE.entity('PO'),
     summary: (c) => `${c.actor} raised an invoice against purchase order ${c.entityLabel}`,
   }),
+  // Site rep link issued: a receiving link minted for, and emailed to, someone
+  // at the hotel. The controller hands over the hotel the link is for, so the
+  // event files under that unit, call-off POs included.
+  e({
+    method: 'POST', path: '/po/addSiteRepresentative', key: 'po_site_rep_link_issued',
+    category: CATEGORIES.RECEIPT, severity: 'notable',
+    entity: { type: 'PO', id: B('po_id') }, scope: [SCOPE.detail(), SCOPE.entity('PO')],
+    summary: (c) => `${c.actor} issued a site representative link for purchase order${c.entityLabel ? ` ${c.entityLabel}` : ''}`,
+  }),
 
   // ── Organisation ────────────────────────────────────────────────────────
   e({

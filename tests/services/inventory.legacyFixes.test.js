@@ -8,6 +8,9 @@
 //       daily database-driven sweeper replaces them.
 //   D9  milestones and tasks on call-off POs (no RFQ).
 //   plus: invoice / GRN document URLs must point at our own bucket.
+//   review: the token holder's PO view is redacted, the sweeper does not
+//   re-email reps, ?token= never reaches logs or spans, the detail page's
+//   "live link" agrees with the auth, and issuing a link is in the trail.
 //
 // HTTP tests commit for real; everything they create is tracked and deleted in
 // afterAll. The sweeper tests run inside withTx and roll back.
@@ -65,6 +68,7 @@ beforeAll(async () => {
 afterAll(async () => {
   const { poIds, rfqIds, mrIds, arcIds } = tracked;
   if (poIds.length) {
+    await db.none(`DELETE FROM tbl_activity_events WHERE entity_type = 'PO' AND entity_id = ANY($1::bigint[])`, [poIds]);
     await db.none(`DELETE FROM tbl_token_login_data WHERE token_type = 'GRN' AND entity_id = ANY($1::int[])`, [poIds]);
     await db.none(`DELETE FROM tbl_payment_milestone WHERE po_id = ANY($1::int[])`, [poIds]);
     await db.none(`DELETE FROM tbl_purchase_order_tasks WHERE po_id = ANY($1::int[])`, [poIds]);
@@ -229,6 +233,35 @@ async function tokenHarness() {
   return boundRequest(app);
 }
 
+/** Every key in a JSON value, at any depth. */
+function allKeys(value, out = []) {
+  if (Array.isArray(value)) value.forEach((v) => allKeys(v, out));
+  else if (value && typeof value === "object") {
+    for (const [k, v] of Object.entries(value)) {
+      out.push(k);
+      allKeys(v, out);
+    }
+  }
+  return out;
+}
+
+const COMMERCIAL = /price|rate|amount|value|tax|gst|discount|freight|cost|total/i;
+
+/** Poll for the activity event a request records after its response (off the critical path). */
+async function waitForActivity(predicate, timeoutMs = 4000) {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const rows = await db.any(
+      `SELECT event_key, category, hospitality_company_id, hotel_id, entity_type, entity_id,
+              entity_label, summary, metadata
+         FROM tbl_activity_events WHERE occurred_at >= now() - interval '5 minutes' ORDER BY id`
+    );
+    const hit = rows.find(predicate);
+    if (hit || Date.now() > deadline) return hit ?? null;
+    await new Promise((r) => setTimeout(r, 100));
+  }
+}
+
 // ---------------------------------------------------------------------------
 // D2 + D3: adding a site representative
 // ---------------------------------------------------------------------------
@@ -364,6 +397,58 @@ describe("site representative", () => {
     expect((await anon.get(`/api/v1/po/${po.poId}?token=${token}`)).status).toBe(403);
   });
 
+  // The legacy dual-auth routes (GET /po/:id, POST /po/markGRN) refuse a dead
+  // link with 403, not 401: the legacy GRN page calls them through the shared
+  // axios instance, whose 401 handler opens the session-expired modal and never
+  // settles, and the page shows its "link expired" state on a 403. The new
+  // header-only token routes (receiveTokenAuth) answer 401.
+  it("an expired or revoked link cannot mark GRN, and a link never reaches another PO", async () => {
+    const admin = await httpClient(ADMIN);
+    const anon = await httpClient(null);
+    const po = await makeRfqPo(db, { status: "dispatched" });
+    const other = await makeRfqPo(db, { status: "dispatched" });
+    await addSiteRep(admin, { po_id: po.poId, name: "Rep", email: "markgrn.site@example.test", phone: "9000000012" });
+    const { token } = tokenMailedTo("markgrn.site@example.test");
+    const [row] = await siteRepRows(po.poId);
+    const statusOf = async (id) => (await db.one(`SELECT status FROM tbl_rfq_purchase_order WHERE id = $1`, [id])).status;
+    const grnDocs = (id) => db.any(`SELECT id FROM tbl_purchase_order_document WHERE purchase_order_id = $1`, [id]);
+    const markGRN = (body, how) => {
+      const r = anon.post(how === "query" ? `/api/v1/po/markGRN?token=${token}` : "/api/v1/po/markGRN");
+      return (how === "query" ? r : r.set("X-Receive-Token", token)).send(body);
+    };
+
+    // A new (hashed) token, in the header or the query, against a different PO.
+    expect((await anon.get(`/api/v1/po/${other.poId}`).set("X-Receive-Token", token)).status).toBe(403);
+    for (const how of ["header", "query"]) {
+      const res = await markGRN({ po_id: other.poId, remarks: "x" }, how);
+      expect([how, res.status]).toEqual([how, 403]);
+    }
+    expect(await statusOf(other.poId)).toBe("dispatched");
+
+    // Expired.
+    await db.none(`UPDATE tbl_token_login_data SET expires_at = now() - interval '1 second' WHERE id = $1`, [row.id]);
+    for (const how of ["header", "query"]) {
+      const res = await markGRN({ po_id: po.poId, remarks: "x" }, how);
+      expect([how, res.status, res.body.status]).toEqual([how, 403, 0]);
+    }
+    expect(await statusOf(po.poId)).toBe("dispatched");
+
+    // Revoked (and otherwise in date).
+    await db.none(`UPDATE tbl_token_login_data SET expires_at = now() + interval '1 day', revoked_at = now() WHERE id = $1`, [row.id]);
+    for (const how of ["header", "query"]) {
+      const res = await markGRN({ po_id: po.poId, remarks: "x" }, how);
+      expect([how, res.status]).toEqual([how, 403]);
+    }
+    expect(await statusOf(po.poId)).toBe("dispatched");
+    expect(await grnDocs(po.poId)).toHaveLength(0);
+
+    // Control: the same link, live again, does mark GRN on its own PO.
+    await db.none(`UPDATE tbl_token_login_data SET revoked_at = NULL WHERE id = $1`, [row.id]);
+    const ok = await markGRN({ po_id: po.poId, remarks: "received" }, "header");
+    expect(ok.status).toBe(200);
+    expect(await statusOf(po.poId)).toBe("GRN");
+  });
+
   it("a token dies with its PO: cancelled, or fully received more than a day ago", async () => {
     const admin = await httpClient(ADMIN);
     const harness = await tokenHarness();
@@ -372,10 +457,94 @@ describe("site representative", () => {
     const { token } = tokenMailedTo("dies.site@example.test");
     expect((await harness.get("/echo").set("X-Receive-Token", token)).status).toBe(200);
 
+    const shown = async () => (await admin.get(`/api/v1/po/${po.poId}`)).body.data;
+    expect((await shown()).site_reps).toHaveLength(1);
+
+    // The PO page shows a link as live exactly when the auth accepts it.
     await db.none(`UPDATE tbl_rfq_purchase_order SET receipt_status = 'received' WHERE id = $1`, [po.poId]);
     expect((await harness.get("/echo").set("X-Receive-Token", token)).status).toBe(401);
+    expect(await shown()).toMatchObject({ site_rep: null, site_reps: [] });
     await db.none(`UPDATE tbl_rfq_purchase_order SET receipt_status = 'not_received', status = 'cancelled' WHERE id = $1`, [po.poId]);
     expect((await harness.get("/echo").set("X-Receive-Token", token)).status).toBe(401);
+    expect(await shown()).toMatchObject({ site_rep: null, site_reps: [] });
+  });
+
+  it("issuing a link is in the activity trail, under the link's hotel, without the rep's address", async () => {
+    const admin = await httpClient(ADMIN);
+    const po = await makeCallOffPo(db, { hotel: A2 });
+    const res = await addSiteRep(admin, {
+      po_id: po.poId, name: "Trail", email: "trail.site@example.test", phone: "9000000010",
+    });
+    expect(res.status).toBe(200);
+
+    const event = await waitForActivity(
+      (e) => e.event_key === "po_site_rep_link_issued" && Number(e.entity_id) === po.poId
+    );
+    expect(event).toMatchObject({
+      category: "Goods Receipt",
+      hospitality_company_id: CO,
+      hotel_id: A2,
+      entity_type: "PO",
+      entity_label: po.poNumber,
+    });
+    expect(event.summary).toContain("issued a site representative link");
+    expect(event.metadata).toMatchObject({ token_id: res.body.data.id, email_sent: true });
+    expect(JSON.stringify(event)).not.toContain("trail.site@example.test");
+  });
+
+  it("a token holder's PO view has no prices, taxes, totals, buyer contacts or links; a vendor's has no links", async () => {
+    const admin = await httpClient(ADMIN);
+    const anon = await httpClient(null);
+    const po = await makeRfqPo(db, { lines: 2 });
+    await db.none(
+      `UPDATE tbl_rfq_purchase_order SET gstin = '27AAAAA0000A1Z5', terms_and_conditions = 'Net 30 at 2% discount',
+              global_charges = '[{"name":"freight","amount":500}]'::jsonb WHERE id = $1`,
+      [po.poId]
+    );
+    await addSiteRep(admin, { po_id: po.poId, name: "Seen", email: "redact.site@example.test", phone: "9000000011" });
+    const { token } = tokenMailedTo("redact.site@example.test");
+    const initiator = await db.one(`SELECT email, mobile FROM tbl_users WHERE id = $1`, [VIEWER]);
+
+    // The buyer still sees everything.
+    const buyer = (await admin.get(`/api/v1/po/${po.poId}`)).body.data;
+    expect(buyer).toMatchObject({ total_value: expect.anything(), initiated_by_email: initiator.email });
+    expect(buyer.site_reps).toHaveLength(1);
+
+    for (const res of [
+      await anon.get(`/api/v1/po/${po.poId}`).set("X-Receive-Token", token),
+      await anon.get(`/api/v1/po/${po.poId}?token=${token}`), // the legacy page's way in
+    ]) {
+      expect(res.status).toBe(200);
+      const keys = allKeys(res.body);
+      expect(keys.filter((k) => COMMERCIAL.test(k))).toEqual([]);
+      for (const k of [
+        "initiated_by", "initiated_by_email", "initiated_by_phone", "initiated_by_name", "buyer_address",
+        "logged_in_user", "site_rep", "site_reps", "approval_history", "approval_status",
+        "documents", "po_pdf_url", "terms_and_conditions", "charges_meta", "global_charges",
+      ]) {
+        expect([k, keys.includes(k)]).toEqual([k, false]);
+      }
+      const body = JSON.stringify(res.body);
+      expect(body).not.toContain("redact.site@example.test");
+      if (initiator.email) expect(body).not.toContain(initiator.email);
+      expect(body).not.toContain("27AAAAA0000A1Z5");
+
+      // What the receiving page needs is still there.
+      expect(res.body.data).toMatchObject({ id: po.poId, po_number: po.poNumber, status: "approved" });
+      expect(res.body.data.product_details).toHaveLength(2);
+      for (const line of res.body.data.product_details) {
+        expect(Number(line.quantity)).toBe(10);
+        expect(line.unit).toBe("kg");
+        expect(line).toHaveProperty("name");
+      }
+      expect(res.body.detail).toBeNull();
+    }
+
+    const vendor = await (await httpClient(VENDOR)).get(`/api/v1/po/${po.poId}`);
+    expect(vendor.status).toBe(200);
+    expect(vendor.body.data).not.toHaveProperty("site_reps");
+    expect(vendor.body.data).not.toHaveProperty("site_rep");
+    expect(JSON.stringify(vendor.body)).not.toContain("redact.site@example.test");
   });
 });
 
@@ -470,9 +639,12 @@ describe("document URLs", () => {
     expect(await docs()).toHaveLength(0);
     expect((await db.one(`SELECT status FROM tbl_rfq_purchase_order WHERE id = $1`, [po.poId])).status).toBe("dispatched");
 
-    const good = await vendor.post("/api/v1/po/raiseInvoice").send({ po_id: po.poId, invoice_url: OWN_URL("inv-1.pdf") });
+    // Stored in normalized form: lower-case host, encoded key.
+    const good = await vendor.post("/api/v1/po/raiseInvoice").send({
+      po_id: po.poId, invoice_url: `https://${BUCKET_HOST.toUpperCase()}/inv 1.pdf`,
+    });
     expect(good.status).toBe(200);
-    expect(await docs()).toEqual([{ document_url: OWN_URL("inv-1.pdf") }]);
+    expect(await docs()).toEqual([{ document_url: OWN_URL("inv%201.pdf") }]);
   });
 
   it("GRN document URL outside our bucket rejected before anything is recorded", async () => {
@@ -484,6 +656,27 @@ describe("document URLs", () => {
     expect(res.status).toBe(400);
     expect((await db.one(`SELECT status FROM tbl_rfq_purchase_order WHERE id = $1`, [po.poId])).status).toBe("dispatched");
     expect(await db.any(`SELECT id FROM tbl_purchase_order_document WHERE purchase_order_id = $1`, [po.poId])).toHaveLength(0);
+
+    const ok = await admin.post("/api/v1/po/markGRN").send({
+      po_id: po.poId, grn_document_url: `https://${BUCKET_HOST.toUpperCase()}/grn 1.pdf`, remarks: "x",
+    });
+    expect(ok.status).toBe(200);
+    expect(await db.any(`SELECT document_url FROM tbl_purchase_order_document WHERE purchase_order_id = $1`, [po.poId]))
+      .toEqual([{ document_url: OWN_URL("grn%201.pdf") }]);
+  });
+
+  it("the allowed hosts are the uploader's bucket and region, in both S3 host forms", async () => {
+    const { ownS3Hosts, normalizeOwnS3Url } = await import("../../app/helper/s3Urls.js");
+    const env = { AWS_S3_BUCKET: "Acme-Docs", AWS_REGION: "ap-south-1" };
+    expect(ownS3Hosts(env)).toEqual(["acme-docs.s3.ap-south-1.amazonaws.com", "acme-docs.s3.amazonaws.com"]);
+    expect(normalizeOwnS3Url("https://acme-docs.s3.ap-south-1.amazonaws.com/a/b c.pdf", env))
+      .toBe("https://acme-docs.s3.ap-south-1.amazonaws.com/a/b%20c.pdf");
+    expect(normalizeOwnS3Url("https://acme-docs.s3.amazonaws.com/a.pdf", env)).toBe("https://acme-docs.s3.amazonaws.com/a.pdf");
+    expect(normalizeOwnS3Url("https://acme-docs.s3.us-east-1.amazonaws.com/a.pdf", env)).toBeNull();
+    expect(normalizeOwnS3Url("https://acme-docs.s3.ap-south-1.amazonaws.com/a.pdf", {})).toBeNull();
+    // The upload helper builds exactly this shape from the same two settings.
+    const uploaded = `https://${process.env.AWS_S3_BUCKET}.s3.${process.env.AWS_REGION}.amazonaws.com/uploads/x.pdf`;
+    expect(normalizeOwnS3Url(uploaded)).toBe(uploaded);
   });
 });
 
@@ -662,6 +855,85 @@ describe("phase-due sweeper", () => {
         [TODAY]
       );
     }
+  });
+});
+
+describe("phase-due sweeper: site-rep emails", () => {
+  it("two runs on the same day email each rep once, whether or not the digest went out", async () => {
+    const { runPhaseDueSweep } = await import("../../app/services/inventory/phaseDueSweeper.js");
+    await withTx(async (t) => {
+      const po = await makeRfqPo(t);
+      await addDelivery(t, { poId: po.poId, lineId: po.lineIds[0], hotelId: A1, due: DAY(1) });
+      const rep = await addToken(t, { poId: po.poId, hotelId: A1, email: "twice.rep@example.test" });
+      const mailsToRep = () => sentMail.filter((m) => [].concat(m.to).includes("twice.rep@example.test"));
+
+      // A digest that reached nobody is not counted, and does not hold the rep back.
+      const notify = jest.fn(async () => ({ sent: false, recipients: 0 }));
+      const first = await runPhaseDueSweep({ conn: t, today: TODAY, notify });
+      expect(first).toMatchObject({ digests: 0, siteRepEmails: 1 });
+      expect(mailsToRep()).toHaveLength(1);
+      expect(mailsToRep()[0].html).not.toMatch(/receive\/token\?t=/);
+
+      // Second run, same day: the digest is tried again, the rep is not re-emailed.
+      const second = await runPhaseDueSweep({ conn: t, today: TODAY, notify });
+      expect(notify).toHaveBeenCalledTimes(2);
+      expect(second).toMatchObject({ siteRepEmails: 0, siteRepAlreadyReminded: 1 });
+      expect(mailsToRep()).toHaveLength(1);
+
+      // The record is inert: no inbox can show it.
+      const ledger = await t.any(
+        `SELECT recipient_user_id, sender_user_id, additional_data FROM tbl_notifications
+          WHERE type = 'inventory_site_rep_reminder' AND additional_data->>'date' = $1`,
+        [TODAY]
+      );
+      expect(ledger).toHaveLength(1);
+      expect(ledger[0]).toMatchObject({ recipient_user_id: null, sender_user_id: null });
+      expect(ledger[0].additional_data).toMatchObject({ tokenId: Number(rep.id), poId: po.poId, date: TODAY });
+
+      // A link re-issued to the same person later that day does not earn a second email.
+      await t.none(`UPDATE tbl_token_login_data SET revoked_at = now() WHERE id = $1`, [rep.id]);
+      await addToken(t, { poId: po.poId, hotelId: A1, email: "Twice.Rep@example.test" });
+      const third = await runPhaseDueSweep({ conn: t, today: TODAY, notify });
+      expect(third.siteRepEmails).toBe(0);
+      expect(sentMail.filter((m) => /twice\.rep@example\.test/i.test([].concat(m.to).join(",")))).toHaveLength(1);
+
+      // The next day is a new day: the delivery is now due today, and the rep hears again.
+      const nextDay = await runPhaseDueSweep({ conn: t, today: DAY(1), notify });
+      expect(nextDay.siteRepEmails).toBe(1);
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// ?token= never reaches logs or spans
+// ---------------------------------------------------------------------------
+
+describe("query-string tokens in telemetry", () => {
+  it("the http span hook and the access-log serializer redact token and t", async () => {
+    const { redactUrlSecrets, redactQuerySecrets, buildInstrumentationConfig } = await import(
+      "../../app/util/telemetryConfig.js"
+    );
+    const { reqLogFields } = await import("../../app/util/logger.js");
+    const secret = "S3cr3tTokenValue_abcdefghijklmnop";
+
+    expect(redactUrlSecrets(`/api/v1/po/5?token=${secret}&x=1`)).toBe("/api/v1/po/5?token=REDACTED&x=1");
+    expect(redactUrlSecrets(`/receive/token?t=${secret}`)).toBe("/receive/token?t=REDACTED");
+    expect(redactUrlSecrets(`/x?Token=${secret}&token%5B%5D=${secret}`)).not.toContain(secret);
+    expect(redactUrlSecrets("/api/v1/po/5?tab=docs")).toBe("/api/v1/po/5?tab=docs");
+
+    const hook = buildInstrumentationConfig()["@opentelemetry/instrumentation-http"].startIncomingSpanHook;
+    const attrs = hook({ url: `/api/v1/po/5?token=${secret}`, headers: { host: "api.example" }, socket: {} });
+    expect(attrs).toEqual({
+      "http.target": "/api/v1/po/5?token=REDACTED",
+      "http.url": "http://api.example/api/v1/po/5?token=REDACTED",
+      "url.query": "token=REDACTED",
+    });
+    expect(hook({ url: "/api/v1/po/5", headers: {}, socket: {} })).toEqual({});
+
+    expect(redactQuerySecrets({ token: secret, t: secret, po: "5" })).toEqual({ token: "REDACTED", t: "REDACTED", po: "5" });
+    const logged = reqLogFields({ method: "GET", query: { token: secret, t: secret, po: "5" } });
+    expect(JSON.stringify(logged)).not.toContain(secret);
+    expect(logged.query.po).toBe("5");
   });
 });
 

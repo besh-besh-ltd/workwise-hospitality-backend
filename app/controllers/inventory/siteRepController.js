@@ -22,8 +22,7 @@ export const revokeSiteRep = async (req, res) => {
       hotelId: out.hotelIds.length === 1 ? out.hotelIds[0] : null,
       entityLabel: out.poNumber,
     },
-    revoked: out.revoked,
-    token_ids: out.tokenIds,
+    metadata: { revoked: out.revoked, token_ids: out.tokenIds },
   };
   return res.json({
     status: 1,

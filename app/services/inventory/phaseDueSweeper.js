@@ -13,12 +13,18 @@
 // POs not in a receivable status (approved, dispatched, GRN, invoice_raised).
 //
 // Unallocated deliveries (hotel_id NULL, a multi-hotel PO with no split) are
-// listed at every hotel of the PO. Then, per hotel:
-//   - one in-app digest to the hotel's receivers (notifyPhaseDueDigest), at
-//     most once per hotel per day: a hotel already digested for `today` is
-//     skipped, so a second run (or a second instance) sends nothing new;
-//   - one reminder to each live site-rep link at that hotel, without the link
-//     itself (only its hash is stored).
+// listed at every hotel of the PO. Then:
+//   - per hotel, one in-app digest to the hotel's receivers
+//     (notifyPhaseDueDigest). A hotel counts as digested for `today` only when
+//     the digest actually reached someone; a hotel already digested is skipped,
+//     so a second run (or a second instance) sends nothing new, while one whose
+//     digest failed is tried again;
+//   - per live site-rep link on a due PO, one reminder email for the PO's
+//     deliveries at the link's hotel, without the link itself (only its hash
+//     is stored). Each email sent is recorded as an inert tbl_notifications row
+//     (type SITE_REP_REMINDER_TYPE, no recipient, so no inbox ever shows it)
+//     keyed by link and day; a link, or the same person on the same PO, that
+//     was already reminded today is skipped. Independent of the digest.
 // One run at a time across instances: a session advisory lock; a run that
 // cannot take it returns { skipped: true }.
 
@@ -30,6 +36,10 @@ import { logger } from '../../util/logger.js';
 import { notifyPhaseDueDigest, PHASE_DUE_DIGEST_TYPE } from './notices/digestNotices.js';
 import { getPoContext } from './planCore.js';
 import { LEGACY_PO_STATUS_ORDER } from './poStatus.js';
+
+// Bookkeeping row for a site-rep reminder email (see header). recipient_user_id
+// and sender_user_id stay NULL, so no user's inbox, count or badge sees it.
+export const SITE_REP_REMINDER_TYPE = 'inventory_site_rep_reminder';
 
 export const PHASE_DUE_SWEEP_LOCK_NS = 950701;
 export const PHASE_DUE_SWEEP_LOCK_KEY = 'inventory:phase_due_sweep';
@@ -103,7 +113,10 @@ async function sweep(c, { today, limit, notify, remindSiteRep }) {
   }
 
   const hotelIds = [...byHotel.keys()].sort((a, b) => a - b);
-  const out = { date, deliveries: rows.length, hotels: hotelIds.length, digests: 0, alreadyDigested: 0, siteRepEmails: 0 };
+  const out = {
+    date, deliveries: rows.length, hotels: hotelIds.length,
+    digests: 0, alreadyDigested: 0, siteRepEmails: 0, siteRepAlreadyReminded: 0,
+  };
   if (!hotelIds.length) return out;
 
   const hotelRows = await c.any(
@@ -123,7 +136,6 @@ async function sweep(c, { today, limit, notify, remindSiteRep }) {
   );
   const alreadyDigested = new Set(done.map((r) => Number(r.hotel_id)));
 
-  const digestedNow = new Set();
   for (const hotelId of hotelIds) {
     if (alreadyDigested.has(hotelId)) {
       out.alreadyDigested += 1;
@@ -132,7 +144,7 @@ async function sweep(c, { today, limit, notify, remindSiteRep }) {
     const info = hotelInfo.get(hotelId);
     const deliveries = [...byHotel.get(hotelId).values()];
     try {
-      await notify(
+      const result = await notify(
         {
           hotelId,
           hotelName: info?.name ?? null,
@@ -142,13 +154,12 @@ async function sweep(c, { today, limit, notify, remindSiteRep }) {
         },
         { conn: c }
       );
-      out.digests += 1;
-      digestedNow.add(hotelId);
+      // Only a digest that reached someone counts; the next run retries others.
+      if (result?.sent) out.digests += 1;
     } catch (err) {
       logError(`[Phase Due Sweeper] digest for hotel ${hotelId} failed`, err);
     }
   }
-  if (!digestedNow.size) return out;
 
   // Site reps: each live link on a due PO, for that PO's deliveries at the
   // link's hotel (all of the PO's hotels for a hotel-less legacy link).
@@ -163,10 +174,31 @@ async function sweep(c, { today, limit, notify, remindSiteRep }) {
       ORDER BY tl.id`,
     [poIds]
   );
+  if (!links.length) return out;
+
+  // Who was already reminded today: by link, and by person + PO (a link
+  // re-issued during the day must not earn its holder a second email).
+  const reminded = await c.any(
+    `SELECT additional_data->>'tokenId' AS token_id,
+            additional_data->>'poId'    AS po_id,
+            lower(additional_data->>'email') AS email
+       FROM tbl_notifications
+      WHERE type = $1
+        AND created_at >= now() - interval '3 days'
+        AND additional_data->>'date' = $2`,
+    [SITE_REP_REMINDER_TYPE, date]
+  );
+  const remindedTokens = new Set(reminded.map((r) => String(r.token_id)));
+  const remindedPeople = new Set(reminded.map((r) => `${r.po_id}|${r.email}`));
+  const personKey = (poId, email) => `${poId}|${String(email || '').trim().toLowerCase()}`;
+
   for (const link of links) {
     const poId = Number(link.entity_id);
-    const linkHotels = link.hotel_id != null ? [Number(link.hotel_id)] : await hotelsOfPo(poId);
-    const hotels = linkHotels.filter((h) => digestedNow.has(h));
+    if (remindedTokens.has(String(link.id)) || remindedPeople.has(personKey(poId, link.email))) {
+      out.siteRepAlreadyReminded += 1;
+      continue;
+    }
+    const hotels = link.hotel_id != null ? [Number(link.hotel_id)] : await hotelsOfPo(poId);
     const seen = new Map();
     for (const h of hotels) {
       for (const d of byHotel.get(h)?.values() ?? []) {
@@ -175,8 +207,9 @@ async function sweep(c, { today, limit, notify, remindSiteRep }) {
     }
     if (!seen.size) continue;
     const deliveries = [...seen.values()].sort((a, b) => a.phaseNo - b.phaseNo);
+    let sent = false;
     try {
-      const sent = await remindSiteRep({
+      sent = await remindSiteRep({
         to: link.email,
         name: link.name,
         poNumber: deliveries[0].poNumber,
@@ -184,9 +217,34 @@ async function sweep(c, { today, limit, notify, remindSiteRep }) {
         expiresAt: link.expires_at,
         deliveries: deliveries.map((d) => ({ phaseNo: d.phaseNo, dueDate: d.dueDate, bucket: d.bucket })),
       });
-      if (sent !== false) out.siteRepEmails += 1;
     } catch (err) {
       logError(`[Phase Due Sweeper] site-rep reminder for link ${link.id} failed`, err);
+      continue;
+    }
+    if (sent !== true) continue; // not sent: the next run tries again
+    out.siteRepEmails += 1;
+    remindedTokens.add(String(link.id));
+    remindedPeople.add(personKey(poId, link.email));
+    try {
+      await c.none(
+        `INSERT INTO tbl_notifications
+           (type, category, title, message, additional_data, is_read, delivered_at, dismissed_at)
+         VALUES ($1, 'inventory', 'Delivery reminder emailed to a site representative', $2, $3::json, 1, now(), now())`,
+        [
+          SITE_REP_REMINDER_TYPE,
+          `Purchase order ${deliveries[0].poNumber ?? poId}: ${deliveries.length} deliver${deliveries.length === 1 ? 'y' : 'ies'}`,
+          JSON.stringify({
+            tokenId: Number(link.id),
+            poId,
+            email: String(link.email || '').trim().toLowerCase(),
+            date,
+            deliveryIds: deliveries.map((d) => d.deliveryId),
+          }),
+        ]
+      );
+    } catch (err) {
+      // The email went; without the record a later run today may send it again.
+      logError(`[Phase Due Sweeper] recording the site-rep reminder for link ${link.id} failed`, err);
     }
   }
   return out;
@@ -198,10 +256,12 @@ async function sweep(c, { today, limit, notify, remindSiteRep }) {
  * @param {{conn?:object, today?:string|null, limit?:number,
  *   notify?:Function, remindSiteRep?:Function}} [opts]
  *   today: 'YYYY-MM-DD' (default: today in IST). notify / remindSiteRep are
- *   injectable for tests (default notifyPhaseDueDigest /
- *   sendSiteRepDeliveryReminderEmail).
+ *   injectable for tests (default notifyPhaseDueDigest, which resolves
+ *   { sent }, and sendSiteRepDeliveryReminderEmail, which resolves true when
+ *   the email went).
  * @returns {Promise<{skipped:true}|{date:string, deliveries:number, hotels:number,
- *   digests:number, alreadyDigested:number, siteRepEmails:number}>}
+ *   digests:number, alreadyDigested:number, siteRepEmails:number,
+ *   siteRepAlreadyReminded:number}>}
  */
 export async function runPhaseDueSweep({
   conn = db,

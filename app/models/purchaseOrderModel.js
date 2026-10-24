@@ -3,7 +3,8 @@ import { sendApprovalNotification } from "../controllers/po/purchaseOrderEmails.
 import { consoleLogData, logError } from "../helper/common.js";
 import { scheduleGRNReminders } from "../helper/cronManager.js";
 import { sendDispatchedEmail, sendGRNUpdationEmail, sendInvoiceEmail } from "../helper/sendEmailFunctions/generalReminderEmails.js";
-import { isOwnS3Url } from "../helper/s3Urls.js";
+import { normalizeOwnS3Url } from "../helper/s3Urls.js";
+import { LIVE_TOKEN_SQL } from "../helper/receiveToken.js";
 import { InventoryError } from "../services/inventory/errors.js";
 import { AVAILABLE_HIERARCHY_TYPES, INVALID_PO_STATUSES_FOR_VENDOR, PO_STATUSES } from "../util/constants.js";
 import { logger } from "../util/logger.js";
@@ -2096,44 +2097,42 @@ export const getPODetailsById = async (po_id, user_id) => {
                 ),
                 '[]'::json
               ) AS documents,
-              -- Site-rep links that still work (unrevoked, unexpired): site_rep
-              -- is the newest, site_reps all of them (one per hotel at most).
+              -- Site-rep links that still work: site_rep is the newest,
+              -- site_reps all of them (one per hotel at most). "Live" is
+              -- LIVE_TOKEN_SQL, the predicate the token auth itself uses, so the
+              -- page never shows a link as working when auth would refuse it.
               (
                 SELECT JSON_BUILD_OBJECT(
-                  'id', TTLD.id,
-                  'name', TTLD.name,
-                  'email', TTLD.email,
-                  'phone', TTLD.phone,
-                  'hotel_id', TTLD.hotel_id,
-                  'expires_at', COALESCE(TTLD.expires_at, TTLD.created_at + interval '14 days'),
-                  'last_used_at', TTLD.last_used_at,
-                  'created_at', TTLD.created_at
+                  'id', tl.id,
+                  'name', tl.name,
+                  'email', tl.email,
+                  'phone', tl.phone,
+                  'hotel_id', tl.hotel_id,
+                  'expires_at', COALESCE(tl.expires_at, tl.created_at + interval '14 days'),
+                  'last_used_at', tl.last_used_at,
+                  'created_at', tl.created_at
                 )
-                FROM tbl_token_login_data TTLD
-                WHERE TTLD.token_type = 'GRN'
-                AND TTLD.entity_id = po.id
-                AND TTLD.revoked_at IS NULL
-                AND COALESCE(TTLD.expires_at, TTLD.created_at + interval '14 days') > now()
-                ORDER BY TTLD.id DESC
+                FROM tbl_token_login_data tl
+                WHERE tl.entity_id = po.id
+                AND ${LIVE_TOKEN_SQL}
+                ORDER BY tl.id DESC
                 LIMIT 1
               ) AS site_rep,
               COALESCE(
                 (
                   SELECT JSON_AGG(JSON_BUILD_OBJECT(
-                    'id', TTLD.id,
-                    'name', TTLD.name,
-                    'email', TTLD.email,
-                    'phone', TTLD.phone,
-                    'hotel_id', TTLD.hotel_id,
-                    'expires_at', COALESCE(TTLD.expires_at, TTLD.created_at + interval '14 days'),
-                    'last_used_at', TTLD.last_used_at,
-                    'created_at', TTLD.created_at
-                  ) ORDER BY TTLD.id DESC)
-                  FROM tbl_token_login_data TTLD
-                  WHERE TTLD.token_type = 'GRN'
-                  AND TTLD.entity_id = po.id
-                  AND TTLD.revoked_at IS NULL
-                  AND COALESCE(TTLD.expires_at, TTLD.created_at + interval '14 days') > now()
+                    'id', tl.id,
+                    'name', tl.name,
+                    'email', tl.email,
+                    'phone', tl.phone,
+                    'hotel_id', tl.hotel_id,
+                    'expires_at', COALESCE(tl.expires_at, tl.created_at + interval '14 days'),
+                    'last_used_at', tl.last_used_at,
+                    'created_at', tl.created_at
+                  ) ORDER BY tl.id DESC)
+                  FROM tbl_token_login_data tl
+                  WHERE tl.entity_id = po.id
+                  AND ${LIVE_TOKEN_SQL}
                 ),
                 '[]'::json
               ) AS site_reps,
@@ -3228,8 +3227,10 @@ const resolvePoNotificationRecipients = async (po, t = db) => {
   return [...ids];
 };
 
-export const handleRaiseInvoice = async (po_id, invoice_url, vendor_id) => {
-  if (!isOwnS3Url(invoice_url)) {
+export const handleRaiseInvoice = async (po_id, invoice_url_input, vendor_id) => {
+  // Only our own S3 objects, stored in normalized (WHATWG href) form.
+  const invoice_url = normalizeOwnS3Url(invoice_url_input);
+  if (!invoice_url) {
     throw new InventoryError('VALIDATION', 'Please upload the invoice again: the file link is not one of ours.', { field: 'invoice_url' });
   }
   return await db.tx(async t => {

@@ -12,11 +12,17 @@
 // approver's comment, the reasons a PO was sent back or rejected, and the
 // questions asked while it was on hold. No vendor screen reads it.
 //
+// site_rep / site_reps (GET /po/:po_id) are the hotel staff holding receive
+// links for the PO: names, emails, phones. They belong to the buyer, and a
+// token holder must not see who else holds a link.
+//
 // Any response that hands a raw tbl_rfq_purchase_order row (SELECT * /
 // RETURNING * / PO.*) to someone who might be a vendor passes it through here,
 // rather than each query listing columns.
 
-export const BUYER_ONLY_PO_FIELDS = Object.freeze(['replaces_po_id', 'hold', 'approval_history']);
+export const BUYER_ONLY_PO_FIELDS = Object.freeze([
+  'replaces_po_id', 'hold', 'approval_history', 'site_rep', 'site_reps',
+]);
 
 /** True for a caller who must not see buyer-only PO fields. */
 export const isVendorOrTokenViewer = (user) =>
