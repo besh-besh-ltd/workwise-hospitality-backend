@@ -1,4 +1,5 @@
 import express from 'express';
+import multer from 'multer';
 import { buyerGuard } from './guards.js';
 import {
   listItems,
@@ -22,6 +23,12 @@ import {
   postOpeningStock,
 } from '../../controllers/inventory/setupController.js';
 
+// The opening-stock sheet is parsed and never stored: keep it in memory.
+const openingUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 5 * 1024 * 1024, files: 1 },
+});
+
 /** Buyer routes: passportSignIn + noAcl([3]) per route. */
 const router = express.Router();
 
@@ -42,7 +49,7 @@ router.get('/settings/hotel/:hotelId', ...buyerGuard, getHotelSettings);
 router.put('/settings/hotel/:hotelId', ...buyerGuard, saveHotelSettings);
 router.get('/category-defaults', ...buyerGuard, getCategoryDefaults);
 router.put('/category-defaults', ...buyerGuard, saveCategoryDefaults);
-router.post('/opening/:hotelId/preview', ...buyerGuard, previewOpeningStock);
+router.post('/opening/:hotelId/preview', ...buyerGuard, openingUpload.single('file'), previewOpeningStock);
 router.post('/opening/:hotelId/post', ...buyerGuard, postOpeningStock);
 
 export default router;
