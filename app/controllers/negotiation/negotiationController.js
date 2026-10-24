@@ -48,7 +48,7 @@ import { draftPO, buildAuthoritativePOPayload } from '../po/purchaseOrderControl
 import { notifyDraftCreated } from '../../services/po/poInitiateNotifier.js';
 import { PoDecisionError } from '../../services/po/poDecisionError.js';
 import { buildDraftedPos } from '../../models/po/poInitiateGuide.js';
-import { initiatePurchaseOrder } from '../../models/purchaseOrderModel.js';
+import { initiatePurchaseOrder, assertDraftMergeTarget, withoutStaleMergeTarget } from '../../models/purchaseOrderModel.js';
 import {
   buildQuoteVisibilityMeta,
   createQuoteVisibilityError,
@@ -3098,6 +3098,18 @@ const NegotiationController = {
         }
       }
 
+      // 1c. A PO the approver chose to merge the award into must be this RFQ's
+      // draft for the awarded vendor. Checked BEFORE the approval action, for
+      // the reason 1b gives: a refusal after it would leave an approval with
+      // no PO. (draftPurchaseOrder re-checks it under lock.)
+      if (existing_po_id && guardMeta.po_payload) {
+        await assertDraftMergeTarget(db, {
+          poId: existing_po_id,
+          rfqId: guardMeta.po_payload.rfq_id ?? guardMeta.rfq_id,
+          vendorId: guardMeta.po_payload.product_info?.finalized_vendor_id ?? guardMeta.vendor_id,
+        });
+      }
+
       // 2. Submit approval action
       const result = await submitApprovalAction({
         approval_instance_id: pendingInstance.id,
@@ -3116,13 +3128,15 @@ const NegotiationController = {
 
         // Path A: PO payload stored by rfqController.finalize (direct vendor finalization)
         if (metadata.po_payload && metadata.po_user) {
-          // Final approver can choose to merge into an existing PO
-          const poPayload = { ...metadata.po_payload };
+          // Final approver can choose to merge into an existing PO (checked in 1c)
+          let poPayload = { ...metadata.po_payload };
           if (existing_po_id) {
             poPayload.existing_po_id = existing_po_id;
           }
 
           await db.tx(async (t) => {
+            // A target parked at finalize that has since left draft is set aside.
+            if (!existing_po_id) poPayload = await withoutStaleMergeTarget(t, poPayload);
             const authPayload = await buildAuthoritativePOPayload(poPayload, t);
             const poResult = await draftPO(authPayload, metadata.po_user, t);
             if (poResult?.po_id) { draftedPoIds.push(poResult.po_id); draftedRfqId = metadata.rfq_id; if (poResult.created) createdPoIds.push(poResult.po_id); }

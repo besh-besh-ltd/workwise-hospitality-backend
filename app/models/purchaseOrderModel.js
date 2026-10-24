@@ -18,6 +18,7 @@ import { writePoDocument } from "../services/poDocumentService.js";
 import { notifyApprovalChanged } from '../services/approvalEvents.js';
 import { stripBuyerOnlyPoFields } from '../services/po/buyerOnlyPoFields.js';
 import { closeOpenHoldTx, findOpenHold, heldPoReawardError } from '../services/po/poHold.js';
+import { PoDecisionError } from '../services/po/poDecisionError.js';
 
 // ===========================================================================
 // SECURITY — legacy Purchase Order authorization gate
@@ -766,10 +767,73 @@ function calculatePricing(items) {
 const LINE_VARIANT_FROM_RFQ_PRODUCT =
   `(SELECT rp_v.product_variant_id FROM tbl_rfq_products rp_v WHERE rp_v.id = $2)`;
 
+// ── A merge target the caller chose (existing_po_id) ─────────────────────────
+//
+// finalize and approveQuotes take existing_po_id from the request body. It
+// must name a DRAFT PO of the SAME RFQ for the SAME vendor: the auto-merge
+// criteria below, minus the project/hierarchy match. The RFQ is tenant-scoped
+// by those paths, so a same-RFQ match scopes the PO too. Unknown, foreign,
+// other-vendor and past-draft POs get the same answer, so the refusal never
+// confirms that a PO exists.
+
+export const MERGE_TARGET_INVALID_MESSAGE =
+  "The selected PO can't take this line. Choose a draft purchase order of this RFQ for the same vendor.";
+
+/**
+ * Check a caller-chosen merge target. With `lock`, the PO row is taken FOR
+ * UPDATE (inside the award's transaction).
+ * @returns {Promise<number>} the PO id
+ * @throws PoDecisionError 400 PO_MERGE_TARGET_INVALID
+ */
+export async function assertDraftMergeTarget(dbCtx, { poId, rfqId, vendorId, lock = false }) {
+  const [id, rfq, vendor] = [poId, rfqId, vendorId].map(Number);
+  const refused = () => new PoDecisionError(MERGE_TARGET_INVALID_MESSAGE, { code: 'PO_MERGE_TARGET_INVALID', httpStatus: 400 });
+  if (![id, rfq, vendor].every((n) => Number.isSafeInteger(n) && n > 0 && n <= 2147483647)) throw refused();
+  const row = await dbCtx.oneOrNone(
+    `SELECT id FROM tbl_rfq_purchase_order
+      WHERE id = $1 AND rfq_id = $2 AND finalized_vendor_id = $3 AND status = $4
+      ${lock ? 'FOR UPDATE' : ''}`,
+    [id, rfq, vendor, PO_STATUSES.DRAFT]
+  );
+  if (!row) throw refused();
+  return Number(row.id);
+}
+
+/**
+ * A finalize payload parked in an approval keeps the merge target chosen at
+ * finalize time. If that PO has since left draft (initiated, merged away,
+ * cancelled) by the time the award is approved, the target is set aside and
+ * the line is drafted as if none had been chosen (auto-merge or a new draft):
+ * the approval is already recorded, and refusing now would leave it with no PO.
+ * @returns {Promise<object>} the payload, without existing_po_id when stale
+ */
+export async function withoutStaleMergeTarget(dbCtx, poPayload) {
+  if (!poPayload?.existing_po_id) return poPayload;
+  try {
+    await assertDraftMergeTarget(dbCtx, {
+      poId: poPayload.existing_po_id,
+      rfqId: poPayload.rfq_id,
+      vendorId: poPayload.product_info?.finalized_vendor_id,
+    });
+    return poPayload;
+  } catch (err) {
+    if (!(err instanceof PoDecisionError)) throw err;
+    logger.warn(
+      { rfqId: poPayload.rfq_id, existingPoId: poPayload.existing_po_id },
+      '[draftPO] parked merge target is no longer a draft of this RFQ for the vendor; drafting without it'
+    );
+    const rest = { ...poPayload };
+    delete rest.existing_po_id;
+    return rest;
+  }
+}
+
 export const draftPurchaseOrder = async (rfq_id, project_id, quote_item_id, total_value, product_info, initiated_by, company_id, user, existing_po_id, selected_hierarchy, t, global_charges = [], line_total = null) => {
     try {
       const { rfq_product_id, quantity, unit, unit_price, charges_meta, finalized_vendor_id } =
         product_info;
+      // The caller's choice, before the auto-merge below fills it in itself.
+      const requestedPoId = existing_po_id || null;
       // Per-line total goes onto tbl_purchase_order_product.total_price.
       // Grand total (line + document-level global charges) goes onto
       // tbl_rfq_purchase_order.total_value. When the caller didn't separate
@@ -840,8 +904,12 @@ export const draftPurchaseOrder = async (rfq_id, project_id, quote_item_id, tota
       const created = !existing_po_id;
 
       if(existing_po_id) {
-        if(!(await t.oneOrNone(`SELECT id FROM tbl_rfq_purchase_order WHERE id = $1`, [existing_po_id])))
-          throw new Error("No Purchase Order found from id:", existing_po_id);
+        // A target the caller chose must be this RFQ's draft for this vendor
+        // (the auto-merge target above already is). Locked after the pending
+        // PO above, the same order the auto-merge takes its locks in.
+        if (requestedPoId) {
+          await assertDraftMergeTarget(t, { poId: requestedPoId, rfqId: rfq_id, vendorId: finalized_vendor_id, lock: true });
+        }
 
         po = await t.one(
           `UPDATE tbl_rfq_purchase_order
@@ -864,18 +932,10 @@ export const draftPurchaseOrder = async (rfq_id, project_id, quote_item_id, tota
         )
 
         // Delivery plan (inventory): a plan made before this line existed
-        // cannot carry it. Dropped in the same transaction; the next read, or
-        // the submit for approval, plans every line again. Only before the
-        // vendor has the PO (existing_po_id is the caller's, and a received
-        // delivery cannot be dropped); later, the next read rebuilds a plan
-        // that nothing has been dispatched or received against.
-        await t.none(
-          `DELETE FROM tbl_po_delivery
-            WHERE po_id = $1
-              AND EXISTS (SELECT 1 FROM tbl_rfq_purchase_order
-                           WHERE id = $1 AND status IN ('draft', 'pending_approval'))`,
-          [existing_po_id]
-        );
+        // cannot carry it. Dropped in the same transaction (the target is a
+        // draft, so nothing has been dispatched or received against it); the
+        // next read, or the submit for approval, plans every line again.
+        await t.none(`DELETE FROM tbl_po_delivery WHERE po_id = $1`, [existing_po_id]);
 
         // Re-aggregate the header grand total over ALL lines now on this PO
         // plus the existing snapshot of document-level global_charges. Without

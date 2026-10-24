@@ -65,7 +65,7 @@ import { deleteSchedule } from '../../helper/createSchedule.js';
 import { scheduleRfqPublish } from '../../helper/cronManager.js';
 import { notifyDraftCreated } from '../../services/po/poInitiateNotifier.js';
 import { draftPO, buildAuthoritativePOPayload } from '../po/purchaseOrderController.js';
-import { autoInitiateRFQPOs, assertRfqPoListingAccess, PoAccessError } from '../../models/purchaseOrderModel.js';
+import { autoInitiateRFQPOs, assertRfqPoListingAccess, PoAccessError, assertDraftMergeTarget } from '../../models/purchaseOrderModel.js';
 import { sendApprovalNotification } from '../po/purchaseOrderEmails.js';
 import UsersController from '../users/usersController.js';
 import { summaries } from '../../util/constants.js';
@@ -11931,6 +11931,14 @@ const rfqController = {
             message: 'An active negotiation round is ongoing for this product. Vendor finalization is restricted until the round ends.'
           });
         }
+      }
+
+      // A PO the client chose to merge this line into must be this RFQ's
+      // draft for the awarded vendor. Refused here (400 PO_MERGE_TARGET_INVALID,
+      // via the PoDecisionError branch below), before anything is awarded or
+      // parked in an approval; draftPurchaseOrder re-checks it under lock.
+      if (req.body.existing_po_id) {
+        await assertDraftMergeTarget(db, { poId: req.body.existing_po_id, rfqId: rfq_id, vendorId: vendor_id });
       }
 
       // ---------------------------------------------------------------------
