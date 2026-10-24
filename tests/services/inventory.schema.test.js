@@ -23,6 +23,10 @@ const BACKFILL_FILE = path.resolve(
   __dirname,
   "../../migrations/20261024100500_po_receipt_backfill.sql"
 );
+const PERMISSIONS_FILE = path.resolve(
+  __dirname,
+  "../../migrations/20261024100400_inventory_permissions.sql"
+);
 
 const INVENTORY_PERMISSIONS = [
   "grn.approve",
@@ -59,6 +63,49 @@ function backfillBlock() {
   const m = sql.match(/^-- backfill[ \t]*$([\s\S]*?)^-- end backfill[ \t]*$/m);
   if (!m) throw new Error(`no '-- backfill' … '-- end backfill' block in ${BACKFILL_FILE}`);
   return m[1];
+}
+
+/**
+ * Step 4 of the permissions migration (every awarding.create holder gains
+ * grn.read + grn.create), without the file's BEGIN/COMMIT.
+ */
+function dayOneGrantBlock() {
+  const sql = fs.readFileSync(PERMISSIONS_FILE, "utf8");
+  const m = sql.match(/^-- Step 4:[^\n]*\n([\s\S]*?)^COMMIT;/m);
+  if (!m) throw new Error(`no '-- Step 4:' … 'COMMIT;' block in ${PERMISSIONS_FILE}`);
+  return m[1];
+}
+
+/** Ids of roles holding awarding.create, narrowed by an extra predicate on r. */
+async function awardingCreateHolders(conn, where, params = []) {
+  const rows = await conn.any(
+    `SELECT DISTINCT r.id
+       FROM tbl_roles r
+       JOIN tbl_role_permissions rp ON rp.role_id = r.id
+       JOIN tbl_permissions p ON p.id = rp.permission_id
+      WHERE p.resource::text = 'awarding' AND p.action::text = 'create'
+        AND ${where}
+      ORDER BY r.id`,
+    params
+  );
+  return rows.map((r) => r.id);
+}
+
+/** (role, action) pairs among roleIds that lack grn.read or grn.create. */
+async function rolesMissingGrnReceive(conn, roleIds) {
+  return conn.any(
+    `SELECT r.id, need.action
+       FROM tbl_roles r
+       CROSS JOIN (VALUES ('read'), ('create')) AS need(action)
+      WHERE r.id = ANY($1::int[])
+        AND NOT EXISTS (
+          SELECT 1 FROM tbl_role_permissions rp
+            JOIN tbl_permissions p ON p.id = rp.permission_id
+           WHERE rp.role_id = r.id
+             AND p.resource::text = 'grn'
+             AND p.action::text = need.action)`,
+    [roleIds]
+  );
 }
 
 /** Permission strings held by the single SYSTEM role with this title. */
@@ -183,31 +230,36 @@ describe("inventory permissions and roles", () => {
   });
 
   it("PO initiator roles can receive", async () => {
-    const initiators = await db.any(
-      `SELECT DISTINCT r.id, r.created_by
-         FROM tbl_roles r
-         JOIN tbl_role_permissions rp ON rp.role_id = r.id
-         JOIN tbl_permissions p ON p.id = rp.permission_id
-        WHERE p.resource::text = 'awarding' AND p.action::text = 'create'`
-    );
-    // Sanity: the seed has awarding.create holders, system AND company-created.
-    expect(initiators.length).toBeGreaterThan(0);
-    expect(initiators.some((r) => r.created_by != null)).toBe(true);
+    // Only roles this test controls: the seed's SYSTEM roles (present when the
+    // migration ran) and one company-created role made below. Company roles
+    // that other suites commit later never got the one-time grant, so counting
+    // them would make this test depend on suite order.
+    await withTx(async (t) => {
+      const systemInitiators = await awardingCreateHolders(t, "r.created_by IS NULL");
+      expect(systemInitiators.length).toBeGreaterThan(0);
+      expect(await rolesMissingGrnReceive(t, systemInitiators)).toEqual([]);
 
-    const missing = await db.any(
-      `SELECT r.id, need.action
-         FROM tbl_roles r
-         CROSS JOIN (VALUES ('read'), ('create')) AS need(action)
-        WHERE r.id = ANY($1::int[])
-          AND NOT EXISTS (
-            SELECT 1 FROM tbl_role_permissions rp
-              JOIN tbl_permissions p ON p.id = rp.permission_id
-             WHERE rp.role_id = r.id
-               AND p.resource::text = 'grn'
-               AND p.action::text = need.action)`,
-      [initiators.map((r) => r.id)]
-    );
-    expect(missing).toEqual([]);
+      // A company-created PO initiator, then the migration's day-one grant as it
+      // runs on a database that holds such a role.
+      const custom = await t.one(
+        `INSERT INTO tbl_roles (title, description, created_by)
+         VALUES ('Schema test PO initiator', 'company-created awarding.create holder', $1)
+         RETURNING id`,
+        [IDS.users.companyA_admin]
+      );
+      await t.none(
+        `INSERT INTO tbl_role_permissions (role_id, permission_id)
+         SELECT $1, id FROM tbl_permissions
+          WHERE resource::text = 'awarding' AND action::text = 'create'`,
+        [custom.id]
+      );
+      expect(await rolesMissingGrnReceive(t, [custom.id])).toHaveLength(2);
+
+      await t.none(dayOneGrantBlock());
+
+      expect(await awardingCreateHolders(t, "r.id = $1", [custom.id])).toEqual([custom.id]);
+      expect(await rolesMissingGrnReceive(t, [custom.id])).toEqual([]);
+    });
   });
 });
 
