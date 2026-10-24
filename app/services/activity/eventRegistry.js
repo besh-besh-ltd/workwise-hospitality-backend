@@ -841,8 +841,9 @@ export const EVENTS = [
   e({
     method: 'POST', path: '/inventory/grn', key: 'inventory_grn_created',
     category: CATEGORIES.RECEIPT, severity: 'notable',
-    entity: { type: 'GRN', id: R() }, scope: SCOPE.detail(),
-    // post:true creates and posts in one request: logged as the posting.
+    entity: { type: 'GRN', id: R() }, scope: SCOPE.detail(), requireDetail: true,
+    // post:true creates and posts in one request: logged as the posting. A
+    // replayed clientEventId changes nothing: no detail, so no second row.
     summary: (c) => `${c.actor} ${c.detail?.posted ? 'posted' : 'started a'} goods receipt note${c.entityLabel ? ` ${c.entityLabel}` : ''}`,
   }),
   e({
@@ -854,7 +855,7 @@ export const EVENTS = [
   e({
     method: 'POST', path: '/inventory/grn/:id/post', key: 'inventory_grn_posted',
     category: CATEGORIES.RECEIPT, severity: 'critical',
-    entity: { type: 'GRN', id: P('id') }, scope: SCOPE.detail(),
+    entity: { type: 'GRN', id: P('id') }, scope: SCOPE.detail(), requireDetail: true, // none on a replay
     summary: (c) => `${c.actor} posted goods receipt note${c.entityLabel ? ` ${c.entityLabel}` : ''}`,
   }),
   e({
