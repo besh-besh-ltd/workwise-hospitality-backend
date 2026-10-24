@@ -19,6 +19,8 @@ import { httpClient } from "../helpers/http.js";
 import s3Client from "../../app/config/s3config.js";
 import { generateReceiveToken } from "../../app/helper/receiveToken.js";
 import { COMMERCIAL_KEY } from "../../app/helper/receiveTokenView.js";
+import { resolveItemForVariant } from "../../app/services/inventory/items.js";
+import { getUncataloguedRoutes } from "../../app/middleware/activityCapture.js";
 import {
   receiveTokenLimiter,
   createRequestLimiter,
@@ -45,6 +47,8 @@ let nextVariantIdx = 0;
 let TODAY;
 let initiatorEmail;
 let adminName;
+let catVariant; // a catalogue variant with a category, kept out of `variants`
+let catCategory;
 const prevUserType = {};
 
 // Count S3 writes, to prove a refused upload stores nothing.
@@ -53,7 +57,15 @@ let s3Puts = 0;
 
 beforeAll(async () => {
   await truncateDynamic();
-  variants = (await db.any(`SELECT id FROM tbl_product_variant ORDER BY id DESC LIMIT 60`)).map((r) => Number(r.id));
+  const cat = await db.one(
+    `SELECT pv.id, pc.category_id FROM tbl_product_variant pv
+       JOIN tbl_product_categories pc ON pc.product_id = pv.product_id
+      WHERE pc.category_id IS NOT NULL ORDER BY pv.id LIMIT 1`
+  );
+  catVariant = Number(cat.id);
+  catCategory = Number(cat.category_id);
+  variants = (await db.any(`SELECT id FROM tbl_product_variant WHERE id <> $1 ORDER BY id DESC LIMIT 60`, [catVariant]))
+    .map((r) => Number(r.id));
   TODAY = (await db.one(`SELECT (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Kolkata')::date::text AS d`)).d;
   for (const id of [ADMIN, VENDOR]) {
     prevUserType[id] = await db.one(`SELECT user_type, status FROM tbl_users WHERE id = $1`, [id]);
@@ -124,7 +136,7 @@ async function makePo({ hotel = A1, mappedHotels = [], lines = [{ qty: 10, price
   const lineIds = [];
   const lineVariants = [];
   for (const l of lines) {
-    const variant = nextVariant();
+    const variant = l.variant ?? nextVariant();
     const rp = await db.one(
       `INSERT INTO tbl_rfq_products (rfq_id, comment, datasheet, spec_file, qap_file, qap, product_variant_id, variant)
        VALUES ($1, '', '', '', '', '', $2, 0) RETURNING id`,
@@ -210,6 +222,25 @@ function expectNoPrices(body) {
   for (const leak of [String(PRICE_A), String(PRICE_B), initiatorEmail, adminName]) {
     expect(text).not.toContain(leak);
   }
+}
+
+/**
+ * A PO whose first line needs a unit conversion (stock item kept in "piece",
+ * PO unit "kg", no conversion) and whose second line's category marks it out
+ * on arrival by default.
+ */
+async function conversionAndMarkOutPo() {
+  const po = await makePo({ lines: [{ qty: 10, price: PRICE_A }, { qty: 6, price: PRICE_B, variant: catVariant }] });
+  const item = await db.tx((t) => resolveItemForVariant(t, {
+    companyId: CO, productVariantId: po.variants[0], createIfMissing: true, userId: ADMIN, defaultUom: "piece",
+  }));
+  await db.none(
+    `INSERT INTO tbl_inv_category_default (hospitality_company_id, category_id, default_mark_out_on_arrival)
+     VALUES ($1, $2, true) ON CONFLICT (hospitality_company_id, category_id) DO UPDATE SET default_mark_out_on_arrival = true`,
+    [CO, catCategory]
+  );
+  const productName = (await db.one(`SELECT name FROM tbl_product_variant WHERE id = $1`, [po.variants[0]])).name;
+  return { ...po, itemId: Number(item.id), productName };
 }
 
 async function balanceOf(hotelId, variant) {
@@ -301,6 +332,27 @@ describe("token receive context", () => {
   });
 });
 
+describe("token receive context: receiving only", () => {
+  it("flags lines that need a unit conversion and offers no mark-out", async () => {
+    const { poId, lineIds } = await conversionAndMarkOutPo();
+    const { token } = await issueToken(poId);
+
+    // The buyer's own screen does offer mark-out for the second line.
+    const buyer = await admin.get(`/api/v1/inventory/receive/po/${poId}`).query({ hotelId: A1 });
+    expect(buyer.status).toBe(200);
+    expect(buyer.body.data.lines.map((l) => l.defaultMarkOutOnArrival)).toEqual([false, true]);
+    expect(buyer.body.data.departments.length).toBeGreaterThan(0);
+
+    const res = await getContext(token);
+    expect(res.status).toBe(200);
+    expect(res.body.data.lines.map((l) => [l.poLineId, l.needsUomFactor, l.defaultMarkOutOnArrival])).toEqual([
+      [lineIds[0], true, false],
+      [lineIds[1], false, false],
+    ]);
+    expect(res.body.data.departments).toEqual([]);
+  });
+});
+
 // ---------------------------------------------------------------------------
 // posting
 // ---------------------------------------------------------------------------
@@ -331,12 +383,17 @@ describe("token receipts", () => {
       actor_label: expect.stringContaining("Ravi"),
     });
 
-    // A dropped connection replays: the same GRN, nothing posted twice.
+    // A dropped connection replays: the same GRN, nothing posted twice, and
+    // nothing new in the trail (no second row, no "unscoped" catalogue gap).
     const replay = await postReceipt(token, body);
     expect(replay.status).toBe(200);
     expect(replay.body.data.id).toBe(res.body.data.id);
     expect(await grnRows(poId)).toHaveLength(1);
     expect(await balanceOf(A2, v)).toBe(4);
+    await new Promise((r) => setTimeout(r, 500)); // the capture runs after the response
+    expect(getUncataloguedRoutes().filter((g) => g.route.includes("/inventory/token/grn"))).toEqual([]);
+    expect((await db.any(`SELECT 1 FROM tbl_activity_events WHERE entity_type = 'GRN' AND entity_id = $1`, [res.body.data.id])))
+      .toHaveLength(1);
 
     // A link records receipts; it never parks a draft.
     const asDraft = await postReceipt(token, { ...receipt([line(l1, 1)]), post: false });
@@ -353,6 +410,54 @@ describe("token receipts", () => {
     expect(refused.status).toBe(409);
     expect(await grnRows(poId)).toHaveLength(1);
     expect(await balanceOf(A1, v)).toBe(0);
+  });
+
+  it("refuses mark-out, item mapping and lines that need a unit conversion", async () => {
+    const { poId, lineIds: [needsUom, markOutLine], variants: [, v2], itemId, productName } = await conversionAndMarkOutPo();
+    const { token } = await issueToken(poId);
+
+    const uom = await postReceipt(token, receipt([line(needsUom, 2)]));
+    expect(uom.status).toBe(400);
+    expect(uom.body).toMatchObject({
+      code: "VALIDATION",
+      message: `Ask the buyer to set the unit conversion for ${productName} first`,
+      details: { code_detail: "UOM_FACTOR_REQUIRED", poLineId: needsUom, index: 0, field: "uomFactor" },
+    });
+    // A link cannot set the conversion either: its uomFactor is ignored.
+    const withFactor = await postReceipt(token, receipt([line(markOutLine, 1), line(needsUom, 2, 0, { uomFactor: 12 })]));
+    expect(withFactor.status).toBe(400);
+    expect(withFactor.body.details).toMatchObject({ code_detail: "UOM_FACTOR_REQUIRED", poLineId: needsUom, index: 1 });
+    expect(await db.any(`SELECT 1 FROM tbl_inv_item_uom WHERE inv_item_id = $1`, [itemId])).toEqual([]);
+
+    const markOut = await postReceipt(token, receipt([line(markOutLine, 2, 0, { markOutDepartmentId: IDS.departments.fb })]));
+    expect(markOut.status).toBe(400);
+    expect(markOut.body).toMatchObject({
+      code: "VALIDATION",
+      message: "Mark-out isn't available from a receive link",
+      details: { field: "markOutDepartmentId", index: 0, poLineId: markOutLine, code_detail: "MARK_OUT_NOT_ALLOWED" },
+    });
+    const onArrival = await postReceipt(token, receipt([line(markOutLine, 2, 0, { markOutOnArrival: true })]));
+    expect(onArrival.status).toBe(400);
+    expect(onArrival.body.message).toBe("Mark-out isn't available from a receive link");
+    const headerFlag = await postReceipt(token, { ...receipt([line(markOutLine, 2)]), markOutOnArrival: true });
+    expect(headerFlag.status).toBe(400);
+
+    const mapped = await postReceipt(token, receipt([line(markOutLine, 2, 0, { mapToInvItemId: itemId })]));
+    expect(mapped.status).toBe(400);
+    expect(mapped.body.details).toMatchObject({ field: "mapToInvItemId", code_detail: "MAPPING_NOT_ALLOWED" });
+
+    expect(await grnRows(poId)).toEqual([]);
+
+    // Received plainly, the marked-out-by-default line stays in the store.
+    const ok = await postReceipt(token, receipt([line(markOutLine, 2)]));
+    expect(ok.status).toBe(201);
+    expect(ok.body.data.lines[0]).toMatchObject({ markOutDepartmentId: null });
+    const moves = await db.any(
+      `SELECT movement_type FROM tbl_inv_movement WHERE source_type = 'GRN' AND source_id = $1 ORDER BY id`,
+      [ok.body.data.id]
+    );
+    expect(moves.map((m) => m.movement_type)).toEqual(["GRN_IN"]);
+    expect(await balanceOf(A1, v2)).toBe(2);
   });
 
   it("a fully received PO still answers 200 (receivable:false) and takes paperwork for 24 hours", async () => {
@@ -495,12 +600,14 @@ describe("token rate limit", () => {
       const res = await getContext(busy.token);
       expect([i, res.status]).toEqual([i, 200]);
     }
-    const capped = await getContext(busy.token);
+    const capped = await getContext(busy.token).set("Origin", "http://localhost:3000");
     expect(capped.status).toBe(429);
     expect(capped.body).toMatchObject({ status: 0, code: "RATE_LIMITED" });
     const retryAfter = Number(capped.headers["retry-after"]);
     expect(retryAfter).toBeGreaterThan(0);
     expect(retryAfter).toBeLessThanOrEqual(600);
+    // ...and the page's cross-origin JS may read it.
+    expect(capped.headers["access-control-expose-headers"]).toMatch(/(^|,\s*)Retry-After(\s*,|$)/i);
 
     // The same budget covers posting, attaching and the legacy token path.
     expect((await postReceipt(busy.token, receipt([line(l1, 1)]))).status).toBe(429);

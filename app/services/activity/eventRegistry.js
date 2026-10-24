@@ -930,7 +930,7 @@ export const EVENTS = [
   e({
     method: 'POST', path: '/inventory/token/grn', key: 'inventory_token_grn_created',
     category: CATEGORIES.RECEIPT, severity: 'notable',
-    entity: { type: 'GRN', id: R() }, scope: SCOPE.detail(),
+    entity: { type: 'GRN', id: R() }, scope: SCOPE.detail(), requireDetail: true, // none on a replay
     summary: (c) => `${c.actor} recorded a goods receipt through a site link${c.entityLabel ? ` ${c.entityLabel}` : ''}`,
   }),
   e({

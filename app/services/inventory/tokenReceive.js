@@ -11,6 +11,15 @@
 // Every payload passes through redactForReceiveToken (no price, cost, value,
 // tax or buyer-contact key at any depth). Drafts are not offered to a token:
 // it posts straight away, and the buyer's drafts at the hotel stay hidden.
+//
+// A link only receives (spec §10.3: "the token path is not extended to
+// mark-out or counts"), and never edits the buyer's stock catalogue:
+//   - no mark-out on arrival: the context offers no departments and no
+//     mark-out default, and a line asking for one is refused;
+//   - no item mapping (refused) and no unit conversions: a supplied uomFactor
+//     is ignored, the buyer's stored conversion always applies, and a line
+//     without one (needsUomFactor in the context) is refused with
+//     UOM_FACTOR_REQUIRED "Ask the buyer to set the unit conversion …".
 
 import { InventoryError } from './errors.js';
 import {
@@ -21,7 +30,7 @@ import {
   attachmentUrl,
   SITE_REP_ACTOR,
 } from './grnService.js';
-import { getPoContext } from './planCore.js';
+import { getPoContext, listPoLines } from './planCore.js';
 import { RECEIVE_TOKEN_TTL_DAYS } from '../../helper/receiveToken.js';
 import { redactForReceiveToken } from '../../helper/receiveTokenView.js';
 
@@ -56,6 +65,55 @@ function notReceivableReason(err) {
   if (err?.details?.receiptStatus === 'received') return 'received';
   if (err?.details?.receiptStatus === 'closed_short') return 'closed_short';
   return 'not_ready';
+}
+
+const present = (v) => v != null && v !== '';
+
+/**
+ * The receipt as a link may send it: refuses mark-out and item mapping, drops
+ * uomFactor (a link never sets or changes a conversion).
+ */
+function linkLines(input) {
+  if (input.markOutOnArrival === true) {
+    throw new InventoryError('VALIDATION', "Mark-out isn't available from a receive link", {
+      field: 'markOutOnArrival', code_detail: 'MARK_OUT_NOT_ALLOWED',
+    });
+  }
+  const lines = Array.isArray(input.lines) ? input.lines : [];
+  return lines.map((l, index) => {
+    const poLineId = positiveInt(l?.poLineId);
+    if (present(l?.markOutDepartmentId) || l?.markOutOnArrival === true) {
+      throw new InventoryError('VALIDATION', "Mark-out isn't available from a receive link", {
+        field: 'markOutDepartmentId', index, poLineId, code_detail: 'MARK_OUT_NOT_ALLOWED',
+      });
+    }
+    if (present(l?.mapToInvItemId)) {
+      throw new InventoryError('VALIDATION', 'Only the buyer can link a line to a stock item', {
+        field: 'mapToInvItemId', index, poLineId, code_detail: 'MAPPING_NOT_ALLOWED',
+      });
+    }
+    const rest = { ...(l || {}) };
+    delete rest.uomFactor;
+    delete rest.markOutOnArrival;
+    return rest;
+  });
+}
+
+const isUomFactorRequired = (err) =>
+  err instanceof InventoryError && err.code === 'VALIDATION' && err.details?.code_detail === 'UOM_FACTOR_REQUIRED';
+
+/** B1's "set the conversion" refusal, worded for someone who cannot set it. */
+async function uomRefusalForLink(t, poId, lines, err) {
+  const poLineId = positiveInt(err.details?.poLineId);
+  const poLine = (await listPoLines(t, poId)).find((l) => l.id === poLineId);
+  const productName = poLine?.productName ?? 'this item';
+  const index = lines.findIndex((l) => positiveInt(l?.poLineId) === poLineId);
+  return new InventoryError('VALIDATION', `Ask the buyer to set the unit conversion for ${productName} first`, {
+    ...err.details,
+    field: 'uomFactor',
+    index: index >= 0 ? index : undefined,
+    productName,
+  });
 }
 
 const isNotReceivable = (err) =>
@@ -186,6 +244,9 @@ export async function getTokenReceiveContext(t, receiveToken) {
   }
   return redactForReceiveToken({
     ...out,
+    // No mark-out from a link: no default to pre-fill, no departments to pick.
+    lines: out.lines.map((l) => ({ ...l, defaultMarkOutOnArrival: false })),
+    departments: [],
     // Mapping a line to a stock item needs inventory.update, which a link never has.
     itemSuggestions: {},
     // Drafts at the hotel are the buyer's work in progress, not the link's.
@@ -214,7 +275,8 @@ async function tokenGrnView(t, grn) {
  *
  * @param {object} t transaction
  * @param {{tokenId:number, poId:number, hotelId:number|null}} receiveToken
- * @param {object} input GrnInput (poId optional, hotelId ignored, post must not be false)
+ * @param {object} input GrnInput (poId optional, hotelId ignored, post must not be
+ *   false, no markOutDepartmentId / mapToInvItemId, uomFactor ignored)
  * @returns {Promise<{grn:object, replayed:boolean, activity:{companyId, hotelId, grnNumber, grnId}}>}
  */
 export async function postTokenGrn(t, receiveToken, input = {}) {
@@ -225,13 +287,22 @@ export async function postTokenGrn(t, receiveToken, input = {}) {
     });
   }
   if (input.poId != null && input.poId !== '' && positiveInt(input.poId) !== poId) throw notFound();
+  const lines = linkLines(input);
 
-  const result = await postGrn(
-    t,
-    SITE_REP_ACTOR,
-    { input: { ...input, poId, hotelId, post: true } },
-    { viaToken }
-  );
+  let result;
+  try {
+    result = await postGrn(
+      t,
+      SITE_REP_ACTOR,
+      { input: { ...input, lines, poId, hotelId, post: true } },
+      { viaToken }
+    );
+  } catch (err) {
+    // A refusal thrown in JS leaves the transaction usable for the name
+    // lookup; rethrowing rolls back anything postGrn wrote.
+    if (isUomFactorRequired(err)) throw await uomRefusalForLink(t, poId, lines, err);
+    throw err;
+  }
   const { grn } = result;
   // A replay can only ever return a receipt this link posted.
   if (Number(grn.receivedByTokenId) !== tokenId) {
