@@ -14,7 +14,16 @@
 //     Nothing is written: no finalization, no PO, no PO line, no parked approval.
 //   - a parked finalize payload is bound again before its approval is recorded,
 //     on both approval surfaces (approveQuotes and the approval engine).
-//   - submit-for-approval only accepts round quotes of this RFQ and product.
+//   - submit-for-approval only accepts round quotes of this RFQ and product
+//     (an older round quote with no product of its own counts as its round's).
+//   - a selected_quotes award parked by submit-for-approval is bound again at
+//     approval too: an instance parked before the round-quote ids were scoped
+//     can carry another company's round quote.
+//   - the approval engine binds only for an approver who can act: anyone else
+//     gets "not an approver", whether the award binds or not.
+//   - an award refused after its approval committed (auto-completion) leaves a
+//     NEGOTIATION_QUOTES_APPROVED_NO_PO row on the timeline; no PO line is ever
+//     priced from the request body.
 //   - finalize refuses a same-company buyer outside the RFQ's hotel or
 //     department (403), and no scope refusal echoes the refused record's ids.
 //
@@ -25,6 +34,9 @@ import { db, closeDb } from "../setup/db.js";
 import { IDS } from "../fixtures/ids.js";
 import { httpClient } from "../helpers/http.js";
 import { createApprovalInstance } from "../../app/models/generalModel.js";
+import { handleAutoCompletedInstances } from "../../app/services/approvalPropagationService.js";
+import { buildAuthoritativePOPayload } from "../../app/controllers/po/purchaseOrderController.js";
+import { AuthorizationError } from "../../app/services/authorizationService.js";
 
 const BUYER = IDS.users.a1_proc_buyer;           // A-1 procurement
 const APPROVER = IDS.users.a1_proc_commApp;      // the A1/P1 NEGOTIATION_QUOTE approver
@@ -202,6 +214,51 @@ const NOTHING = { finalizations: [], pos: [], lines: [], approvals: [] };
 const NOT_FOUND = { status: 0, code: "AWARD_QUOTE_NOT_FOUND" };
 const MISMATCH = { status: 0, code: "AWARD_QUOTE_MISMATCH" };
 
+const instanceStatus = async (id) => (await db.one(`SELECT status FROM tbl_approval_instances WHERE id = $1`, [id])).status;
+const approveQuotes = async (product, userId = APPROVER) => (await httpClient(userId))
+  .post(`/api/v1/negotiation/quotes/${product.rfqProductId}/approve`).send({ remarks: "approving" });
+const engineApprove = async (instanceId, userId = APPROVER) => (await httpClient(userId))
+  .post("/api/v1/general/hospitality/approval/action")
+  .send({ approval_instance_id: instanceId, action: "APPROVE", comment: "approving" });
+
+/** A COMPLETED negotiation round on `product` and `vendor`'s quote in it. `legacy`: the quote names no product (older rows). */
+async function addRoundQuote(rfq, product, { vendor = ALPHA, price = 300, creator = BUYER, legacy = false } = {}) {
+  const round = await db.one(
+    `INSERT INTO tbl_negotiation_rounds
+       (rfq_id, round_number, end_date, status, created_by, source_type, source_id, rfq_product_id)
+     VALUES ($1, 1, (now() AT TIME ZONE 'UTC') - interval '1 hour', 'COMPLETED', $2, 'RFQ', $1, $3)
+     RETURNING id`,
+    [rfq.rfqId, creator, product.rfqProductId]
+  );
+  const quote = await db.one(
+    `INSERT INTO tbl_negotiation_round_quotes (negotiation_round_id, vendor_id, rfq_product_id, quoted_price, submitted_at)
+     VALUES ($1, $2, $3, $4, NOW()) RETURNING id`,
+    [round.id, vendor, legacy ? null : product.rfqProductId, price]
+  );
+  return { roundId: Number(round.id), roundQuoteId: Number(quote.id), vendor, price };
+}
+
+/** A NEGOTIATION_QUOTE approval parked by submit-for-approval for `product`, with these selected_quotes. */
+async function parkedSelection(rfq, product, selectedQuotes) {
+  const result = await createApprovalInstance({
+    entity_type: "NEGOTIATION_QUOTE",
+    entity_id: product.rfqProductId,
+    hospitality_company_id: IDS.hospitality.A,
+    hotel_id: IDS.hotels.A1,
+    department_id: null,
+    process_id: IDS.processes.A_P1,
+    initiated_by: BUYER,
+    metadata: {
+      rfq_id: rfq.rfqId, rfq_number: rfq.rfqNo, rfq_title: "quote binding fixture",
+      rfq_product_id: product.rfqProductId, is_tender: 0,
+      selected_quotes: selectedQuotes,
+      submitted_at: new Date().toISOString(),
+    },
+  });
+  expect(result.instance.status).toBe("PENDING");
+  return result.instance.id;
+}
+
 // ---- finalize -----------------------------------------------------------------
 
 describe("POST /rfq/finalize binds the quote line to the gated RFQ", () => {
@@ -223,6 +280,27 @@ describe("POST /rfq/finalize binds the quote line to the gated RFQ", () => {
     expect(JSON.stringify(res.body)).not.toContain("777");
     expect(await trail(rfq)).toEqual(NOTHING);
     expect(await trail(rfqB)).toEqual(NOTHING);
+  });
+
+  it("answers an unknown quote line id with exactly the body it gives another company's", async () => {
+    const rfq = await makeRfq();
+    const product = await addProduct(rfq);
+    const own = await addQuote(rfq, product);
+    const rfqB = await makeRfq({ company: "B" });
+    const foreign = await addQuote(rfqB, await addProduct(rfqB), ALPHA, 777);
+    const { unknown } = await db.one(`SELECT COALESCE(MAX(id), 0) + 100000 AS unknown FROM tbl_quote_items`);
+
+    const foreignRes = await finalize(BUYER, finalizeBody(rfq, product, own, {
+      quote_id: foreign.quoteId, quote_item_id: foreign.quoteItemId,
+    }));
+    const unknownRes = await finalize(BUYER, finalizeBody(rfq, product, own, {
+      quote_id: Number(unknown), quote_item_id: Number(unknown),
+    }));
+
+    expect(unknownRes.status).toBe(foreignRes.status);
+    expect(unknownRes.body).toEqual(foreignRes.body);
+    expect(foreignRes.body).toMatchObject(NOT_FOUND);
+    expect(await trail(rfq)).toEqual(NOTHING);
   });
 
   it("refuses this company's quote line from a different RFQ with the same 404", async () => {
@@ -344,13 +422,6 @@ describe("a parked finalize payload is bound again before its approval is record
     expect(result.instance.status).toBe("PENDING");
     return result.instance.id;
   }
-  const instanceStatus = async (id) => (await db.one(`SELECT status FROM tbl_approval_instances WHERE id = $1`, [id])).status;
-  const approveQuotes = async (product) => (await httpClient(APPROVER))
-    .post(`/api/v1/negotiation/quotes/${product.rfqProductId}/approve`).send({ remarks: "approving" });
-  const engineApprove = async (instanceId) => (await httpClient(APPROVER))
-    .post("/api/v1/general/hospitality/approval/action")
-    .send({ approval_instance_id: instanceId, action: "APPROVE", comment: "approving" });
-
   /** A parked award of `rfq` whose quote line was swapped for company B's. */
   async function tamperedAward() {
     const rfq = await makeRfq();
@@ -418,6 +489,45 @@ describe("a parked finalize payload is bound again before its approval is record
     expect(await instanceStatus(instanceId)).toBe("APPROVED");
     expect((await trail(rfq)).lines).toHaveLength(1);
   });
+
+  it("the engine tells a non-approver from another company only that they are not an approver, whether the payload binds or not", async () => {
+    const tampered = await tamperedAward();
+    const rfq = await makeRfq();
+    const product = await addProduct(rfq);
+    const bound = await parkedAward(rfq, product, await addQuote(rfq, product));
+
+    const onTampered = await engineApprove(tampered.instanceId, OTHER_COMPANY);
+    const onBound = await engineApprove(bound, OTHER_COMPANY);
+
+    expect(onTampered.status).toBe(400);
+    expect(onTampered.body).toEqual({ status: 3, message: "User is not an approver for this step" });
+    expect(onBound.status).toBe(onTampered.status);
+    expect(onBound.body).toEqual(onTampered.body);
+    expect(await instanceStatus(tampered.instanceId)).toBe("PENDING");
+    expect(await instanceStatus(bound)).toBe("PENDING");
+  });
+
+  it("a payload refused after its approval auto-completed drafts nothing and says so on the RFQ timeline", async () => {
+    const { rfq, instanceId } = await tamperedAward();
+    // approvalPropagationService completes an instance whose remaining steps
+    // a policy or membership change emptied, then runs the post-approval
+    // handler: no approval surface (and so no pre-flight) is involved.
+    await db.none(`UPDATE tbl_approval_instances SET status = 'APPROVED', completed_at = NOW() WHERE id = $1`, [instanceId]);
+
+    await handleAutoCompletedInstances([instanceId], APPROVER, "policy change");
+
+    expect(await trail(rfq)).toMatchObject({ finalizations: [], pos: [], lines: [] });
+    const events = await db.any(
+      `SELECT entity_type, stage, metadata FROM tbl_lifecycle_history
+        WHERE entity_id = $1 AND stage = 'NEGOTIATION_QUOTES_APPROVED_NO_PO'`,
+      [rfq.rfqId]
+    );
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({
+      entity_type: "RFQ",
+      metadata: { approval_instance_id: instanceId, reason: "AWARD_QUOTE_NOT_FOUND" },
+    });
+  });
 });
 
 // ---- submit-for-approval ----------------------------------------------------------
@@ -451,6 +561,155 @@ describe("POST /negotiation/quotes/submit-for-approval binds round quotes to the
     expect(res.status).toBe(400);
     expect(res.body).toMatchObject({ status: 2, message: "One or more quote IDs are invalid or do not belong to this product" });
     expect(await trail(rfq)).toEqual(NOTHING);
+  });
+});
+
+describe("a legitimate negotiation-round award still goes through submit and approval", () => {
+  it("accepts this product's round quotes, including an older one that names no product, and awards the vendor", async () => {
+    const rfq = await makeRfq();
+    const current = await addProduct(rfq, { variant: 0 });
+    const legacyProduct = await addProduct(rfq, { variant: 1 });
+    await addQuote(rfq, current, ALPHA, 100);
+    await addQuote(rfq, legacyProduct, ALPHA, 100);
+    const currentQuote = await addRoundQuote(rfq, current);
+    const legacyQuote = await addRoundQuote(rfq, legacyProduct, { legacy: true });
+    const submit = async (product, roundQuote) => (await httpClient(BUYER))
+      .post("/api/v1/negotiation/quotes/submit-for-approval").send({
+        rfq_id: rfq.rfqId, rfq_product_id: product.rfqProductId,
+        quote_ids: [roundQuote.roundQuoteId], quote_source: "negotiation", remarks: "submitting",
+      });
+
+    const currentRes = await submit(current, currentQuote);
+    const legacyRes = await submit(legacyProduct, legacyQuote);
+
+    for (const res of [currentRes, legacyRes]) {
+      expect(res.status).toBe(200);
+      expect(res.body.status).toBe(1);
+      expect(res.body.data.status).toBe("PENDING");
+    }
+    const approved = await approveQuotes(legacyProduct);
+    expect(approved.status).toBe(200);
+    expect(approved.body.status).toBe(1);
+    expect(await instanceStatus(legacyRes.body.data.approval_instance_id)).toBe("APPROVED");
+    const fin = await db.any(
+      `SELECT vendor_id, quote_id FROM tbl_quote_finalization WHERE rfq_id = $1 AND variant = $2`,
+      [rfq.rfqId, legacyProduct.variant]
+    );
+    expect(fin).toEqual([{ vendor_id: ALPHA, quote_id: legacyQuote.roundQuoteId }]);
+    expect((await trail(rfq)).lines).toHaveLength(1);
+  });
+});
+
+describe("a selected_quotes award parked before submit was scoped is bound again at approval", () => {
+  /** Company B's completed round on its own RFQ, with ALPHA's quote at 777. */
+  async function foreignRoundQuote() {
+    const rfqB = await makeRfq({ company: "B" });
+    const productB = await addProduct(rfqB);
+    return addRoundQuote(rfqB, productB, { price: 777, creator: OTHER_COMPANY });
+  }
+  const entry = (quoteId, extra = {}) => ({
+    quote_id: quoteId, vendor_id: ALPHA, vendor_name: "Alpha", quoted_price: 777, submitted_at: null, ...extra,
+  });
+
+  it("approveQuotes refuses another company's round quote: nothing approved, nothing awarded", async () => {
+    const rfq = await makeRfq();
+    const product = await addProduct(rfq);
+    await addQuote(rfq, product);
+    const foreign = await foreignRoundQuote();
+    const instanceId = await parkedSelection(rfq, product, [
+      entry(foreign.roundQuoteId, { negotiation_round_id: foreign.roundId }),
+    ]);
+
+    const res = await approveQuotes(product);
+
+    expect(res.status).toBe(404);
+    expect(res.body).toMatchObject(NOT_FOUND);
+    expect(JSON.stringify(res.body)).not.toContain("777");
+    expect(await instanceStatus(instanceId)).toBe("PENDING");
+    expect(await db.any(`SELECT id FROM tbl_approval_actions WHERE approval_instance_id = $1`, [instanceId])).toEqual([]);
+    expect(await trail(rfq)).toMatchObject({ finalizations: [], pos: [], lines: [] });
+  });
+
+  it("the approval engine refuses it too, before recording the approval", async () => {
+    const rfq = await makeRfq();
+    const product = await addProduct(rfq);
+    const foreign = await foreignRoundQuote();
+    const instanceId = await parkedSelection(rfq, product, [
+      entry(foreign.roundQuoteId, { negotiation_round_id: foreign.roundId }),
+    ]);
+
+    const res = await engineApprove(instanceId);
+
+    expect(res.status).toBe(404);
+    expect(res.body).toMatchObject({ code: "AWARD_QUOTE_NOT_FOUND" });
+    expect(await instanceStatus(instanceId)).toBe("PENDING");
+    expect(await db.any(`SELECT id FROM tbl_approval_actions WHERE approval_instance_id = $1`, [instanceId])).toEqual([]);
+  });
+
+  it("refuses a regular-quote entry that is another company's quote, and a round quote of this product by another vendor", async () => {
+    // Regular-sourced: no negotiation_round_id, names company B's tbl_quotes row.
+    const rfq1 = await makeRfq();
+    const product1 = await addProduct(rfq1);
+    await addQuote(rfq1, product1);
+    const rfqB = await makeRfq({ company: "B" });
+    const foreignQuote = await addQuote(rfqB, await addProduct(rfqB), ALPHA, 777);
+    const regular = await parkedSelection(rfq1, product1, [entry(foreignQuote.quoteId)]);
+    // Round-sourced on this very product, but BETA's quote, awarded to ALPHA.
+    const rfq2 = await makeRfq();
+    const product2 = await addProduct(rfq2);
+    await addQuote(rfq2, product2);
+    const betaRound = await addRoundQuote(rfq2, product2, { vendor: BETA });
+    const otherVendor = await parkedSelection(rfq2, product2, [
+      entry(betaRound.roundQuoteId, { negotiation_round_id: betaRound.roundId }),
+    ]);
+
+    const regularRes = await approveQuotes(product1);
+    const otherVendorRes = await approveQuotes(product2);
+
+    for (const res of [regularRes, otherVendorRes]) {
+      expect(res.status).toBe(404);
+      expect(res.body).toMatchObject(NOT_FOUND);
+    }
+    expect(await instanceStatus(regular)).toBe("PENDING");
+    expect(await instanceStatus(otherVendor)).toBe("PENDING");
+    expect(await trail(rfq1)).toMatchObject({ finalizations: [], pos: [], lines: [] });
+    expect(await trail(rfq2)).toMatchObject({ finalizations: [], pos: [], lines: [] });
+  });
+
+  it("still approves a regular-quote selection of this product's own quote", async () => {
+    const rfq = await makeRfq();
+    const product = await addProduct(rfq);
+    const own = await addQuote(rfq, product);
+    const instanceId = await parkedSelection(rfq, product, [entry(own.quoteId, { quoted_price: 300 })]);
+
+    const res = await approveQuotes(product);
+
+    expect(res.status).toBe(200);
+    expect(await instanceStatus(instanceId)).toBe("APPROVED");
+    const fin = await db.any(`SELECT vendor_id, quote_id FROM tbl_quote_finalization WHERE rfq_id = $1`, [rfq.rfqId]);
+    expect(fin).toEqual([{ vendor_id: ALPHA, quote_id: own.quoteId }]);
+  });
+});
+
+describe("no PO line is priced from the request body", () => {
+  it("a quote line gone after binding, or a failed pricing read, throws instead of returning the payload", async () => {
+    const rfq = await makeRfq();
+    const product = await addProduct(rfq);
+    const line = await addQuote(rfq, product, ALPHA, 100);
+    const payload = { ...finalizeBody(rfq, product, line), quote_id: line.quoteItemId };
+    payload.product_info = { ...payload.product_info, unit_price: 1 };
+    // The binding read reaches the database; the pricing read after it gets `second`.
+    const ctx = (second) => {
+      let reads = 0;
+      return { oneOrNone: (...args) => (++reads === 1 ? db.oneOrNone(...args) : second()) };
+    };
+
+    await expect(buildAuthoritativePOPayload(payload, ctx(async () => null)))
+      .rejects.toMatchObject({ code: "AWARD_QUOTE_NOT_FOUND" });
+    await expect(buildAuthoritativePOPayload(payload, ctx(async () => { throw new Error("connection reset"); })))
+      .rejects.toThrow("connection reset");
+    const priced = await buildAuthoritativePOPayload(payload, db);
+    expect(Number(priced.product_info.unit_price)).toBe(100);
   });
 });
 
@@ -507,5 +766,16 @@ describe("a scope refusal does not echo the refused record's tenant ids", () => 
       expect(raw).not.toContain(String(id));
     }
     expect(await trail(rfq)).toEqual(NOTHING);
+  });
+
+  it("an AuthorizationError serialized by a generic catch carries no scope tuple", () => {
+    const err = new AuthorizationError("Not in your scope", { hospitality_company_id: IDS.hospitality.A, hotel_id: IDS.hotels.A1 });
+
+    const body = JSON.parse(JSON.stringify({ status: 3, error: err }));
+
+    expect(body.error).toEqual({
+      name: "AuthorizationError", code: "PROCESS_NOT_IN_USER_SCOPE", status: 403, message: "Not in your scope",
+    });
+    expect(err.data.hotel_id).toBe(IDS.hotels.A1); // still there for code that reads it
   });
 });

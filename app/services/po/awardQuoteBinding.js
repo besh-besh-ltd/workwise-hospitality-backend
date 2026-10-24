@@ -20,6 +20,8 @@
 // the approval pre-flights for a parked payload (before the approval is
 // recorded), and from buildAuthoritativePOPayload and draftPO themselves, so a
 // PO line can not be priced or written from an unbound id by any caller.
+// bindSelectedQuotes is the same check for the other award an approval can
+// carry, the selected_quotes of a submit-for-approval.
 
 import { PoDecisionError } from './poDecisionError.js';
 
@@ -168,3 +170,76 @@ export async function bindParkedAward(dbCtx, { entity_id: entityId, metadata } =
   if (meta.rfq_id != null && toId(meta.rfq_id) !== toId(payload.rfq_id)) throw notFound(NOT_ON_RFQ);
   return bindPoPayload(dbCtx, payload);
 }
+
+const SELECTED_NOT_ON_PRODUCT = "A selected quote is not this RFQ product's quote by that vendor.";
+
+/**
+ * A NEGOTIATION_QUOTE approval's selected_quotes (written by
+ * submit-for-approval), checked before the approval that awards them is
+ * recorded. approveQuotes turns each entry into a finalization row and, off
+ * the tender path, a PO line priced at the entry's quoted_price, so every
+ * entry must still be a quote of THIS rfq product by the vendor it names.
+ * Submit binds them now (getQuotesByIds / getRegularQuotesByIds), but an
+ * instance parked before the round-quote ids were scoped was never bound.
+ *
+ * An entry's source is told apart by its shape: one sourced from a
+ * negotiation round always carries `negotiation_round_id` (copied from the
+ * round quote row, where it is NOT NULL); one sourced from tbl_quotes never
+ * does.
+ *   - round:   a tbl_negotiation_round_quotes row of an RFQ-sourced round of
+ *              this rfq, for this product (COALESCE(nrq.rfq_product_id,
+ *              nr.rfq_product_id): older round quotes left their own column
+ *              NULL), by the entry's vendor;
+ *   - regular: a tbl_quotes row of this rfq, by the entry's vendor, with a
+ *              line for this product's variant.
+ * An entry that does not bind is a 404, one answer whatever the reason, so it
+ * never says whether a foreign quote exists. An instance without
+ * selected_quotes, or without the rfq_id the award needs, has nothing to bind.
+ *
+ * @param {object} dbCtx
+ * @param {object} instance  { entity_id, metadata }
+ * @throws PoDecisionError 404 AWARD_QUOTE_NOT_FOUND | 400 AWARD_QUOTE_MISMATCH
+ */
+export async function bindSelectedQuotes(dbCtx, { entity_id: entityId, metadata } = {}) {
+  const meta = typeof metadata === 'string' ? JSON.parse(metadata) : (metadata || {});
+  const entries = meta.selected_quotes;
+  if (!Array.isArray(entries) || entries.length === 0 || meta.rfq_id == null) return null;
+
+  const rfq = toId(meta.rfq_id);
+  const rfqProduct = toId(entityId);
+  if (!rfq || !rfqProduct) throw mismatch(BAD_IDS);
+
+  for (const entry of entries) {
+    const quote = toId(entry?.quote_id);
+    const vendor = toId(entry?.vendor_id);
+    if (!quote || !vendor) throw mismatch(BAD_IDS);
+
+    const fromRound = entry.negotiation_round_id !== undefined;
+    const row = fromRound
+      ? await dbCtx.oneOrNone(
+        `SELECT 1
+           FROM tbl_negotiation_round_quotes nrq
+           JOIN tbl_negotiation_rounds nr ON nr.id = nrq.negotiation_round_id
+          WHERE nrq.id = $1 AND nr.source_type = 'RFQ' AND nr.rfq_id = $2
+            AND COALESCE(nrq.rfq_product_id, nr.rfq_product_id) = $3
+            AND nrq.vendor_id = $4`,
+        [quote, rfq, rfqProduct, vendor]
+      )
+      : await dbCtx.oneOrNone(
+        `SELECT 1
+           FROM tbl_quotes q
+           JOIN tbl_rfq_products rp ON rp.id = $3 AND rp.rfq_id = q.rfq_id
+          WHERE q.id = $1 AND q.rfq_id = $2 AND q.created_by = $4
+            AND EXISTS (SELECT 1 FROM tbl_quote_items qi
+                         WHERE qi.quote_id = q.id
+                           AND qi.product_variant_id = rp.product_variant_id
+                           AND qi.variant IS NOT DISTINCT FROM rp.variant)`,
+        [quote, rfq, rfqProduct, vendor]
+      );
+    if (!row) throw notFound(SELECTED_NOT_ON_PRODUCT);
+  }
+  return entries.length;
+}
+
+/** The refusal for a quote line that is not (or no longer) on its RFQ. */
+export const awardQuoteNotFound = () => notFound(NOT_ON_RFQ);

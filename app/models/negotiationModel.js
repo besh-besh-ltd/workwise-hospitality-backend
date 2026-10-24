@@ -3709,6 +3709,10 @@ const negotiationModel = {
    * price), so an id from another RFQ, another company's negotiation or
    * another product is simply not returned: the caller compares the count and
    * refuses. (Until this was scoped, any round quote id was accepted.)
+   *
+   * The product is the quote's own rfq_product_id or, for older round quotes
+   * that left it NULL, the round's: those rounds were per-product and named
+   * it on tbl_negotiation_rounds.
    */
   getQuotesByIds: async (quoteIds, rfqId, rfqProductId) => {
     if (!quoteIds || quoteIds.length === 0) {
@@ -3731,7 +3735,7 @@ const negotiationModel = {
        WHERE nrq.id = ANY($1)
          AND nr.source_type = 'RFQ'
          AND nr.rfq_id = $2
-         AND nrq.rfq_product_id = $3`,
+         AND COALESCE(nrq.rfq_product_id, nr.rfq_product_id) = $3`,
       [quoteIds, rfqId, rfqProductId]
     );
   },

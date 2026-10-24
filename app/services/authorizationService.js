@@ -37,6 +37,15 @@ export class AuthorizationError extends Error {
     this.status = 403;
     this.data = data;
   }
+
+  // `data` is the REFUSED record's scope tuple (its company, hotel,
+  // department, process). sendScopeError already leaves it out of the
+  // response; this keeps it out of any other body too, e.g. a generic
+  // `res.json({ error })` catch, which serializes the error's own enumerable
+  // fields. Code that needs the tuple reads err.data directly.
+  toJSON() {
+    return { name: this.name, code: this.code, status: this.status, message: this.message };
+  }
 }
 
 export class NoApprovalPolicyError extends Error {

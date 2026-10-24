@@ -7,7 +7,8 @@ import { logError } from '../helper/common.js';
 import { dispatch as dispatchNotification } from './notificationService.js';
 import { approvalActionUrl, entityLabel, buyerHome } from './notificationLinks.js';
 import db from '../config/dbConn.js';
-import { bindParkedAward } from './po/awardQuoteBinding.js';
+import { bindParkedAward, bindSelectedQuotes } from './po/awardQuoteBinding.js';
+import { isApproverOnCurrentStep } from './approvalMembership.js';
 
 /**
  * Approval Action Service
@@ -153,14 +154,26 @@ export async function executeApprovalAction(args) {
     if (action === 'REJECT') return executePoRejection(args, instance);
   }
 
-  // 0. A NEGOTIATION_QUOTE approve that carries a parked finalize payload: the
-  // payload's quote line must bind to its RFQ, vendor and this instance's
-  // product before the approval is recorded. negotiationQuotePostApproval turns
-  // it into a PO line after the commit, and a refusal there would leave the
-  // instance APPROVED with no PO. Throws PoDecisionError (404/400), which the
-  // action route answers with its own status and code.
-  if (instance?.entity_type === 'NEGOTIATION_QUOTE' && String(args.action || '').toUpperCase() === 'APPROVE') {
+  // 0. A NEGOTIATION_QUOTE approve: the award it carries (a parked finalize
+  // payload, or the selected_quotes of a submit-for-approval) must bind to its
+  // RFQ, vendor and this instance's product before the approval is recorded.
+  // negotiationQuotePostApproval turns a payload into a PO line after the
+  // commit, and a refusal there would leave the instance APPROVED with no PO.
+  // Throws PoDecisionError (404/400), which the action route answers with its
+  // own status and code.
+  //
+  // Only for an approver who can act on the current step now. This route has
+  // no tenant gate of its own (submitApprovalAction's approver check is it),
+  // so binding first would answer anyone, from any company, whether an
+  // instance's award binds (404/400) before telling them they are not an
+  // approver. Everyone else falls through to submitApprovalAction's refusal.
+  if (
+    instance?.entity_type === 'NEGOTIATION_QUOTE'
+    && String(args.action || '').toUpperCase() === 'APPROVE'
+    && await isApproverOnCurrentStep(instance.id, args.approver_user_id, { pendingOnly: true })
+  ) {
     await bindParkedAward(db, instance);
+    await bindSelectedQuotes(db, instance);
   }
 
   // 1. Run the underlying transactional model action (status updates only).

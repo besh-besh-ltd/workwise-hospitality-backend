@@ -47,7 +47,8 @@ const formatRoundDeadlineIst = (endDate) => {
 import { draftPO, buildAuthoritativePOPayload } from '../po/purchaseOrderController.js';
 import { notifyDraftCreated } from '../../services/po/poInitiateNotifier.js';
 import { PoDecisionError } from '../../services/po/poDecisionError.js';
-import { bindParkedAward } from '../../services/po/awardQuoteBinding.js';
+import { bindParkedAward, bindSelectedQuotes } from '../../services/po/awardQuoteBinding.js';
+import { isApproverOnCurrentStep, NOT_AN_APPROVER_MESSAGE } from '../../services/approvalMembership.js';
 import { buildDraftedPos } from '../../models/po/poInitiateGuide.js';
 import { initiatePurchaseOrder, assertDraftMergeTarget } from '../../models/purchaseOrderModel.js';
 import {
@@ -132,38 +133,6 @@ const formatErrorResponse = (res, error) => {
   });
 };
 
-// submitApprovalAction's refusal of a caller with no approver row on the
-// current step, word for word, so the early check below answers the same.
-const NOT_AN_APPROVER_MESSAGE = 'User is not an approver for this step';
-
-/**
- * Is `userId` an approver on the CURRENT step of this PENDING instance, either
- * still to act or having already approved it? The membership test
- * submitApprovalAction makes under its lock (and getApprovalInstanceDetails'
- * can_user_approve), read-only, so a handler can refuse a non-approver before
- * it answers anything about the instance's RFQ or its POs. A REMOVED or
- * otherwise inactive approver row does not count.
- *
- * An approver who already approved is let through as a member of the
- * instance, but a second approve is NOT a silent success:
- * submitApprovalAction's idempotency branch compares the stored row status
- * ('APPROVED') with the action ('APPROVE'), never matches, and throws "User
- * has already acted on this step with status: APPROVED".
- */
-const isApproverOnCurrentStep = async (instanceId, userId) => {
-  const row = await db.oneOrNone(
-    `SELECT 1
-       FROM tbl_approval_instances i
-       JOIN tbl_approval_instance_steps s
-         ON s.approval_instance_id = i.id AND s.step_order = i.current_step
-       JOIN tbl_approval_step_approvers sa
-         ON sa.approval_instance_step_id = s.id AND sa.approver_user_id = $2
-      WHERE i.id = $1 AND i.status = 'PENDING' AND sa.status IN ('PENDING', 'APPROVED')
-      LIMIT 1`,
-    [instanceId, userId]
-  );
-  return !!row;
-};
 
 const ensureNegotiationQuoteVisibilityUnlocked = async (rfqId, message) => {
   const rfqData = await rfqModel.getRfqDetailsById(rfqId);
@@ -3142,13 +3111,20 @@ const NegotiationController = {
         }
       }
 
-      // 1b'. A parked finalize payload must still bind to its RFQ: the quote
-      // line on that RFQ, by the vendor the PO is for, for this instance's
-      // product. finalize binds it before parking, but a payload parked before
-      // that check existed was never bound, and Path A turns it into a PO line
-      // priced from that quote line. Refused here, before the approval is
-      // recorded (draftPO binds again, but only after it has committed).
-      await bindParkedAward(db, { entity_id: rfq_product_id, metadata: guardMeta });
+      // 1b'. The award the instance carries must still bind to its RFQ, before
+      // the approval is recorded:
+      //   - a parked finalize payload: the quote line on that RFQ, by the
+      //     vendor the PO is for, for this instance's product. finalize binds
+      //     it before parking, but a payload parked before that check existed
+      //     was never bound, and Path A turns it into a PO line priced from
+      //     that quote line (draftPO binds again, but only after the commit).
+      //   - selected_quotes from submit-for-approval: each entry a quote of
+      //     this RFQ product by its vendor. Submit binds them now, but before
+      //     the round-quote ids were scoped it accepted any round quote, and
+      //     the branch below awards each entry and prices its PO line from it.
+      const bindTarget = { entity_id: rfq_product_id, metadata: guardMeta };
+      await bindParkedAward(db, bindTarget);
+      await bindSelectedQuotes(db, bindTarget);
 
       // 1c. A PO the approver chose to merge the award into must be this RFQ's
       // draft for the awarded vendor. Checked BEFORE the approval action, for
@@ -3456,8 +3432,9 @@ const NegotiationController = {
           : 'Approval recorded. Waiting for other approvers.'
       });
     } catch (error) {
-      // An award refused because the product's PO is on hold: its own status
-      // and code, the same body as every PO hold refusal. Nothing was approved.
+      // An award refused because the product's PO is on hold, or because its
+      // quotes do not bind to this RFQ product (1b'): its own status and code,
+      // the same body as every PO hold refusal. Nothing was approved.
       if (error instanceof PoDecisionError) {
         return res.status(error.httpStatus || 409).json({ status: 0, message: error.message, code: error.code });
       }

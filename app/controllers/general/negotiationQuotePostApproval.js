@@ -9,6 +9,47 @@ import { draftPO, buildAuthoritativePOPayload } from '../po/purchaseOrderControl
 import { autoInitiateRFQPOs } from '../../models/purchaseOrderModel.js';
 import rfqModel from '../../models/rfqModel.js';
 import db from '../../config/dbConn.js';
+import { PoDecisionError } from '../../services/po/poDecisionError.js';
+
+/**
+ * An APPROVED quote approval that did not become a PO, on the RFQ/Tender
+ * timeline: the NEGOTIATION_QUOTES_APPROVED_NO_PO lifecycle row. Best effort:
+ * the approval has already committed, so a failure here is logged, never
+ * thrown.
+ */
+const recordApprovedWithoutPo = async ({ approval_instance_id, approver_user_id, metadata, rfqProductId, reason, remarks }) => {
+  const rfqId = metadata.rfq_id || null;
+  if (!rfqId) return;
+  try {
+    // is_tender normally rides on the metadata (Path A reads it the same
+    // way). Fall back to the RFQ row when it is absent so the event lands on
+    // the right timeline either way.
+    let isTender = metadata.is_tender;
+    if (isTender === undefined || isTender === null) {
+      const rfqRow = await db.oneOrNone('SELECT is_tender FROM tbl_rfq WHERE id = $1', [rfqId]);
+      isTender = rfqRow?.is_tender ?? 0;
+    }
+
+    await recordLifecycleEvent({
+      entity_type: Number(isTender) === 1 ? 'TENDER' : 'RFQ',
+      entity_id: rfqId,
+      stage: 'NEGOTIATION_QUOTES_APPROVED_NO_PO',
+      action: 'APPROVE',
+      performed_by: approver_user_id,
+      metadata: {
+        approval_instance_id: parseInt(approval_instance_id),
+        rfq_product_id: rfqProductId,
+        reason,
+      },
+      remarks,
+    });
+  } catch (lifecycleError) {
+    logError(
+      '[negotiationQuotePostApproval] failed to record NEGOTIATION_QUOTES_APPROVED_NO_PO lifecycle event',
+      lifecycleError
+    );
+  }
+};
 
 /**
  * Handle NEGOTIATION_QUOTE post-approval — create the PO once a commercial
@@ -50,30 +91,58 @@ export const handleNegotiationQuotePostApproval = async (approval_instance_id, a
     if (metadata.po_payload && metadata.po_user) {
       // Path A: PO payload stored by rfqController.finalize
       let txResult = null;
-      await db.tx(async (t) => {
-        // The approval is already recorded and must still get its PO: a merge
-        // target parked at finalize that has since left draft is set aside
-        // under the PO lock (staleTargetFallback), not refused.
-        const authPayload = await buildAuthoritativePOPayload(metadata.po_payload, t);
-        txResult = await draftPO(authPayload, metadata.po_user, t, { staleTargetFallback: true });
+      try {
+        await db.tx(async (t) => {
+          // The approval is already recorded and must still get its PO: a merge
+          // target parked at finalize that has since left draft is set aside
+          // under the PO lock (staleTargetFallback), not refused.
+          const authPayload = await buildAuthoritativePOPayload(metadata.po_payload, t);
+          txResult = await draftPO(authPayload, metadata.po_user, t, { staleTargetFallback: true });
 
-        const entityType = metadata.is_tender === 1 ? 'TENDER' : 'RFQ';
-        await recordLifecycleEvent({
-          entity_type: entityType,
-          entity_id: metadata.rfq_id,
-          stage: 'NEGOTIATION_QUOTES_APPROVED',
-          action: 'APPROVE',
-          performed_by: approver_user_id,
-          metadata: {
-            approval_instance_id: parseInt(approval_instance_id),
-            rfq_product_id: metadata.rfq_product_id,
-            vendor_id: metadata.vendor_id,
-            quote_id: metadata.quote_id
-          },
-          remarks: comment,
-          txContext: t
+          const entityType = metadata.is_tender === 1 ? 'TENDER' : 'RFQ';
+          await recordLifecycleEvent({
+            entity_type: entityType,
+            entity_id: metadata.rfq_id,
+            stage: 'NEGOTIATION_QUOTES_APPROVED',
+            action: 'APPROVE',
+            performed_by: approver_user_id,
+            metadata: {
+              approval_instance_id: parseInt(approval_instance_id),
+              rfq_product_id: metadata.rfq_product_id,
+              vendor_id: metadata.vendor_id,
+              quote_id: metadata.quote_id
+            },
+            remarks: comment,
+            txContext: t
+          });
         });
-      });
+      } catch (refusal) {
+        // The payload was refused (it does not bind to its RFQ: a quote line
+        // that is not, or is no longer, this RFQ product's by the vendor). The
+        // approval surfaces bind it before recording the approval, but an
+        // instance completed without one (approvalPropagationService
+        // auto-completing it after a policy or membership change) gets here
+        // already APPROVED. Nothing was drafted; say so on the timeline, as the
+        // no-payload branch below does, instead of only in the logs.
+        if (!(refusal instanceof PoDecisionError)) throw refusal;
+        logError(
+          `[negotiationQuotePostApproval] NEGOTIATION_QUOTE approval_instance_id=${approval_instance_id} ` +
+          `is APPROVED but its po_payload was refused (${refusal.code}): NO purchase order was drafted.`,
+          refusal
+        );
+        await recordApprovedWithoutPo({
+          approval_instance_id,
+          approver_user_id,
+          metadata,
+          rfqProductId: metadata.rfq_product_id || instance.entity_id,
+          reason: refusal.code || 'PO_PAYLOAD_REFUSED',
+          remarks:
+            'Quote approval completed but no purchase order was drafted: the approved award ' +
+            'does not match a quote of this RFQ product by its vendor. Re-run commercial ' +
+            'finalization for this product.',
+        });
+        return;
+      }
       // Post-commit: tell the initiators, only if this call CREATED the draft.
       if (txResult?.created && txResult?.po_id) void notifyDraftCreated(txResult.po_id);
       // Post-commit auto-initiate. The approver's action just landed the
@@ -145,39 +214,16 @@ export const handleNegotiationQuotePostApproval = async (approval_instance_id, a
         `re-run the commercial finalization for this product to produce one.`
       );
 
-      if (rfqId) {
-        try {
-          // is_tender normally rides on the metadata (Path A reads it the
-          // same way). Fall back to the RFQ row when it is absent so the
-          // event lands on the right timeline either way.
-          let isTender = metadata.is_tender;
-          if (isTender === undefined || isTender === null) {
-            const rfqRow = await db.oneOrNone('SELECT is_tender FROM tbl_rfq WHERE id = $1', [rfqId]);
-            isTender = rfqRow?.is_tender ?? 0;
-          }
-
-          await recordLifecycleEvent({
-            entity_type: Number(isTender) === 1 ? 'TENDER' : 'RFQ',
-            entity_id: rfqId,
-            stage: 'NEGOTIATION_QUOTES_APPROVED_NO_PO',
-            action: 'APPROVE',
-            performed_by: approver_user_id,
-            metadata: {
-              approval_instance_id: parseInt(approval_instance_id),
-              rfq_product_id: rfqProductId,
-              reason: 'MISSING_PO_PAYLOAD',
-            },
-            remarks:
-              'Quote approval completed but no purchase order was drafted: the approval ' +
-              'instance carries no po_payload. Re-run commercial finalization for this product.',
-          });
-        } catch (lifecycleError) {
-          logError(
-            '[negotiationQuotePostApproval] failed to record NEGOTIATION_QUOTES_APPROVED_NO_PO lifecycle event',
-            lifecycleError
-          );
-        }
-      }
+      await recordApprovedWithoutPo({
+        approval_instance_id,
+        approver_user_id,
+        metadata,
+        rfqProductId,
+        reason: 'MISSING_PO_PAYLOAD',
+        remarks:
+          'Quote approval completed but no purchase order was drafted: the approval ' +
+          'instance carries no po_payload. Re-run commercial finalization for this product.',
+      });
     }
   } catch (negQuoteError) {
     logError('Error in NEGOTIATION_QUOTE post-approval (PO creation)', negQuoteError);

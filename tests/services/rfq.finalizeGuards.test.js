@@ -175,7 +175,8 @@ async function makeFinalizableRfq() {
 }
 
 // Seed a vendor's quote line for the product. Returns the quote_item id, which
-// finalize carries as both quote_id and quote_item_id from the FE.
+// finalize carries as quote_item_id; its quote_id is the line's PARENT quote
+// (parentQuoteOf below), as the comparison screen sends it.
 async function plantQuote(rfq_id, rfq_no, vendorId, unitPrice) {
   await db.none(
     `INSERT INTO tbl_rfq_product_vendors (rfq_id, product_variant_id, user_id, variant)
