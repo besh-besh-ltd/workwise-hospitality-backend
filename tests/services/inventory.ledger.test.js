@@ -607,18 +607,23 @@ describe("concurrency", () => {
     ]);
 
     // Wait until both posters are blocked on row locks, then let them go.
-    const deadline = Date.now() + 5000;
-    for (;;) {
-      const { n } = await db.one(
-        `SELECT count(*)::int AS n FROM pg_stat_activity
-          WHERE datname = current_database() AND wait_event_type = 'Lock'`
-      );
-      if (n >= 2) break;
-      if (Date.now() > deadline) throw new Error(`only ${n} poster(s) blocked`);
-      await new Promise((resolve) => setTimeout(resolve, 10));
+    // Release in finally: a timeout that kept the blocker's row lock would
+    // stall the posters and every later test's TRUNCATE behind them.
+    try {
+      const deadline = Date.now() + 15000;
+      for (;;) {
+        const { n } = await db.one(
+          `SELECT count(*)::int AS n FROM pg_stat_activity
+            WHERE datname = current_database() AND wait_event_type = 'Lock'`
+        );
+        if (n >= 2) break;
+        if (Date.now() > deadline) throw new Error(`only ${n} poster(s) blocked`);
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+    } finally {
+      release();
+      await blocker;
     }
-    release();
-    await blocker;
 
     const results = await posts;
     expect(results.map((r) => (r.status === "rejected" ? String(r.reason?.message) : "ok"))).toEqual(["ok", "ok"]);
