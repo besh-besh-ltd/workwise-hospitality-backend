@@ -1563,7 +1563,7 @@ export const updateHSNForProduct = async (req, res) => {
 
 export const raiseInvoice = async (req, res) => {
   try {
-    const { po_id, invoice_url } = req.body;
+    const { po_id, invoice_url, invoice_number, invoice_date, invoice_amount, dispatch_id } = req.body;
     const { id } = req.user;
 
     if (!(await guardPo(req, res, po_id))) return;
@@ -1580,11 +1580,25 @@ export const raiseInvoice = async (req, res) => {
       });
     }
 
-    const result = await handleRaiseInvoice(po_id, invoiceHref, id);
+    // Number, date, amount and the dispatch it bills (inventory C4); a body
+    // without them is the legacy file-only invoice.
+    const { document, scope, details } = await handleRaiseInvoice(
+      po_id, invoiceHref, id, { invoice_number, invoice_date, invoice_amount, dispatch_id }, req.user
+    );
+    // Scope from the PO row (call-off POs have no RFQ for the registry's PO lookup).
+    res.locals.activityDetail = {
+      scope,
+      metadata: {
+        invoiceNumber: details.invoiceNumber,
+        invoiceDate: details.invoiceDate,
+        invoiceAmount: details.invoiceAmount,
+        dispatchId: details.dispatchId,
+      },
+    };
     return res.json({
       status: 1,
       message: 'Invoice has been raised for this PO.',
-      data: result
+      data: document
     });
   } catch (error) {
     if (error instanceof InventoryError) return sendInventoryError(res, error);
