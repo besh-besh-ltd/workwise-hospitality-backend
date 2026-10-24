@@ -13,6 +13,7 @@ import { grantRoleScope, revokeRoleScopes } from "../helpers/roleScope.js";
 import { previewOpeningStock, postOpeningStock } from "../../app/services/inventory/openingImport.js";
 import { postMovements } from "../../app/services/inventory/ledger.js";
 import { setUomFactor } from "../../app/services/inventory/uom.js";
+import * as setup from "../../app/services/inventory/setupService.js";
 
 const A = IDS.hospitality.A;
 const HOTEL = IDS.hotels.A1;
@@ -94,14 +95,16 @@ describe("opening stock import", () => {
       expect(rows[3]).toMatchObject({ invItemId: null, error: "No matching item" });
       expect(rows[4]).toMatchObject({ invItemId: byCode, error: "Duplicate item in file" });
       expect(rows[5]).toMatchObject({ invItemId: bySku, error: "Duplicate item in file" }); // sugar already used by row 3
-      expect(rows[6]).toMatchObject({ error: null, factor: 1, stockQty: 3 });
-      expect(rows[6].invItemId).not.toBeNull();
+      expect(rows[6]).toMatchObject({
+        error: null, invItemId: null, willCreate: true, productVariantId: lazyVariant, stockUom: "bunch", factor: 1, stockQty: 3, unitCost: 12,
+      });
+      expect(rows.filter((r) => r.willCreate)).toHaveLength(1); // errored rows are never willCreate
       expect(rows[7].error).toBe("Duplicate item in file");
       expect(okCount).toBe(4);
       expect(errorCount).toBe(4);
 
-      const lazy = await t.one(`SELECT i.stock_uom FROM tbl_inv_item_variant iv JOIN tbl_inv_item i ON i.id = iv.inv_item_id WHERE iv.product_variant_id = $1`, [lazyVariant]);
-      expect(lazy.stock_uom).toBe("bunch");
+      // preview has no side effects: no item was created for the variant
+      expect(await t.oneOrNone(`SELECT 1 FROM tbl_inv_item_variant WHERE product_variant_id = $1`, [lazyVariant])).toBeNull();
     });
   });
 
@@ -233,6 +236,69 @@ describe("opening stock import", () => {
     });
   });
 
+  it("post creates items for willCreate rows in the same transaction; a bad row rolls them back", async () => {
+    await withTx(async (t) => {
+      await grantAdmin(t);
+      const variant = await makeVariant(t, "Fresh Mint", "MINT-1");
+      const preview = await previewOpeningStock(t, USER, HOTEL, await sheet([[null, "MINT-1", null, 4, "bunch", 15, "C1"]]));
+      const row = preview.rows[0];
+      expect(row).toMatchObject({ willCreate: true, productVariantId: variant, stockUom: "bunch" });
+
+      // a second row with an error: nothing is created
+      const rice = await makeItem(t, { name: "Rice" });
+      const err = await thrownBy(t, (sp) =>
+        postOpeningStock(sp, USER, HOTEL, [
+          { invItemId: null, productVariantId: variant, stockUom: "bunch", stockQty: 4, unitCost: 15 },
+          { invItemId: rice, stockQty: -1, unitCost: 1 },
+        ], randomUUID())
+      );
+      expect(err.code).toBe("VALIDATION");
+      expect(await t.oneOrNone(`SELECT 1 FROM tbl_inv_item_variant WHERE product_variant_id = $1`, [variant])).toBeNull();
+
+      const { result } = await postOpeningStock(
+        t, USER, HOTEL,
+        [{ invItemId: null, productVariantId: row.productVariantId, stockUom: row.stockUom, stockQty: row.stockQty, unitCost: row.unitCost, binLabel: row.binLabel }],
+        randomUUID()
+      );
+      const made = await t.one(
+        `SELECT i.id, i.stock_uom FROM tbl_inv_item_variant iv JOIN tbl_inv_item i ON i.id = iv.inv_item_id WHERE iv.product_variant_id = $1`,
+        [variant]
+      );
+      expect(made.stock_uom).toBe("bunch");
+      expect(await balance(t, made.id)).toEqual({ qty: 4, avg_cost: 15 });
+      expect(result.adjustmentId).toBeGreaterThan(0);
+
+      // blank unit or unknown variant is refused
+      const e2 = await thrownBy(t, (sp) => postOpeningStock(sp, USER, HOTEL, [{ invItemId: null, productVariantId: variant, stockUom: " ", stockQty: 1, unitCost: 1 }], randomUUID()));
+      expect(e2.code).toBe("VALIDATION");
+    });
+  });
+
+  it("a formula error in a cell reads as an error, not [object Object]", async () => {
+    await withTx(async (t) => {
+      await grantAdmin(t);
+      await makeItem(t, { name: "Flour" });
+      const wb = new ExcelJS.Workbook();
+      const ws = wb.addWorksheet("Opening");
+      ws.addRow(["Item Name", "Qty", "Unit", "Unit Cost"]);
+      ws.addRow(["Flour", { error: "#N/A" }, "kg", 5]);
+      const { rows } = await previewOpeningStock(t, USER, HOTEL, Buffer.from(await wb.xlsx.writeBuffer()));
+      expect(rows[0].error).toBe("Invalid quantity");
+    });
+  });
+
+  it("a rejected row does not block the same item later in the sheet", async () => {
+    await withTx(async (t) => {
+      await grantAdmin(t);
+      await makeItem(t, { name: "Flour" });
+      const { rows } = await previewOpeningStock(
+        t, USER, HOTEL,
+        await sheet([[null, null, "Flour", 1, "Crate", 1, null], [null, null, "Flour", 2, "kg", 3, null]])
+      );
+      expect(rows.map((r) => r.error)).toEqual(["Unknown unit", null]);
+    });
+  });
+
   it("needs inventory.admin on the hotel", async () => {
     await withTx(async (t) => {
       const role = await t.one(`SELECT id FROM tbl_roles WHERE title = 'Storekeeper' AND created_by IS NULL`);
@@ -269,6 +335,49 @@ describe("opening stock over HTTP", () => {
     } finally {
       await db.none(`TRUNCATE tbl_inv_movement, tbl_inv_balance, tbl_inv_adjustment_line, tbl_inv_adjustment, tbl_inv_doc_sequence, tbl_inv_hotel_item, tbl_inv_hotel_settings CASCADE`);
       await db.none(`DELETE FROM tbl_inv_item WHERE id = $1`, [itemId]);
+      await revokeRoleScopes(db, [scopeId]);
+      await db.none(`UPDATE tbl_users SET user_type = NULL WHERE id = $1`, [USER.id]);
+    }
+  });
+});
+
+describe("hotel and opening routes are tenant-scoped", () => {
+  const B_USER = { id: IDS.users.companyB_admin, user_type: 2 };
+
+  it("a Company B admin gets NOT_FOUND on Hotel A1", async () => {
+    await withTx(async (t) => {
+      const role = await t.one(`SELECT id FROM tbl_roles WHERE title = 'Inventory Controller' AND created_by IS NULL`);
+      await grantRoleScope(t, { userId: B_USER.id, roleId: role.id, companyId: IDS.hospitality.B });
+      const item = await makeItem(t, { name: "A only" });
+      const buf = await sheet([[null, null, "A only", 1, "kg", 1, null]]);
+      const calls = {
+        getHotelSettings: () => setup.getHotelSettings(t, B_USER, HOTEL),
+        saveHotelSettings: () => setup.saveHotelSettings(t, B_USER, HOTEL, { docCode: "X" }),
+        listHotelItems: () => setup.listHotelItems(t, B_USER, { hotelId: HOTEL }),
+        saveHotelItem: () => setup.saveHotelItem(t, B_USER, { hotelId: HOTEL, invItemId: item }, { minQty: 1 }),
+        previewOpening: () => previewOpeningStock(t, B_USER, HOTEL, buf),
+        postOpening: () => postOpeningStock(t, B_USER, HOTEL, [{ invItemId: item, stockQty: 1, unitCost: 1 }], randomUUID()),
+      };
+      for (const [name, call] of Object.entries(calls)) {
+        const err = await thrownBy(t, call);
+        expect([name, err.code, err.httpStatus]).toEqual([name, "NOT_FOUND", 404]);
+      }
+    });
+  });
+
+  it("multer failures are 400, not 500", async () => {
+    const role = await db.one(`SELECT id FROM tbl_roles WHERE title = 'Inventory Controller' AND created_by IS NULL`);
+    const scopeId = await grantRoleScope(db, { userId: USER.id, roleId: role.id, companyId: A });
+    await db.none(`UPDATE tbl_users SET user_type = 2 WHERE id = $1`, [USER.id]);
+    try {
+      const c = await httpClient(USER.id);
+      const buf = await sheet([[null, null, "x", 1, "kg", 1, null]]);
+      const wrongField = await c.post(`/api/v1/inventory/opening/${HOTEL}/preview`).attach("upload", buf, "o.xlsx");
+      expect(wrongField.status).toBe(400);
+      const big = await c.post(`/api/v1/inventory/opening/${HOTEL}/preview`).attach("file", Buffer.alloc(6 * 1024 * 1024), "big.xlsx");
+      expect(big.status).toBe(400);
+      expect(big.body.code).toBe("VALIDATION");
+    } finally {
       await revokeRoleScopes(db, [scopeId]);
       await db.none(`UPDATE tbl_users SET user_type = NULL WHERE id = $1`, [USER.id]);
     }

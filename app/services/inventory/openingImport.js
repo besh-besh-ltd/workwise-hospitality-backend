@@ -46,7 +46,8 @@ function cellText(cell) {
   if (typeof v === 'object') {
     if (v instanceof Date) return v.toISOString();
     if (Array.isArray(v.richText)) v = v.richText.map((r) => r.text).join('');
-    else if ('result' in v) v = v.result ?? '';
+    else if ('result' in v) v = v.result && typeof v.result === 'object' ? (v.result.error ?? '') : (v.result ?? '');
+    else if ('error' in v) v = v.error ?? '';
     else if ('text' in v) v = v.text ?? '';
     else v = '';
   }
@@ -133,7 +134,7 @@ export async function previewOpeningStock(t, user, hotelId, buffer) {
   const skus = [...new Set(sheet.map((r) => r.sku.toLowerCase()).filter(Boolean))];
   const skuRows = skus.length
     ? await t.any(
-        `SELECT pv.id, lower(btrim(pv.sku)) AS sku, iv.inv_item_id
+        `SELECT pv.id, pv.name, lower(btrim(pv.sku)) AS sku, iv.inv_item_id
            FROM tbl_product_variant pv
            LEFT JOIN tbl_inv_item_variant iv
                   ON iv.product_variant_id = pv.id AND iv.hospitality_company_id = $1
@@ -150,6 +151,7 @@ export async function previewOpeningStock(t, user, hotelId, buffer) {
   }
 
   const seenItems = new Set();
+  const seenVariants = new Set();
   const factorCache = new Map();
   const out = [];
 
@@ -164,6 +166,9 @@ export async function previewOpeningStock(t, user, hotelId, buffer) {
       stockQty: null,
       unitCost: null,
       binLabel: r.bin || null,
+      willCreate: false,
+      productVariantId: null,
+      stockUom: null,
       error: null,
     };
     out.push(res);
@@ -174,6 +179,7 @@ export async function previewOpeningStock(t, user, hotelId, buffer) {
     // 1. match the item
     let item = null;
     let matchError = null;
+    let pending = null;
     if (r.itemCode) item = byCode.get(r.itemCode.toLowerCase()) ?? null;
     if (!item && r.sku) {
       const variants = bySku.get(r.sku.toLowerCase()) ?? [];
@@ -181,31 +187,44 @@ export async function previewOpeningStock(t, user, hotelId, buffer) {
       if (mapped.length === 1) item = byId.get(mapped[0]) ?? null;
       else if (mapped.length > 1 || variants.length > 1) matchError = 'Ambiguous SKU';
       else if (variants.length === 1) {
-        const unit = normalizeUomLabel(r.unit);
-        if (!unit) matchError = 'Unknown unit';
-        else {
-          const made = await resolveItemForVariant(t, {
-            companyId,
-            productVariantId: Number(variants[0].id),
-            createIfMissing: true,
-            userId: user.id,
-            defaultUom: unit,
-          });
-          item = {
-            id: made.id,
-            display_name: made.displayName,
-            item_code: null,
-            stock_uom: made.stockUom,
-            is_active: true,
-          };
-          byId.set(made.id, item);
-        }
+        // Unmapped variant: nothing is created here. Post creates the item,
+        // with the sheet's unit as its stock unit.
+        if (!normalizeUomLabel(r.unit)) matchError = 'Unknown unit';
+        else pending = variants[0];
       }
     }
-    if (!item && !matchError && r.name) {
+    if (!item && !matchError && !pending && r.name) {
       const hit = byName.get(r.name.trim().toLowerCase());
       if (hit) item = hit;
       else if (hit === null) matchError = 'Ambiguous item name';
+    }
+    if (!item && pending) {
+      const unit = normalizeUomLabel(r.unit);
+      res.displayName = pending.name || res.displayName;
+      res.uom = unit;
+      if (seenVariants.has(Number(pending.id))) {
+        res.error = 'Duplicate item in file';
+        continue;
+      }
+      if (qty == null || qty < 0) {
+        res.error = 'Invalid quantity';
+        continue;
+      }
+      if (cost == null || cost < 0) {
+        res.error = 'Invalid unit cost';
+        continue;
+      }
+      seenVariants.add(Number(pending.id));
+      Object.assign(res, {
+        willCreate: true,
+        productVariantId: Number(pending.id),
+        stockUom: unit,
+        qty,
+        factor: 1,
+        stockQty: round4(qty),
+        unitCost: round4(cost),
+      });
+      continue;
     }
     if (!item) {
       res.error = matchError ?? 'No matching item';
@@ -221,7 +240,6 @@ export async function previewOpeningStock(t, user, hotelId, buffer) {
       res.error = 'Duplicate item in file';
       continue;
     }
-    seenItems.add(res.invItemId);
 
     // 2. quantity, unit, cost
     if (qty == null || qty < 0) {
@@ -247,6 +265,7 @@ export async function previewOpeningStock(t, user, hotelId, buffer) {
       continue;
     }
     res.unitCost = round4(cost / factor);
+    seenItems.add(res.invItemId);
   }
 
   const errorCount = out.filter((r) => r.error).length;
@@ -285,35 +304,75 @@ export async function postOpeningStock(t, user, hotelId, rows, clientEventId) {
     };
   }
 
-  // Validate every row before touching anything.
+  // Validate every row before touching anything. A row with invItemId null
+  // names a catalogue variant plus the stock unit its item will be created with.
   const problems = [];
   const clean = [];
   const seen = new Set();
+  const seenVariants = new Set();
   rows.forEach((r, index) => {
-    const invItemId = positiveInt(r?.invItemId);
+    const invItemId = r?.invItemId == null ? null : positiveInt(r.invItemId);
+    const variantId = positiveInt(r?.productVariantId);
+    const stockUom = normalizeUomLabel(r?.stockUom);
     const stockQty = Number(r?.stockQty);
     const unitCost = Number(r?.unitCost);
     const bin = r?.binLabel == null ? '' : String(r.binLabel).trim();
     let error = null;
-    if (!invItemId) error = 'Invalid item';
+    if (r?.invItemId == null) {
+      if (!variantId) error = 'Invalid item';
+      else if (!stockUom || stockUom.length > 99) error = 'Unknown unit';
+      else if (seenVariants.has(variantId)) error = 'Duplicate item';
+      seenVariants.add(variantId);
+    } else if (!invItemId) error = 'Invalid item';
     else if (seen.has(invItemId)) error = 'Duplicate item';
-    else if (r?.stockQty === '' || r?.stockQty == null || !Number.isFinite(stockQty) || stockQty < 0) error = 'Invalid quantity';
-    else if (r?.unitCost === '' || r?.unitCost == null || !Number.isFinite(unitCost) || unitCost < 0) error = 'Invalid unit cost';
-    else if (bin.length > 64) error = 'Bin label is too long';
     if (invItemId) seen.add(invItemId);
+    if (!error) {
+      if (r?.stockQty === '' || r?.stockQty == null || !Number.isFinite(stockQty) || stockQty < 0) error = 'Invalid quantity';
+      else if (r?.unitCost === '' || r?.unitCost == null || !Number.isFinite(unitCost) || unitCost < 0) error = 'Invalid unit cost';
+      else if (bin.length > 64) error = 'Bin label is too long';
+    }
     if (error) problems.push({ index, invItemId, error });
-    else clean.push({ invItemId, stockQty: round4(stockQty), unitCost: round4(unitCost), bin: bin || null });
+    else {
+      clean.push({
+        index,
+        invItemId,
+        variantId: invItemId ? null : variantId,
+        stockUom,
+        stockQty: round4(stockQty),
+        unitCost: round4(unitCost),
+        bin: bin || null,
+      });
+    }
   });
   if (!problems.length) {
-    const ids = clean.map((r) => r.invItemId);
+    const ids = clean.filter((r) => r.invItemId).map((r) => r.invItemId);
     const ok = await t.any(
       `SELECT id FROM tbl_inv_item WHERE hospitality_company_id = $1 AND is_active AND id = ANY($2::int[])`,
       [companyId, ids]
     );
     const okSet = new Set(ok.map((r) => Number(r.id)));
-    rows.forEach((r, index) => {
-      if (!okSet.has(Number(r.invItemId))) problems.push({ index, invItemId: Number(r.invItemId), error: 'No matching item' });
-    });
+    for (const r of clean) {
+      if (r.invItemId && !okSet.has(r.invItemId)) problems.push({ index: r.index, invItemId: r.invItemId, error: 'No matching item' });
+    }
+  }
+  if (!problems.length) {
+    // Create the missing items here, in the posting transaction: a failure
+    // anywhere below rolls them back with everything else.
+    for (const r of clean.filter((x) => !x.invItemId)) {
+      const made = await resolveItemForVariant(t, {
+        companyId,
+        productVariantId: r.variantId,
+        createIfMissing: true,
+        userId: user.id,
+        defaultUom: r.stockUom,
+      });
+      if (!made.created) {
+        // Mapped since the preview: its stock unit may differ from the sheet's.
+        problems.push({ index: r.index, invItemId: made.id, error: 'Already has an item: preview again' });
+      } else {
+        r.invItemId = made.id;
+      }
+    }
   }
   if (problems.length) {
     throw new InventoryError('VALIDATION', `${problems.length} row(s) have errors: fix them and try again`, {

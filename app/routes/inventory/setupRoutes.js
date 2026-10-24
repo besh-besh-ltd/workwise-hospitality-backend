@@ -1,6 +1,7 @@
 import express from 'express';
 import multer from 'multer';
 import { buyerGuard } from './guards.js';
+import { InventoryError, sendInventoryError } from '../../services/inventory/errors.js';
 import {
   listItems,
   createItem,
@@ -29,6 +30,16 @@ const openingUpload = multer({
   limits: { fileSize: 5 * 1024 * 1024, files: 1 },
 });
 
+// Multer failures (too large, wrong field, too many files) are the caller's
+// mistake: answer 400 VALIDATION rather than letting them surface as a 500.
+const openingFile = (req, res, next) =>
+  openingUpload.single('file')(req, res, (err) => {
+    if (!err) return next();
+    const message =
+      err.code === 'LIMIT_FILE_SIZE' ? 'The file is too large (5 MB at most)' : 'Attach one .xlsx file in the "file" field';
+    return sendInventoryError(res, new InventoryError('VALIDATION', message, { field: 'file', reason: err.code ?? null }));
+  });
+
 /** Buyer routes: passportSignIn + noAcl([3]) per route. */
 const router = express.Router();
 
@@ -49,7 +60,7 @@ router.get('/settings/hotel/:hotelId', ...buyerGuard, getHotelSettings);
 router.put('/settings/hotel/:hotelId', ...buyerGuard, saveHotelSettings);
 router.get('/category-defaults', ...buyerGuard, getCategoryDefaults);
 router.put('/category-defaults', ...buyerGuard, saveCategoryDefaults);
-router.post('/opening/:hotelId/preview', ...buyerGuard, openingUpload.single('file'), previewOpeningStock);
+router.post('/opening/:hotelId/preview', ...buyerGuard, openingFile, previewOpeningStock);
 router.post('/opening/:hotelId/post', ...buyerGuard, postOpeningStock);
 
 export default router;

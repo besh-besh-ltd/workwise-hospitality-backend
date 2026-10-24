@@ -431,24 +431,36 @@ export async function addItemBarcode(t, user, itemId, body = {}) {
   if (!['MANUFACTURER', 'INTERNAL'].includes(source)) throw bad('Source must be MANUFACTURER or INTERNAL', 'source');
 
   const companyId = Number(item.hospitality_company_id);
-  const clash = await t.oneOrNone(
-    `SELECT i.id, i.display_name FROM tbl_inv_item_barcode b JOIN tbl_inv_item i ON i.id = b.inv_item_id
-      WHERE b.hospitality_company_id = $1 AND b.code = $2`,
-    [companyId, code]
-  );
-  if (clash) {
-    throw new InventoryError('CONFLICT', `The barcode ${code} already belongs to "${clash.display_name}"`, {
+  const clashError = async () => {
+    const clash = await t.oneOrNone(
+      `SELECT i.id, i.display_name FROM tbl_inv_item_barcode b JOIN tbl_inv_item i ON i.id = b.inv_item_id
+        WHERE b.hospitality_company_id = $1 AND b.code = $2`,
+      [companyId, code]
+    );
+    return new InventoryError('CONFLICT', `The barcode ${code} already belongs to "${clash?.display_name ?? 'another item'}"`, {
       field: 'code',
-      invItemId: Number(clash.id),
-      displayName: clash.display_name,
+      invItemId: clash ? Number(clash.id) : null,
+      displayName: clash?.display_name ?? null,
     });
+  };
+  if (await t.oneOrNone(`SELECT 1 FROM tbl_inv_item_barcode WHERE hospitality_company_id = $1 AND code = $2`, [companyId, code])) {
+    throw await clashError();
   }
-  const row = await t.one(
-    `INSERT INTO tbl_inv_item_barcode (hospitality_company_id, inv_item_id, code, pack_factor, source, created_by)
-     VALUES ($1, $2, $3, $4, $5, $6)
-     RETURNING id, code, pack_factor::text AS pack_factor, source`,
-    [companyId, item.id, code, round4(packFactor), source, user.id]
-  );
+  let row;
+  try {
+    // savepoint, so a concurrent duplicate does not abort the caller's transaction
+    row = await t.tx((sp) =>
+      sp.one(
+        `INSERT INTO tbl_inv_item_barcode (hospitality_company_id, inv_item_id, code, pack_factor, source, created_by)
+         VALUES ($1, $2, $3, $4, $5, $6)
+         RETURNING id, code, pack_factor::text AS pack_factor, source`,
+        [companyId, item.id, code, round4(packFactor), source, user.id]
+      )
+    );
+  } catch (err) {
+    if (err?.code === '23505') throw await clashError();
+    throw err;
+  }
   return {
     result: { id: Number(row.id), code: row.code, packFactor: Number(row.pack_factor), source: row.source },
     audit: { companyId, label: item.display_name },
