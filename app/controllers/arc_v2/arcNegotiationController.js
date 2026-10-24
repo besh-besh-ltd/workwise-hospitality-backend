@@ -19,6 +19,7 @@ import { deferBad, isDeferred, sendDeferred } from '../../helper/deferredRespons
 import { parseAsUTC } from '../../helper/dbTime.js';
 import { resolveArcPolicyFor, noArcPolicyError } from '../../helper/arc_v2/arcPolicy.js';
 import { normalizeCreatorRemarks, stripInternalRoundFields } from '../../helper/negotiation/roundRemarks.js';
+import { roundWindowError } from '../../helper/negotiation/roundWindow.js';
 
 /**
  * ARC Negotiation Controller
@@ -94,6 +95,8 @@ export async function createRound(req, res) {
     if (!endDate || new Date(endDate) <= new Date()) {
       return bad(res, 400, 'end_date must be a future date');
     }
+    const windowError = roundWindowError(endDate);
+    if (windowError) return bad(res, 400, windowError);
 
     // Validate: at most one arc-level entry
     const arcLevelEntries = entries.filter((e) => e.is_arc_level);
@@ -365,6 +368,11 @@ export async function approveRound(req, res) {
     }
     if (round.status !== 'PENDING_APPROVAL') {
       return bad(res, 400, `Cannot approve round in status '${round.status}'`);
+    }
+    // Same rule as the RFQ approve path: approving a lapsed round would publish
+    // a window that has already closed. end_date is naive UTC (parseAsUTC).
+    if (parseAsUTC(round.end_date) <= new Date()) {
+      return bad(res, 400, "This round's deadline has passed, so it can no longer be approved. Ask the buyer to open a new round.");
     }
 
     const instances = await getApprovalInstancesByEntity('ARC_NEGOTIATION', roundId);
