@@ -3362,7 +3362,8 @@ export const handleMarkGRN = async (po_id, grn_document_url, user_id, remarks) =
 // The legacy "Mark dispatched" button. It is now a dispatch note with no lines
 // (inventory dispatchService), which moves po.status forward to 'dispatched'
 // (never back from GRN / invoice_raised), locks the delivery plan, and sends
-// the same dispatch email and GRN reminders as before. It used to read the
+// the same dispatch email as before (GRN reminders now come from task B6's
+// DB-driven sweeper; no site-rep lookup happens here). It used to read the
 // PO's lines joined to their quote items with t.one, which threw on every PO
 // with more than one line and on every call-off PO (D1).
 //

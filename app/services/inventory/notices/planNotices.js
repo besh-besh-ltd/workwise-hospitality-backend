@@ -5,14 +5,18 @@
 //   notifyPlanChanged      the vendor, when an accepted PO's plan changes
 //                          (in-app + email, with the new schedule; no prices).
 //   notifyDispatchCreated  the PO's people, when goods are dispatched: the
-//                          dispatch email and GRN reminders the legacy "Mark
-//                          dispatched" button always sent, through the same
-//                          helpers (generalReminderEmails.sendDispatchedEmail,
-//                          cronManager.scheduleGRNReminders).
+//                          dispatch email (and in-app po_dispatched) the legacy
+//                          "Mark dispatched" button always sent, through the
+//                          same helper (generalReminderEmails.sendDispatchedEmail).
+//                          GRN reminders are no longer scheduled from here:
+//                          task B6 replaced cronManager.scheduleGRNReminders
+//                          with a DB-driven sweeper, and a PO may now carry
+//                          several site-rep token rows, so neither the
+//                          reminder call nor a site-rep lookup belongs here.
 //
-// The PO model, the mailers and the cron manager are imported lazily: this
-// file is re-exported by notifier.js, which every inventory service may
-// import, and the PO model itself calls back into the inventory services.
+// The PO model and the mailers are imported lazily: this file is re-exported
+// by notifier.js, which every inventory service may import, and the PO model
+// itself calls back into the inventory services.
 
 import config from '../../../config/app.config.js';
 import { sendMail, logError } from '../../../helper/common.js';
@@ -117,9 +121,8 @@ export const notifyPlanChanged = async (conn, { poId, actorUserId = null } = {})
 };
 
 /**
- * The legacy dispatch email + GRN reminders, for a dispatch note just
- * recorded. Reminders are scheduled once per PO (its first dispatch note);
- * the email goes out for every note.
+ * The legacy dispatch email (and in-app po_dispatched), for every dispatch
+ * note just recorded.
  * @param {object} conn db (after commit)
  * @param {{dispatchId:number}} args
  */
@@ -127,12 +130,7 @@ export const notifyDispatchCreated = async (conn, { dispatchId } = {}) => {
   try {
     const did = positiveInt(dispatchId);
     if (!did) return;
-    const dispatch = await conn.oneOrNone(
-      `SELECT pd.id, pd.po_id, pd.hotel_id,
-              (SELECT count(*)::int FROM tbl_po_dispatch x WHERE x.po_id = pd.po_id AND x.id <= pd.id) AS seq
-         FROM tbl_po_dispatch pd WHERE pd.id = $1`,
-      [did]
-    );
+    const dispatch = await conn.oneOrNone(`SELECT id, po_id FROM tbl_po_dispatch WHERE id = $1`, [did]);
     if (!dispatch) return;
 
     // One row per PO. The legacy query joined the PO's lines and their quote
@@ -167,30 +165,12 @@ export const notifyDispatchCreated = async (conn, { dispatchId } = {}) => {
     );
     if (!formattedPOData) return;
 
-    const [{ resolvePoNotificationRecipients }, { sendDispatchedEmail }, { scheduleGRNReminders }] = await Promise.all([
+    const [{ resolvePoNotificationRecipients }, { sendDispatchedEmail }] = await Promise.all([
       import('../../../models/purchaseOrderModel.js'),
       import('../../../helper/sendEmailFunctions/generalReminderEmails.js'),
-      import('../../../helper/cronManager.js'),
     ]);
-    const reminderUsers = await resolvePoNotificationRecipients(formattedPOData, conn);
-    // The PO's site representative (a live one; the dispatch hotel's first).
-    const grnRepData = await conn.oneOrNone(
-      `SELECT id, name, email, phone
-         FROM tbl_token_login_data
-        WHERE token_type = 'GRN' AND entity_id = $1 AND revoked_at IS NULL
-        ORDER BY (hotel_id IS NOT DISTINCT FROM $2::int) DESC, id DESC
-        LIMIT 1`,
-      [dispatch.po_id, dispatch.hotel_id]
-    );
-
-    if (dispatch.seq === 1) {
-      try {
-        await scheduleGRNReminders(formattedPOData, reminderUsers, grnRepData);
-      } catch (err) {
-        logError(`[po ${dispatch.po_id}] GRN reminders failed`, err);
-      }
-    }
-    await sendDispatchedEmail(formattedPOData, reminderUsers);
+    const recipients = await resolvePoNotificationRecipients(formattedPOData, conn);
+    await sendDispatchedEmail(formattedPOData, recipients);
   } catch (err) {
     logError(`[dispatch ${dispatchId}] notifyDispatchCreated failed`, err);
   }
