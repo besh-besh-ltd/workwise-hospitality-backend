@@ -35,7 +35,7 @@ jest.unstable_mockModule("nodemailer", () => {
   return { default: api, ...api };
 });
 
-const { db, withTx, closeDb } = await import("../setup/db.js");
+const { db, withTx, closeDb, truncateDynamic } = await import("../setup/db.js");
 const { IDS } = await import("../fixtures/ids.js");
 const { makeRFQ } = await import("../factories/rfq.js");
 const { httpClient, boundRequest } = await import("../helpers/http.js");
@@ -67,6 +67,10 @@ beforeAll(async () => {
 
 afterAll(async () => {
   const { poIds, rfqIds, mrIds, arcIds } = tracked;
+  // The legacy markGRN shim posts real GRNs (token ones reference
+  // tbl_token_login_data) and append-only ledger rows: only TRUNCATE clears
+  // them. jest runs one worker per database, so this touches no other suite.
+  await truncateDynamic();
   if (poIds.length) {
     await db.none(`DELETE FROM tbl_activity_events WHERE entity_type = 'PO' AND entity_id = ANY($1::bigint[])`, [poIds]);
     await db.none(`DELETE FROM tbl_token_login_data WHERE token_type = 'GRN' AND entity_id = ANY($1::int[])`, [poIds]);
