@@ -29,6 +29,8 @@
 //             roll-up, no line's credit may fall and the credit added must be
 //             exactly this RTV's CREDIT qty (0 for REPLACE); otherwise CONFLICT
 //             and the whole dispatch rolls back. Cancel and raise it again.
+//             A credit the roll-up could book nowhere (the receipt line has no
+//             delivery allocation) is its own CONFLICT, saying just that.
 //   close     CREDIT: records the vendor's credit-note reference.
 //             REPLACE: only once every delivery line the returned goods were
 //             booked to is received again or short-closed.
@@ -334,7 +336,8 @@ async function deliveryCredits(t, poId) {
  * @param {{challanNo?:string}} input the hotel's own gate pass / challan number
  * @returns {Promise<Rtv>}
  * @throws InventoryError CONFLICT (not a draft; later returns on the same
- *   receipt were dispatched first, nothing written), VALIDATION (returnable
+ *   receipt were dispatched first; a CREDIT on a receipt line booked to no
+ *   delivery; nothing written), VALIDATION (returnable
  *   shrank since the draft), NEGATIVE_STOCK (goods already marked out), and the gate's.
  */
 export async function dispatchRtv(t, user, rtvId, { challanNo } = {}) {
@@ -405,7 +408,17 @@ export async function dispatchRtv(t, user, rtvId, { challanNo } = {}) {
     .map((deliveryLineId) => ({ deliveryLineId, qty: (after.get(deliveryLineId) || 0) - (creditBefore.get(deliveryLineId) || 0) }));
   const added = deltas.reduce((sum, d) => sum + Math.max(d.qty, 0), 0);
   const expected = rtv.disposition === 'CREDIT' ? lines.reduce((sum, l) => sum + toQ(l.qty), 0) : 0;
-  if (deltas.some((d) => d.qty < 0) || added !== expected) {
+  const moved = deltas.some((d) => d.qty < 0);
+  if (!moved && added < expected) {
+    // The roll-up had no delivery line to book the credit to: the receipt line
+    // has no allocation (e.g. a legacy-received PO with no deliveries).
+    throw new InventoryError(
+      'CONFLICT',
+      "This receipt line isn't booked to any delivery, so the credit can't be closed against the PO",
+      { rtvId: rtvIdN, grnId: Number(rtv.grn_id) }
+    );
+  }
+  if (moved || added !== expected) {
     throw new InventoryError(
       'CONFLICT',
       'Later returns on this receipt were dispatched first. Cancel this draft and raise it again to dispatch it.',
