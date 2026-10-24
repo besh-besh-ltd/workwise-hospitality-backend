@@ -1,0 +1,9 @@
+-- Reverses 20261024100000_inventory_resource_enums.
+--
+-- Intentionally a no-op. Postgres cannot drop an enum label without
+-- recreating the type, and resource_type / permission_action_type are used by
+-- tbl_permissions and ~20 other columns. The labels are inert once the rows
+-- that use them are gone (20261024100400.down.sql deletes those), and
+-- re-running the up file is a no-op against them (ADD VALUE IF NOT EXISTS).
+-- Same convention as 20260919120000_reports_permissions.down.sql and
+-- 20260829094000_company_admin_capability.down.sql.

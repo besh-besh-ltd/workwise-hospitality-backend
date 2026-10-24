@@ -21,6 +21,24 @@ afterAll(async () => {
   await closeDb();
 });
 
+// The ten inventory report keys are seeded by 20261024100400_inventory_permissions
+// AHEAD of their report definitions, which land with the inventory reports task
+// (D4 of docs/superpowers/plans/2026-10-24-inventory-management.md). Until then
+// they are the only permissions allowed without a registry entry. Once D4
+// registers them the allowance is a no-op: delete it then.
+const INVENTORY_REPORT_KEYS = [
+  "stock_on_hand",
+  "stock_ledger",
+  "grn_register",
+  "pending_deliveries",
+  "consumption_by_department",
+  "stock_adjustments",
+  "count_variance",
+  "slow_moving",
+  "near_expiry",
+  "vendor_delivery_performance",
+];
+
 /** Permission strings carried by a role, by title. */
 async function permissionsOf(roleTitle) {
   const rows = await db.any(
@@ -46,8 +64,10 @@ describe("reports permission catalogue", () => {
     // A report in the registry with no permission can never be granted; a
     // permission with no report is an orphan in the admin picker.
     expect([...registryKeys].filter((k) => !seededKeys.has(k))).toEqual([]);
-    expect([...seededKeys].filter((k) => !registryKeys.has(k))).toEqual([]);
-    expect(seededKeys.size).toBe(16);
+    expect(
+      [...seededKeys].filter((k) => !registryKeys.has(k) && !INVENTORY_REPORT_KEYS.includes(k))
+    ).toEqual([]);
+    expect(seededKeys.size).toBe(26);
   });
 
   it("matches each report's declared permission string", async () => {
@@ -60,7 +80,8 @@ describe("reports permission catalogue", () => {
 describe("who the migrations grant it to", () => {
   it("gives Company Administrator the whole catalogue", async () => {
     const held = await permissionsOf("Company Administrator");
-    expect(held.size).toBe(16);
+    expect(held.size).toBe(26);
+    expect(held.has("stock_on_hand")).toBe(true);
     expect(held.has("approval_audit_trail")).toBe(true);
     expect(held.has("po_rejections")).toBe(true);
   });
@@ -102,7 +123,14 @@ describe("who the migrations grant it to", () => {
         GROUP BY r.title
         ORDER BY r.title`
     );
-    // Precisely two roles, and nothing acquired reports by accident.
-    expect(rows.map((r) => r.title).sort()).toEqual(["Company Administrator", "Report Download"]);
+    // Precisely these roles, and nothing acquired reports by accident.
+    // Inventory Controller holds the ten inventory report keys only.
+    expect(rows.map((r) => r.title).sort()).toEqual([
+      "Company Administrator",
+      "Inventory Controller",
+      "Report Download",
+    ]);
+    const controller = await permissionsOf("Inventory Controller");
+    expect([...controller].sort()).toEqual([...INVENTORY_REPORT_KEYS].sort());
   });
 });
