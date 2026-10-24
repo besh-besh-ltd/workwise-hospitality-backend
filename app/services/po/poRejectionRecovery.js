@@ -28,6 +28,7 @@
  * vendor itself; the latest such row wins.
  */
 import db from '../../config/dbConn.js';
+import { logError } from '../../helper/common.js';
 import { recordLifecycleEvent } from '../../models/generalModel.js';
 import { evaluateVendorTechnicalQualification } from '../technicalQualificationService.js';
 import { coversProductSql } from '../../models/negotiationModel.js';
@@ -481,10 +482,12 @@ export async function getVendorUndoState(poId, vendorUserId) {
 /**
  * The vendor takes a rejection back: restore the award and accept the PO, in
  * one transaction. The end state is a normal accept's (status approved,
- * vendor_action_at now, PO_ACCEPTED_BY_VENDOR lifecycle row) plus a
- * PO_REJECTION_WITHDRAWN row recording what was undone.
+ * vendor_action_at now, PO_ACCEPTED_BY_VENDOR lifecycle row, an untouched
+ * default delivery plan dated from today) plus a PO_REJECTION_WITHDRAWN row
+ * recording what was undone.
  *
- * @returns {Promise<{po: object, callOff: null|{raised_by:number|null, mr_id:number|null, mr_number:string|null}}>}
+ * @returns {Promise<{po: object, callOff: null|{raised_by:number|null, mr_id:number|null, mr_number:string|null},
+ *   planDated: number}>} planDated = deliveries dated (the PO document then needs rewriting).
  */
 export async function withdrawRejectionByVendor(poId, vendorUserId) {
   return db.tx(async (t) => {
@@ -507,6 +510,18 @@ export async function withdrawRejectionByVendor(poId, vendorUserId) {
         WHERE id = $1`,
       [po.id]
     );
+
+    // Delivery plan (inventory), as on a normal accept: an untouched default
+    // plan is dated from today. In a savepoint, so a plan problem can never
+    // cost the vendor the withdrawal. Lazy: the inventory services import the
+    // PO model, which this module's callers load first.
+    let planDated = 0;
+    try {
+      const { fillDefaultDueDates } = await import('../inventory/planService.js');
+      planDated = await t.tx((sp) => fillDefaultDueDates(sp, po.id));
+    } catch (planErr) {
+      logError(`[po ${po.id}] delivery plan dates at rejection withdrawal failed`, planErr);
+    }
 
     await recordLifecycleEvent({
       entity_type: 'PO',
@@ -534,7 +549,7 @@ export async function withdrawRejectionByVendor(poId, vendorUserId) {
 
     const callOff = po.is_call_off ? await loadCallOffNotice(t, po) : null;
 
-    return { po: { ...po, status: 'approved' }, callOff };
+    return { po: { ...po, status: 'approved' }, callOff, planDated };
   });
 }
 

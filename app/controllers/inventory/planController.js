@@ -5,14 +5,14 @@ import {
   savePlan,
   patchDueDate,
   planChangeFollowUp,
-  runPlanChangeFollowUp,
+  queuePlanChangeFollowUp,
   poActivityScope,
 } from '../../services/inventory/planService.js';
 
 // The buyer's Deliveries tab on a PO (contract: "Delivery plan and
 // short-close"). Each handler runs its service in one transaction, answers
-// after it commits, and runs side effects (vendor notice, PDF rewrite) after
-// that. Errors map through sendInventoryError (404 out of scope, 403 without
+// after it commits, and queues side effects (vendor notice, PDF rewrite) to
+// run after the response, so the buyer never waits on Chromium or SMTP. Errors map through sendInventoryError (404 out of scope, 403 without
 // the PO initiate grant, 409 LOCKED, 400 VALIDATION).
 
 /** GET /inventory/po/:poId/deliveries */
@@ -43,8 +43,10 @@ async function editPlan(req, res, change, message) {
     scope: out.scope,
     metadata: { poId: out.data.poId, deliveryCount: out.data.deliveries.length },
   };
-  await runPlanChangeFollowUp(out.followUp);
-  return res.json({ status: 1, message, data: out.data });
+  res.json({ status: 1, message, data: out.data });
+  // After the response; never rejects.
+  queuePlanChangeFollowUp(out.followUp);
+  return res;
 }
 
 /** PUT /inventory/po/:poId/deliveries  {deliveries:[…]} */

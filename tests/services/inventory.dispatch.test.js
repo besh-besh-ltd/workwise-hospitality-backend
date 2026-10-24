@@ -242,6 +242,36 @@ describe("vendor dispatch notes", () => {
     await expect(handleMarkDispatched(rfqPo.poId, OTHER_VENDOR)).rejects.toThrow(/does not belong/i);
   });
 
+  it("legacy markDispatched pressed twice records one note and one email", async () => {
+    const po = await db.tx((t) => fx.makeRfqPo(t, { status: "approved", tracker: tr, lines: [{ qty: 10 }, { qty: 4 }] }));
+    const notes = () => db.any(`SELECT id FROM tbl_po_dispatch WHERE po_id = $1`, [po.poId]);
+    const told = () => db.any(
+      `SELECT id FROM tbl_notifications
+        WHERE type = 'po_dispatched' AND recipient_user_id = $2 AND (additional_data->>'po_id')::int = $1`,
+      [po.poId, BUYER]
+    );
+    try {
+      // A double click: both requests at once.
+      await expect(Promise.all([handleMarkDispatched(po.poId, VENDOR), handleMarkDispatched(po.poId, VENDOR)]))
+        .resolves.toEqual([true, true]);
+      const [first, ...more] = await notes();
+      expect(more).toEqual([]);
+      expect(await told()).toHaveLength(1);
+
+      // A retry later, while that note is still on the road: the same note.
+      await expect(handleMarkDispatched(po.poId, VENDOR)).resolves.toBe(true);
+      expect((await notes()).map((r) => r.id)).toEqual([first.id]);
+      expect(await told()).toHaveLength(1);
+
+      // Once the vendor withdraws it, the button records a new one.
+      await db.none(`UPDATE tbl_po_dispatch SET status = 'cancelled' WHERE id = $1`, [first.id]);
+      await expect(handleMarkDispatched(po.poId, VENDOR)).resolves.toBe(true);
+      expect(await notes()).toHaveLength(2);
+    } finally {
+      await db.none(`DELETE FROM tbl_notifications WHERE type = 'po_dispatched' AND (additional_data->>'po_id')::int = $1`, [po.poId]);
+    }
+  });
+
   it("second dispatch never moves status back from GRN", async () => {
     await withTx(async (t) => {
       const po = await fx.makeRfqPo(t, { status: "approved", lines: [{ qty: 10 }] });

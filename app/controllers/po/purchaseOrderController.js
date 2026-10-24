@@ -23,7 +23,7 @@ import { deriveScope } from "./poDashboardController.js";
 import { handleCallOffRejection, notifyCallOffRejected } from "../../services/callOffPoService.js";
 import { deferJson, isDeferred, sendDeferred } from "../../helper/deferredResponse.js";
 import { poFieldsFor } from "../../services/po/buyerOnlyPoFields.js";
-import { fillDefaultDueDates } from "../../services/inventory/planService.js";
+import { fillDefaultDueDates, acceptanceDatesFollowUp, queuePlanChangeFollowUp } from "../../services/inventory/planService.js";
 import { sendInventoryError } from "../../services/inventory/errors.js";
 
 // Tiny tagged-error class for controllers that need to map a thrown
@@ -1303,6 +1303,7 @@ export const acceptPO = async (req, res) => {
     const { po_id } = req.params;
     const vendorUserId = req.user.id;
 
+    let planDated = 0;
     const result = await db.tx(async t => {
       // F-PO-IDEM-001: split the lookup into its three failure modes so the
       // caller can distinguish (404 not-found / 403 wrong-vendor / 409
@@ -1337,7 +1338,7 @@ export const acceptPO = async (req, res) => {
       // date now that the delivery period runs from today. In a savepoint, so
       // a plan problem can never cost the vendor their acceptance.
       try {
-        await t.tx((sp) => fillDefaultDueDates(sp, po.id));
+        planDated = await t.tx((sp) => fillDefaultDueDates(sp, po.id));
       } catch (planErr) {
         logError(`[po ${po.id}] delivery plan dates at acceptance failed`, planErr);
       }
@@ -1372,6 +1373,10 @@ export const acceptPO = async (req, res) => {
     sendPOAcceptedNotificationToTeam(result, rfqDetails).catch(err => {
       logError('Failed to send PO accepted notification to team', err);
     });
+
+    // The plan just got its dates: the PO document prints them. Rewritten in
+    // the background (never rejects); no plan notice, the vendor just accepted.
+    if (planDated > 0) queuePlanChangeFollowUp(acceptanceDatesFollowUp(result, vendorUserId));
 
     return res.json({
       status: 1,

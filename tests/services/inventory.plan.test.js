@@ -22,7 +22,7 @@ const { db, withTx, closeDb } = await import("../setup/db.js");
 const { IDS } = await import("../fixtures/ids.js");
 const fx = await import("../helpers/invPlanFixtures.js");
 const { httpClient } = await import("../helpers/http.js");
-const { getDeliveries, savePlan, patchDueDate } = await import("../../app/services/inventory/planService.js");
+const { getDeliveries, savePlan, patchDueDate, planFollowUpsSettled } = await import("../../app/services/inventory/planService.js");
 const { createDispatch } = await import("../../app/services/inventory/dispatchService.js");
 const { buildPOTemplateData } = await import("../../app/helper/poTemplateDataBuilder.js");
 const { loadCallOffPoContext, renderCallOffPoHtml } = await import("../../app/helper/arc_v2/callOffPoRenderer.js");
@@ -31,7 +31,7 @@ const { pdfRenderer } = await import("../../app/util/pdfRenderer.js");
 const { qrSvg } = await import("../../app/services/inventory/qr.js");
 const { shortUrl } = await import("../../app/services/inventory/shortUrl.js");
 const { acceptPO } = await import("../../app/controllers/po/purchaseOrderController.js");
-const { handleUpdatePO } = await import("../../app/models/purchaseOrderModel.js");
+const { handleUpdatePO, draftPurchaseOrder, mergeDraftPOs, initiatePurchaseOrder } = await import("../../app/models/purchaseOrderModel.js");
 
 const { A1, A2, VENDOR, BUYER } = fx;
 const ADMIN = IDS.users.companyA_admin; // CEO, company-wide: reads POs, holds awarding.create
@@ -40,6 +40,8 @@ const buyer = { id: BUYER, user_type: 2 }; // TENDER_CREATOR: rfq.read, no award
 
 const tr = fx.newTracker();
 afterEach(async () => {
+  // Follow-ups run after the response: let them land before the rows go.
+  await planFollowUpsSettled();
   await fx.cleanupTracked(db, tr);
   notifyPlanChanged.mockClear();
   notifyDispatchCreated.mockClear();
@@ -54,6 +56,40 @@ const vendorDispatch = (over = {}) => ({
   expectedDeliveryDate: "2030-11-10",
   ...over,
 });
+
+/**
+ * Award one more product on `po`'s RFQ to its vendor, through the real
+ * draftPurchaseOrder: onto `existingPoId` (a merge), or as a draft of its own
+ * when `hierarchy` keeps it from auto-merging. Returns the new line's ids.
+ */
+async function awardLine(t, po, { qty, existingPoId = null, hierarchy = null }) {
+  const rp = await t.one(
+    `INSERT INTO tbl_rfq_products (rfq_id, comment, datasheet, spec_file, qap_file, qap, product_variant_id, variant)
+     VALUES ($1, '', '', '', '', '', 1, 0) RETURNING id`,
+    [po.rfqId]
+  );
+  tr.rfqProductIds.push(rp.id);
+  const qi = await t.one(
+    `INSERT INTO tbl_quote_items
+       (rfq_id, rfq_no, quote_id, product_variant_id, unit_price, total_price, comment, delivery_period, quantity)
+     VALUES ($1, (SELECT rfq_no FROM tbl_rfq WHERE id = $1), $2, 1, 100, $3, '', '', $4) RETURNING id`,
+    [po.rfqId, po.quoteId, 100 * qty, String(qty)]
+  );
+  const out = await draftPurchaseOrder(
+    po.rfqId, null, qi.id, 100 * qty,
+    { rfq_product_id: rp.id, quantity: qty, unit: "kg", unit_price: 100,
+      charges_meta: { tax: 18, tax_mode: "percentage" }, finalized_vendor_id: VENDOR },
+    BUYER, IDS.companies.A, { id: BUYER, company_id: IDS.companies.A }, existingPoId, hierarchy, t
+  );
+  if (!tr.poIds.includes(Number(out.po_id))) tr.poIds.push(Number(out.po_id));
+  const line = await t.one(
+    `SELECT id FROM tbl_purchase_order_product WHERE purchase_order_id = $1 AND rfq_product_id = $2`,
+    [out.po_id, rp.id]
+  );
+  return { poId: Number(out.po_id), lineId: Number(line.id) };
+}
+
+const planned = (out) => out.deliveries.flatMap((d) => d.lines.map((l) => [l.poLineId, l.plannedQty]));
 
 function mockExpress({ user, params = {}, body = {} }) {
   const res = {
@@ -137,6 +173,12 @@ describe("delivery plan", () => {
       );
       const out = await getDeliveries(t, buyer, po.poId);
       expect(out.can).toEqual({ editPlan: false, shortClose: false, receive: false, reverse: true, manageSiteRep: false });
+
+      // A vendor, or a site-rep token, never reads the buyer's plan, whatever a route lets through.
+      for (const who of [{ id: VENDOR, user_type: 3 }, { id: ADMIN, user_type: 2, is_token_user: true }]) {
+        await expect(getDeliveries(t, who, po.poId)).rejects.toMatchObject({ code: "NOT_FOUND" });
+        await expect(savePlan(t, who, po.poId, [])).rejects.toMatchObject({ code: "NOT_FOUND" });
+      }
     });
   });
 
@@ -345,6 +387,8 @@ describe("delivery plan", () => {
     const res = await c.put(`/api/v1/inventory/po/${accepted.poId}/deliveries`).send(split(accepted));
     expect(res.status).toBe(200);
     expect(res.body.data.deliveries.map((d) => d.phaseNo)).toEqual([1, 2]);
+    // The notice and the PDF follow the response.
+    await planFollowUpsSettled();
     expect(notifyPlanChanged).toHaveBeenCalledTimes(1);
     expect(notifyPlanChanged.mock.calls[0][1]).toMatchObject({ poId: accepted.poId, actorUserId: ADMIN });
     // The PDF the vendor holds is rewritten to print the new plan.
@@ -357,12 +401,14 @@ describe("delivery plan", () => {
     const moved = await c.patch(`/api/v1/inventory/po/${accepted.poId}/deliveries/${phase2.id}`).send({ dueDate: "2030-11-24" });
     expect(moved.status).toBe(200);
     expect(moved.body.data.deliveries[1].dueDate).toBe("2030-11-24");
+    await planFollowUpsSettled();
     expect(notifyPlanChanged).toHaveBeenCalledTimes(1);
 
     // Before the vendor has the PO, nobody is told.
     notifyPlanChanged.mockClear();
     const quiet = await c.put(`/api/v1/inventory/po/${pending.poId}/deliveries`).send(split(pending));
     expect(quiet.status).toBe(200);
+    await planFollowUpsSettled();
     expect(notifyPlanChanged).not.toHaveBeenCalled();
   });
 
@@ -450,6 +496,14 @@ describe("delivery plan", () => {
     expect((await fx.planRows(db, untouched.poId)).map((r) => r.due_date)).toEqual([d]);
     // A plan the buyer shaped is left as the buyer left it.
     expect((await fx.planRows(db, edited.poId)).map((r) => r.due_date)).toEqual([null, null]);
+
+    // The dated plan is printed: the PO document is rewritten after the
+    // response; the undated one is not touched. The vendor gets no plan notice.
+    await planFollowUpsSettled();
+    const pdf = async (po) => (await db.one(`SELECT po_pdf_url FROM tbl_rfq_purchase_order WHERE id = $1`, [po.poId])).po_pdf_url;
+    expect(await pdf(untouched)).toMatch(/^https:\/\//);
+    expect(await pdf(edited)).toBeNull();
+    expect(notifyPlanChanged).not.toHaveBeenCalled();
   });
 
   it("editing a pending PO's quantities drops its draft plan", async () => {
@@ -474,5 +528,83 @@ describe("delivery plan", () => {
     // Removing a line drops the plan too.
     await handleUpdatePO(po.poId, [{ path: `product[${po.rfqProductIds[1]}].removed`, newValue: true }], { id: BUYER });
     expect(await fx.planRows(db, po.poId)).toHaveLength(0);
+  });
+
+  it("a line awarded onto a planned draft is planned too (append and merge drop the plan)", async () => {
+    const po = await db.tx((t) => fx.makeRfqPo(t, { status: "draft", tracker: tr, lines: [{ qty: 5 }] }));
+    const [l1] = po.lineIds;
+    await db.tx((t) => getDeliveries(t, admin, po.poId));
+    expect(await fx.planRows(db, po.poId)).toHaveLength(1);
+
+    // A second product awarded to the same vendor lands on this draft.
+    const appended = await db.tx((t) => awardLine(t, po, { qty: 3, existingPoId: po.poId }));
+    expect(appended.poId).toBe(po.poId);
+    expect(await fx.planRows(db, po.poId)).toHaveLength(0);
+    expect(planned(await db.tx((t) => getDeliveries(t, admin, po.poId)))).toEqual([[l1, 5], [appended.lineId, 3]]);
+
+    // A separate draft for the same vendor, planned on its own, merged into this one.
+    const other = await db.tx((t) => awardLine(t, po, { qty: 2, hierarchy: 4242 })); // another hierarchy: no auto-merge
+    expect(other.poId).not.toBe(po.poId);
+    await db.tx((t) => getDeliveries(t, admin, other.poId));
+    expect(await fx.planRows(db, other.poId)).toHaveLength(1);
+    await mergeDraftPOs({ keep_po_id: po.poId, po_ids: [other.poId], user: { company_id: IDS.companies.A } });
+    expect(await fx.planRows(db, po.poId)).toHaveLength(0);
+    expect(planned(await db.tx((t) => getDeliveries(t, admin, po.poId))))
+      .toEqual([[l1, 5], [appended.lineId, 3], [other.lineId, 2]]);
+  });
+
+  it("a plan out of step with the PO's lines rebuilds itself on read, until it locks", async () => {
+    await withTx(async (t) => {
+      const po = await fx.makeRfqPo(t, { status: "approved", lines: [{ qty: 5 }, { qty: 3 }] });
+      const [l1, l2] = po.lineIds;
+      await getDeliveries(t, admin, po.poId);
+
+      // Changes made behind the plan's back: a line missing from it, a quantity changed.
+      await t.none(`DELETE FROM tbl_po_delivery_line WHERE po_line_id = $1`, [l2]);
+      expect(planned(await getDeliveries(t, admin, po.poId))).toEqual([[l1, 5], [l2, 3]]);
+      await t.none(`UPDATE tbl_purchase_order_product SET quantity = 7 WHERE id = $1`, [l1]);
+      expect(planned(await getDeliveries(t, admin, po.poId))).toEqual([[l1, 7], [l2, 3]]);
+
+      // A split the buyer saved totals the order: it is kept.
+      const split = [
+        { hotelId: A1, phaseNo: 1, lines: [{ poLineId: l1, plannedQty: 4 }, { poLineId: l2, plannedQty: 3 }] },
+        { hotelId: A1, phaseNo: 2, lines: [{ poLineId: l1, plannedQty: 3 }] },
+      ];
+      await savePlan(t, admin, po.poId, split);
+      expect((await getDeliveries(t, admin, po.poId)).deliveries).toHaveLength(2);
+
+      // Once goods are on the road the plan is fixed, stale or not.
+      await createDispatch(t, { system: true, userId: VENDOR }, po.poId, { lines: [] });
+      await t.none(`UPDATE tbl_purchase_order_product SET quantity = 9 WHERE id = $1`, [l1]);
+      const locked = await getDeliveries(t, admin, po.poId);
+      expect(locked.planLocked).toBe(true);
+      expect(planned(locked)).toEqual([[l1, 4], [l2, 3], [l1, 3]]);
+    });
+  });
+
+  it("submitting a PO for approval gives it the default plan, printed on its PDF", async () => {
+    await withTx(async (t) => {
+      const po = await fx.makeRfqPo(t, { status: "draft", initiatedBy: ADMIN, lines: [{ qty: 5 }, { qty: 2 }] });
+      const [l1, l2] = po.lineIds;
+      expect(await fx.planRows(t, po.poId)).toHaveLength(0);
+
+      let html = null;
+      const real = pdfRenderer.renderToFile;
+      pdfRenderer.renderToFile = async (h, p) => { html = h; return real(h, p); };
+      let out;
+      try {
+        out = await initiatePurchaseOrder(po.poId, { id: ADMIN, company_id: IDS.companies.A }, t);
+      } finally {
+        pdfRenderer.renderToFile = real;
+      }
+      expect(out.poPdf.ok).toBe(true);
+      const { status } = await t.one(`SELECT status::text FROM tbl_rfq_purchase_order WHERE id = $1`, [po.poId]);
+      expect(status).not.toBe("draft");
+
+      const rows = await fx.planRows(t, po.poId);
+      expect(rows).toEqual([expect.objectContaining({ hotel_id: A1, phase_no: 1, due_date: null })]);
+      expect(rows[0].lines.map((l) => [l.po_line_id, Number(l.planned_qty)])).toEqual([[l1, 5], [l2, 2]]);
+      expect(html).toContain("DELIVERY PLAN");
+    });
   });
 });

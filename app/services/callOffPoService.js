@@ -376,6 +376,18 @@ export async function releaseForMr(mrId, txContext = null) {
     const overShare = await recordCallOffAndUpdateConsumption(po, group, runner);
     released.push({ po, group, overShare });
 
+    // Delivery plan (inventory, spec §5.3): the call-off is born awaiting the
+    // vendor, so its default plan (due the MR's required-by date) exists from
+    // release and the document rendered after commit prints it. In a
+    // savepoint: a plan problem must not stop the release. Lazy import: the
+    // inventory services load the PO model, which loads this module.
+    try {
+      const { ensureCurrentPlan } = await import('./inventory/planService.js');
+      await runner.tx((sp) => ensureCurrentPlan(sp, po.id));
+    } catch (err) {
+      logger.error({ err, mrId, poId: po.id }, '[callOffPo] default delivery plan at release failed');
+    }
+
     // TODO Phase A finish: render the call-off PDF via callOffPoRenderer,
     // upload to S3, set po.po_pdf_url, dispatch vendor notification + email
     // (the email template detects is_call_off=TRUE and links the ARC

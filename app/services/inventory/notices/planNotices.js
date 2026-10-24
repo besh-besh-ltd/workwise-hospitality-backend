@@ -4,6 +4,8 @@
 //
 //   notifyPlanChanged      the vendor, when an accepted PO's plan changes
 //                          (in-app + email, with the new schedule; no prices).
+//                          The in-app notice is written every time; the email
+//                          goes at most once per PO per 15 minutes.
 //   notifyDispatchCreated  the PO's people, when goods are dispatched: the
 //                          dispatch email (and in-app po_dispatched) the legacy
 //                          "Mark dispatched" button always sent, through the
@@ -33,8 +35,13 @@ const positiveInt = (v) => {
   return Number.isInteger(n) && n > 0 ? n : null;
 };
 
+/** A vendor gets one plan-change email per PO in this window, however many saves it covers. */
+export const PLAN_EMAIL_COALESCE_MINUTES = 15;
+
 /**
- * Tell the vendor their delivery schedule for a PO changed.
+ * Tell the vendor their delivery schedule for a PO changed: an in-app notice
+ * every time, and an email unless one (or a notice) about this PO's plan went
+ * to them in the last PLAN_EMAIL_COALESCE_MINUTES.
  * @param {object} conn db (after commit)
  * @param {{poId:number, actorUserId?:number}} args
  */
@@ -70,18 +77,34 @@ export const notifyPlanChanged = async (conn, { poId, actorUserId = null } = {})
     const body = `The buyer has changed the delivery plan for ${poLabel}. Check the hotels, phases and due dates before you dispatch.`;
     const linkPath = vendorPoDeliveries(id);
 
-    await dispatchNotification({
-      userIds: [po.finalized_vendor_id],
-      senderUserId: positiveInt(actorUserId),
-      category: 'po',
-      type: 'po_delivery_plan_changed',
-      title,
-      body,
-      data: { po_id: id, rfq_id: po.rfq_id ?? null },
-      actionUrl: linkPath,
+    // The "anything recent?" check and the new notice are serialised per PO
+    // (advisory lock, held to the end of this short transaction), so two
+    // saves notified at the same moment cannot both decide to email.
+    const emailDue = await conn.tx(async (lt) => {
+      await lt.one(`SELECT pg_advisory_xact_lock(hashtext('inv:po_delivery_plan_changed'), $1)`, [id]);
+      const recent = await lt.oneOrNone(
+        `SELECT 1 FROM tbl_notifications
+          WHERE recipient_user_id = $1
+            AND type = 'po_delivery_plan_changed'
+            AND additional_data->>'po_id' = $2
+            AND created_at > now() - make_interval(mins => $3)
+          LIMIT 1`,
+        [po.finalized_vendor_id, String(id), PLAN_EMAIL_COALESCE_MINUTES]
+      );
+      await dispatchNotification({
+        userIds: [po.finalized_vendor_id],
+        senderUserId: positiveInt(actorUserId),
+        category: 'po',
+        type: 'po_delivery_plan_changed',
+        title,
+        body,
+        data: { po_id: id, rfq_id: po.rfq_id ?? null },
+        actionUrl: linkPath,
+      });
+      return !recent;
     });
 
-    if (!po.vendor_email) return;
+    if (!emailDue || !po.vendor_email) return;
     const tableRows = rows.map((r) => `
           <tr>
             <td style="padding:6px 8px; border-bottom:1px solid #eee;">${esc(r.hotel_name || (r.hotel_id == null ? 'To be allocated' : ''))}</td>

@@ -863,6 +863,20 @@ export const draftPurchaseOrder = async (rfq_id, project_id, quote_item_id, tota
           [existing_po_id, rfq_product_id, quote_item_id, quantity, unit, unit_price, charges_meta, linePrice]
         )
 
+        // Delivery plan (inventory): a plan made before this line existed
+        // cannot carry it. Dropped in the same transaction; the next read, or
+        // the submit for approval, plans every line again. Only before the
+        // vendor has the PO (existing_po_id is the caller's, and a received
+        // delivery cannot be dropped); later, the next read rebuilds a plan
+        // that nothing has been dispatched or received against.
+        await t.none(
+          `DELETE FROM tbl_po_delivery
+            WHERE po_id = $1
+              AND EXISTS (SELECT 1 FROM tbl_rfq_purchase_order
+                           WHERE id = $1 AND status IN ('draft', 'pending_approval'))`,
+          [existing_po_id]
+        );
+
         // Re-aggregate the header grand total over ALL lines now on this PO
         // plus the existing snapshot of document-level global_charges. Without
         // this, total_value would still reflect just the FIRST line's grand
@@ -1111,6 +1125,13 @@ export const mergeDraftPOs = async ({ keep_po_id, po_ids, user, txContext = null
     const inheritedReplacesPoId = keepRow.replaces_po_id ?? (rows
       .filter((r) => r.id !== keepIdNum && r.replaces_po_id != null)
       .sort((a, b) => a.id - b.id)[0]?.replaces_po_id ?? null);
+
+    // Delivery plans (inventory): the kept PO's plan does not carry the lines
+    // about to join it, and a source's plan would follow its lines onto the
+    // kept PO's ids. Every plan of the set is dropped (drafts: nothing has been
+    // dispatched or received against them); the next read, or the submit for
+    // approval, plans the merged PO afresh.
+    await t.none(`DELETE FROM tbl_po_delivery WHERE po_id = ANY($1::int[])`, [allIds]);
 
     // Re-parent ALL child rows from source POs to the kept PO. Order doesn't
     // matter since they're sibling tables, but we keep it deterministic for
@@ -1448,6 +1469,17 @@ export const initiatePurchaseOrder = async (po_id, initiator, t) => {
           [po_id]
         );
       }
+    }
+
+    // Delivery plan (inventory, spec §5.3): the default plan exists from
+    // pending_approval on, so the document below prints it. A plan made on a
+    // draft and since outgrown is rebuilt. In a savepoint: a plan problem
+    // (say, a PO whose company cannot be resolved) must not stop the submit.
+    try {
+      const { ensureCurrentPlan } = await import("../services/inventory/planService.js");
+      await t.tx((sp) => ensureCurrentPlan(sp, purchaseOrder.id, { userId: initiator?.id ?? null }));
+    } catch (planErr) {
+      logError(`[po ${purchaseOrder.id}] default delivery plan at submit failed`, planErr);
     }
 
     // Generate and store the PO document on THIS transaction.
@@ -3367,6 +3399,9 @@ export const handleMarkGRN = async (po_id, grn_document_url, user_id, remarks) =
 // PO's lines joined to their quote items with t.one, which threw on every PO
 // with more than one line and on every call-off PO (D1).
 //
+// Pressing it again while that note is still in transit (a double click, a
+// retry) finds the same note: no second note, no second email.
+//
 // Throws Error('PO does not exist…' / '…does not belong to you!') as before,
 // and InventoryError CONFLICT when the PO is not accepted, is closed, or has
 // been received in full.
@@ -3378,20 +3413,33 @@ export const handleMarkDispatched = async (po_id, vendor_id) => {
   ]);
 
   const dispatch = await db.tx(async (t) => {
+    // Locked: two presses at once queue here, and the second sees the first's note.
     const po = await t.oneOrNone(
       `SELECT id, finalized_vendor_id FROM tbl_rfq_purchase_order
-      WHERE id = $1`,
+      WHERE id = $1
+      FOR UPDATE`,
       [po_id]
     );
 
     if(!po) throw new Error('PO does not exist with given id')
     else if (po && po.finalized_vendor_id != vendor_id) throw new Error('PO does not belong to you!')
 
+    const open = await t.oneOrNone(
+      `SELECT d.id FROM tbl_po_dispatch d
+        WHERE d.po_id = $1 AND d.status = 'in_transit'
+          AND d.hotel_id IS NULL AND d.delivery_id IS NULL
+          AND NOT EXISTS (SELECT 1 FROM tbl_po_dispatch_line l WHERE l.dispatch_id = d.id)
+        ORDER BY d.id DESC
+        LIMIT 1`,
+      [po.id]
+    );
+    if (open) return { id: Number(open.id), reused: true };
+
     return createDispatch(t, { system: true, userId: Number(vendor_id) }, po.id, { lines: [] });
   });
 
-  // After commit: advisory, never throws.
-  await notifyDispatchCreated(db, { dispatchId: dispatch.id });
+  // After commit: advisory, never throws. Only a new note is announced.
+  if (!dispatch.reused) await notifyDispatchCreated(db, { dispatchId: dispatch.id });
   return true;
 };
 

@@ -15,10 +15,12 @@
 // name of a buyer's staff.
 
 import { InventoryError } from './errors.js';
-import { getPoContext, ensureDefaultPlan, listPoLines } from './planCore.js';
+import { getPoContext, listPoLines } from './planCore.js';
 import { advanceLegacyPoStatus, LEGACY_PO_STATUS_ORDER } from './poStatus.js';
 import { nextDocNumber } from './docNumber.js';
-import { loadDeliveries, loadPoLineRolls, loadDispatches, loadVendorDocuments, parseDay, parseQty } from './planService.js';
+import {
+  loadDeliveries, loadPoLineRolls, loadDispatches, loadVendorDocuments, parseDay, parseQty, ensureCurrentPlan,
+} from './planService.js';
 import { INVALID_PO_STATUSES_FOR_VENDOR } from '../../util/constants.js';
 
 const SCALE = 10000;
@@ -153,7 +155,7 @@ export async function createDispatch(t, actor, poId, payload = {}) {
     throw new InventoryError('VALIDATION', 'Expected delivery cannot be before the challan date', { field: 'expectedDeliveryDate' });
   }
 
-  await ensureDefaultPlan(t, id, { userId: actorUserId });
+  await ensureCurrentPlan(t, id, { userId: actorUserId });
 
   // Where it is going: a delivery (hotel × phase) of this PO, or a hotel of it, or not said.
   let hotelId = null;
@@ -289,11 +291,8 @@ export async function cancelDispatch(t, vendorUser, poId, dispatchId) {
 export async function getVendorDeliveries(t, vendorUser, poId) {
   const ctx = await ownedPo(t, vendorUser, poId);
   const id = Number(ctx.po.id);
-  const closed = ['cancelled', 'rejected', 'rejected_by_vendor', 'completed'].includes(String(ctx.status));
-  if (!closed) {
-    const has = await t.oneOrNone(`SELECT 1 FROM tbl_po_delivery WHERE po_id = $1 LIMIT 1`, [id]);
-    if (!has) await ensureDefaultPlan(t, id, { userId: positiveInt(vendorUser?.id) });
-  }
+  // Closed POs are left as they are; a live one gets its plan, current.
+  await ensureCurrentPlan(t, id, { userId: positiveInt(vendorUser?.id) });
   const fresh = await getPoContext(t, id);
   const hotels = fresh.hotelIds.length
     ? await t.any(`SELECT id, name FROM tbl_hospitality_company_hotels WHERE id = ANY($1::int[]) ORDER BY id`, [fresh.hotelIds])

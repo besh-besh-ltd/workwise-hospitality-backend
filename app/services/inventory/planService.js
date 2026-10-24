@@ -7,14 +7,22 @@
 //   savePlan        replaces the whole plan, until the first dispatch or receipt.
 //   patchDueDate    moves one delivery's date while it has received nothing.
 //   fillDefaultDueDates  dates an untouched default plan when the vendor accepts.
+//   ensureCurrentPlan    gives a live PO its default plan, and rebuilds a stale
+//                        one (lines added, moved or re-quantified by a path that
+//                        did not drop it) while the plan can still change shape.
+//                        Called on every read, at submit for approval and at
+//                        call-off release.
 //
+// Buyer staff only: a vendor or a site-rep token is NOT_FOUND here even if a
+// route lets one through (defence in depth; vendors use dispatchService).
 // Edits use the PO initiate gate (PO_INITIATE_PERMISSIONS, i.e. awarding.create)
 // on the PO's own scope tuple; reads use assertPoAccess. Both come from the
 // caller and the PO row, never from the request body.
 //
 // Side effects (vendor notice, PDF rewrite) run after commit: the controller
 // takes planChangeFollowUp(t, …) inside the transaction and hands it to
-// runPlanChangeFollowUp once the transaction has committed.
+// queuePlanChangeFollowUp once it has answered. Follow-ups of one PO run one
+// after another, so the last PDF written prints the last plan saved.
 
 import db from '../../config/dbConn.js';
 import { logError } from '../../helper/common.js';
@@ -121,12 +129,75 @@ async function planHasActivity(t, poId) {
   return row.allocated || row.short_closed;
 }
 
-/** Create the default plan on first read, without locking the PO when one exists (spec §7, GET performance). */
-async function ensurePlanForRead(t, ctx, userId) {
+/**
+ * Is the stored plan out of step with the PO's lines? True when a line is not
+ * planned at exactly its ordered quantity (a line appended, or re-quantified,
+ * by a path that did not drop the plan), or when a plan line points at a line
+ * that now sits on another PO (merged away). A plan the buyer saved always
+ * totals the ordered quantities, so this never flags a deliberate split.
+ */
+async function planIsStale(t, poId) {
+  const row = await t.one(
+    `SELECT EXISTS (
+              SELECT 1
+                FROM tbl_purchase_order_product pop
+                LEFT JOIN (SELECT dl.po_line_id, SUM(dl.planned_qty) AS planned
+                             FROM tbl_po_delivery_line dl
+                             JOIN tbl_po_delivery d ON d.id = dl.delivery_id
+                            WHERE d.po_id = $1
+                            GROUP BY dl.po_line_id) p ON p.po_line_id = pop.id
+               WHERE pop.purchase_order_id = $1
+                 AND COALESCE(p.planned, 0) <> ROUND(GREATEST(pop.quantity, 0)::numeric, 4)
+            ) OR EXISTS (
+              SELECT 1
+                FROM tbl_po_delivery_line dl
+                JOIN tbl_po_delivery d ON d.id = dl.delivery_id
+                JOIN tbl_purchase_order_product pop ON pop.id = dl.po_line_id
+               WHERE d.po_id = $1 AND pop.purchase_order_id <> $1
+            ) AS stale`,
+    [poId]
+  );
+  return row.stale === true;
+}
+
+/**
+ * Bring a live PO's plan in line with its lines (ctx = getPoContext, unlocked).
+ * No plan: the default one. A stale plan (planIsStale) that can still change
+ * shape (not locked by a dispatch, nothing received or short-closed, not a
+ * legacy received PO): dropped and replaced by the default. A stale plan that
+ * can no longer change is left as it is. The PO row is locked only when there
+ * is something to write, so a read of a current plan stays lock-free.
+ */
+async function refreshPlan(t, ctx, userId) {
   if (CLOSED_PO_STATUSES.includes(String(ctx.status))) return;
-  const has = await t.oneOrNone(`SELECT 1 FROM tbl_po_delivery WHERE po_id = $1 LIMIT 1`, [Number(ctx.po.id)]);
-  if (has) return;
-  await ensureDefaultPlan(t, Number(ctx.po.id), { userId: userId ?? null });
+  const id = Number(ctx.po.id);
+  const has = await t.oneOrNone(`SELECT 1 FROM tbl_po_delivery WHERE po_id = $1 LIMIT 1`, [id]);
+  if (has) {
+    if (!(await planIsStale(t, id))) return;
+    const locked = await getPoContext(t, id, { forUpdate: true });
+    if (locked.planLockedAt || (locked.receiptLegacy && locked.receiptStatus === 'received')) return;
+    if ((await planHasActivity(t, id)) || !(await planIsStale(t, id))) return;
+    await t.none(`DELETE FROM tbl_po_delivery WHERE po_id = $1`, [id]);
+  }
+  await ensureDefaultPlan(t, id, { userId: userId ?? null });
+}
+
+/**
+ * The PO's plan, current: see refreshPlan. For callers outside the read path
+ * (submit for approval, call-off release, dispatch). Run it in a savepoint
+ * where a plan problem must not cost the caller its own change.
+ * @throws InventoryError NOT_FOUND (no such PO) | CONFLICT (company unresolved).
+ */
+export async function ensureCurrentPlan(t, poId, { userId = null } = {}) {
+  const ctx = await getPoContext(t, poId);
+  await refreshPlan(t, ctx, positiveInt(userId));
+}
+
+/** A vendor or a site-rep token never reads or edits a buyer's plan: NOT_FOUND, as for a PO out of scope. */
+function assertBuyerStaff(user, poId) {
+  if (!user || Number(user.user_type) === 3 || user.is_token_user) {
+    throw new InventoryError('NOT_FOUND', 'Purchase order not found', { poId: positiveInt(poId) ?? null });
+  }
 }
 
 /** Line roll-up of one delivery line, from its stored counters. */
@@ -579,10 +650,11 @@ async function buyerPayload(t, user, poId, tenancy) {
  * @throws PoAccessError (404) when the caller cannot see the PO.
  */
 export async function getDeliveries(t, user, poId) {
+  assertBuyerStaff(user, poId);
   const tenancy = await assertPoAccess(user, poId, t);
   const id = Number(tenancy.id);
   const ctx = await getPoContext(t, id);
-  await ensurePlanForRead(t, ctx, positiveInt(user?.id));
+  await refreshPlan(t, ctx, positiveInt(user?.id));
   return buyerPayload(t, user, id, tenancy);
 }
 
@@ -702,6 +774,7 @@ function validatePlan(input, { hotelIds, lines, minDay }) {
  *   InventoryError LOCKED | VALIDATION.
  */
 export async function savePlan(t, user, poId, deliveries) {
+  assertBuyerStaff(user, poId);
   const tenancy = await assertPoInitiateAccess(user, poId, t);
   const id = Number(tenancy.id);
   const ctx = await getPoContext(t, id, { forUpdate: true });
@@ -743,6 +816,7 @@ export async function savePlan(t, user, poId, deliveries) {
  *   InventoryError NOT_FOUND (delivery of another PO) | LOCKED | VALIDATION.
  */
 export async function patchDueDate(t, user, poId, deliveryId, dueDate) {
+  assertBuyerStaff(user, poId);
   const tenancy = await assertPoInitiateAccess(user, poId, t);
   const id = Number(tenancy.id);
   const ctx = await getPoContext(t, id, { forUpdate: true });
@@ -840,6 +914,45 @@ export async function runPlanChangeFollowUp(followUp) {
   }
 }
 
+// Follow-ups queued per PO, so a PDF rendered from an older plan can never
+// land after one rendered from a newer plan (in this process).
+const followUpChains = new Map();
+
+/**
+ * Run a plan change's follow-up after the response has gone, behind any
+ * earlier follow-up of the same PO. Never rejects.
+ * @returns {Promise<void>} settles when this follow-up has run.
+ */
+export function queuePlanChangeFollowUp(followUp) {
+  const key = positiveInt(followUp?.poId);
+  if (!key) return Promise.resolve();
+  const next = (followUpChains.get(key) || Promise.resolve()).then(() => runPlanChangeFollowUp(followUp));
+  followUpChains.set(key, next);
+  next.then(() => {
+    if (followUpChains.get(key) === next) followUpChains.delete(key);
+  });
+  return next;
+}
+
+/** Settles once every queued follow-up has run (tests; graceful shutdown). */
+export async function planFollowUpsSettled() {
+  while (followUpChains.size) await Promise.allSettled([...followUpChains.values()]);
+}
+
+/**
+ * The follow-up for a PO whose default plan was just dated at acceptance:
+ * rewrite the document the vendor holds; no notice (they just accepted).
+ */
+export function acceptanceDatesFollowUp(po, actorUserId = null) {
+  return {
+    poId: positiveInt(po?.id),
+    actorUserId: positiveInt(actorUserId),
+    isCallOff: po?.is_call_off === true,
+    notifyVendor: false,
+    regeneratePdf: true,
+  };
+}
+
 /** Activity-log scope for a PO, from the PO row (never a header). */
 export async function poActivityScope(t, poId) {
   const ctx = await getPoContext(t, poId);
@@ -855,8 +968,12 @@ export default {
   savePlan,
   patchDueDate,
   fillDefaultDueDates,
+  ensureCurrentPlan,
   planChangeFollowUp,
   runPlanChangeFollowUp,
+  queuePlanChangeFollowUp,
+  planFollowUpsSettled,
+  acceptanceDatesFollowUp,
   poActivityScope,
   loadDeliveries,
   loadPoLineRolls,
