@@ -20,7 +20,10 @@ import { IDS } from "../fixtures/ids.js";
 import { makeRFQ } from "../factories/rfq.js";
 import { httpClient } from "../helpers/http.js";
 
-const BUYER = IDS.users.a1_proc_buyer;
+// A buyer (tender creator, procurement) on BOTH A-1 and A-2. The direct-draft
+// path below lives on A-2, and finalize now refuses a caller who cannot read
+// the RFQ (assertCanReadParentRfq), so an A-1-only buyer gets a 403 there.
+const BUYER = IDS.users.multiHotel;
 let VARIANT_A = 1;
 let VARIANT_B = 2;
 

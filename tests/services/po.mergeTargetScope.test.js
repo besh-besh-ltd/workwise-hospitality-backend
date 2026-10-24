@@ -5,9 +5,17 @@
 // finalize or approve request could write into another RFQ's (or another
 // company's) purchase order, or into one already under approval.
 //
-// Real Postgres, real HTTP for the two request paths (POST /rfq/finalize and
-// POST /negotiation/quotes/:rfq_product_id/approve). Every test commits and
-// the afterEach removes what it created.
+// The same-RFQ match only scopes the PO because the RFQ itself is gated:
+// finalize checks the caller can read the RFQ, approve checks the caller is an
+// approver on the instance. Both are pinned here, as is the id's shape ("5.0",
+// "5e0" and [5] are refused, not coerced) and the post-approval fallback (a
+// target that goes stale once the approval has committed is set aside, never
+// left as "approved, no PO").
+//
+// Real Postgres, real HTTP for the three request paths (POST /rfq/finalize,
+// POST /negotiation/quotes/:rfq_product_id/approve and the approval engine's
+// POST /general/hospitality/approval/action). Every test commits and the
+// afterEach removes what it created.
 
 import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach } from "@jest/globals";
 import { db, closeDb } from "../setup/db.js";
@@ -18,6 +26,7 @@ import { draftPurchaseOrder } from "../../app/models/purchaseOrderModel.js";
 
 const BUYER = IDS.users.a1_proc_buyer;
 const APPROVER = IDS.users.a1_proc_commApp; // the A1/P1 NEGOTIATION_QUOTE approver
+const OTHER_COMPANY_BUYER = IDS.users.companyB_admin; // company-level scope on Company B only
 const VENDOR = IDS.users.vendor_alpha;
 const OTHER_VENDOR = IDS.users.vendor_beta;
 const REFUSED = { code: "PO_MERGE_TARGET_INVALID", httpStatus: 400 };
@@ -26,13 +35,18 @@ let VARIANT = 1;
 
 // The routes are gated by acl() on tbl_users.user_type, which the fixture users
 // leave NULL; set it for this suite and put it back afterwards.
+const ROUTE_USERS = [BUYER, APPROVER, OTHER_COMPANY_BUYER];
+let savedUserTypes = [];
 beforeAll(async () => {
   const v = await db.oneOrNone(`SELECT id FROM tbl_product_variant ORDER BY id ASC LIMIT 1`);
   if (v) VARIANT = v.id;
-  await db.none(`UPDATE tbl_users SET user_type = 2 WHERE id = ANY($1::int[])`, [[BUYER, APPROVER]]);
+  savedUserTypes = await db.any(`SELECT id, user_type FROM tbl_users WHERE id = ANY($1::int[])`, [ROUTE_USERS]);
+  await db.none(`UPDATE tbl_users SET user_type = 2 WHERE id = ANY($1::int[])`, [ROUTE_USERS]);
 });
 afterAll(async () => {
-  await db.none(`UPDATE tbl_users SET user_type = NULL WHERE id = ANY($1::int[])`, [[BUYER, APPROVER]]);
+  for (const u of savedUserTypes) {
+    await db.none(`UPDATE tbl_users SET user_type = $2 WHERE id = $1`, [u.id, u.user_type]);
+  }
   await closeDb();
 });
 
@@ -107,16 +121,16 @@ async function makeRfq({ company = "A" } = {}) {
 }
 
 /** One product on `rfq` and `vendor`'s quote for it. */
-async function quotedProduct(rfq, vendor = VENDOR) {
+async function quotedProduct(rfq, vendor = VENDOR, { variant = 0 } = {}) {
   const rp = await db.one(
     `INSERT INTO tbl_rfq_products (rfq_id, comment, datasheet, spec_file, qap_file, qap, product_variant_id, variant)
-     VALUES ($1, '', '', '', '', '', $2, 0) RETURNING id`,
-    [rfq.rfqId, VARIANT]
+     VALUES ($1, '', '', '', '', '', $2, $3) RETURNING id`,
+    [rfq.rfqId, VARIANT, variant]
   );
   await db.none(
     `INSERT INTO tbl_rfq_product_vendors (rfq_id, product_variant_id, user_id, variant)
-     VALUES ($1, $2, $3, 0) ON CONFLICT DO NOTHING`,
-    [rfq.rfqId, VARIANT, vendor]
+     VALUES ($1, $2, $3, $4) ON CONFLICT DO NOTHING`,
+    [rfq.rfqId, VARIANT, vendor, variant]
   );
   const q = await db.one(
     `INSERT INTO tbl_quotes (rfq_id, rfq_no, created_by, updated_by, status, "timestamp")
@@ -127,15 +141,19 @@ async function quotedProduct(rfq, vendor = VENDOR) {
     `INSERT INTO tbl_quote_items
        (rfq_id, rfq_no, quote_id, product_variant_id, unit_price, total_price, package_price,
         tax, freight_price, variant, comment, delivery_period, quantity, tax_mode, other_charges)
-     VALUES ($1, $2, $3, $4, 100, 300, 0, 18, 0, 0, 'q', '7', '3', 'percentage', '[]') RETURNING id`,
-    [rfq.rfqId, rfq.rfqNo, q.id, VARIANT]
+     VALUES ($1, $2, $3, $4, 100, 300, 0, 18, 0, $5, 'q', '7', '3', 'percentage', '[]') RETURNING id`,
+    [rfq.rfqId, rfq.rfqNo, q.id, VARIANT, variant]
   );
   return { rfqProductId: Number(rp.id), quoteItemId: Number(qi.id), vendor };
 }
 
-/** A PO header with one line on `rfq`, for `vendor`, in `status`. */
-async function makePo(rfq, { vendor = VENDOR, status = "draft", hierarchy = null } = {}) {
-  const line = await quotedProduct(rfq, vendor);
+/**
+ * A PO header with one line on `rfq`, for `vendor`, in `status`. The line is
+ * its own product (variant `variant`), so a finalize of another variant-0
+ * line on the same RFQ resolves one product row.
+ */
+async function makePo(rfq, { vendor = VENDOR, status = "draft", hierarchy = null, variant = 0 } = {}) {
+  const line = await quotedProduct(rfq, vendor, { variant });
   const po = await db.one(
     `INSERT INTO tbl_rfq_purchase_order
        (rfq_id, company_id, po_number, status, rfq_product_id, quantity, unit_price,
@@ -166,10 +184,31 @@ const productInfo = (line) => ({
 });
 
 /** Award `line` of `rfq` through the model, onto `existingPoId`, asking for hierarchy 777. */
-const award = (rfq, line, existingPoId) => db.tx((t) => draftPurchaseOrder(
+const award = (rfq, line, existingPoId, opts) => db.tx((t) => draftPurchaseOrder(
   rfq.rfqId, null, line.quoteItemId, 354, productInfo(line), BUYER, IDS.companies.A,
-  { id: BUYER, company_id: IDS.companies.A }, existingPoId, 777, t, [], 354
+  { id: BUYER, company_id: IDS.companies.A }, existingPoId, 777, t, [], 354, opts
 ));
+
+/** The finalize request body for `line` of `rfq`. */
+const finalizeBody = (rfq, line, extra = {}) => ({
+  rfq_id: rfq.rfqId, rfq_no: rfq.rfqNo, product_variant_id: VARIANT, variant: 0,
+  vendor_id: VENDOR, quote_id: line.quoteItemId, quote_item_id: line.quoteItemId,
+  route_type: "PO", comment: "awarding after evaluation", project_id: null,
+  product_info: productInfo(line), ...extra,
+});
+
+/** What an award of `line` of `rfq` left behind: finalizations, POs, parked approvals. */
+const awardTrail = async (rfq, line) => ({
+  finalizations: await db.any(`SELECT id FROM tbl_quote_finalization WHERE rfq_id = $1`, [rfq.rfqId]),
+  pos: await db.any(`SELECT id FROM tbl_rfq_purchase_order WHERE rfq_id = $1 ORDER BY id`, [rfq.rfqId]),
+  approvals: await db.any(
+    `SELECT id FROM tbl_approval_instances WHERE entity_type = 'NEGOTIATION_QUOTE' AND entity_id = $1`,
+    [line.rfqProductId]
+  ),
+});
+
+/** The id shapes that name PO `id` but are not an id: refused, not coerced. */
+const malformed = (id) => [[id], `${id}.0`, `${id}e0`];
 
 // ---- the model ------------------------------------------------------------------
 
@@ -212,37 +251,96 @@ describe("draftPurchaseOrder with a client-chosen existing_po_id", () => {
     expect(out).toMatchObject({ po_id: target, created: false });
     expect(await poState(target)).toMatchObject({ status: "draft", hierarchy: "777", lines: 2 });
   });
+
+  it("refuses an id that only coerces to a valid draft (\"D.0\", \"De0\", [D]), and takes a digit string", async () => {
+    const rfq = await makeRfq();
+    const target = await makePo(rfq, { hierarchy: 4242 });
+    const before = await poState(target);
+
+    for (const shape of malformed(target)) {
+      const line = await quotedProduct(rfq);
+      await expect(award(rfq, line, shape)).rejects.toMatchObject(REFUSED);
+      expect(await poState(target)).toEqual(before);
+    }
+    const line = await quotedProduct(rfq);
+    expect(await award(rfq, line, String(target))).toMatchObject({ po_id: target, created: false });
+  });
+
+  it("with staleTargetFallback, a refused target is set aside under the lock and the line is drafted without it", async () => {
+    const rfq = await makeRfq();
+    const pending = await makePo(rfq, { status: "pending_approval" });
+    const line = await quotedProduct(rfq);
+    const before = await poState(pending);
+
+    const out = await award(rfq, line, pending, { staleTargetFallback: true });
+
+    expect(out).toMatchObject({ created: true });
+    expect(out.po_id).not.toBe(pending);
+    expect(await poState(pending)).toEqual(before);
+    expect(await poState(out.po_id)).toMatchObject({ status: "draft", lines: 1 });
+  });
 });
 
 // ---- the request paths ------------------------------------------------------------
 
 describe("POST /rfq/finalize with existing_po_id", () => {
+  const finalize = async (userId, body) => (await httpClient(userId)).post("/api/v1/rfq/finalize").send(body);
+
   it("answers 400 for another RFQ's PO, before anything is awarded or parked", async () => {
     const rfq = await makeRfq();
     const line = await quotedProduct(rfq);
     const foreign = await makePo(await makeRfq());
     const before = await poState(foreign);
 
-    const res = await (await httpClient(BUYER)).post("/api/v1/rfq/finalize").send({
-      rfq_id: rfq.rfqId, rfq_no: rfq.rfqNo, product_variant_id: VARIANT, variant: 0,
-      vendor_id: VENDOR, quote_id: line.quoteItemId, quote_item_id: line.quoteItemId,
-      route_type: "PO", comment: "awarding after evaluation", existing_po_id: foreign,
-      project_id: null, product_info: productInfo(line),
-    });
+    const res = await finalize(BUYER, finalizeBody(rfq, line, { existing_po_id: foreign }));
 
     expect(res.status).toBe(400);
     expect(res.body).toMatchObject({ status: 0, code: "PO_MERGE_TARGET_INVALID" });
     expect(await poState(foreign)).toEqual(before);
-    expect(await db.any(`SELECT id FROM tbl_quote_finalization WHERE rfq_id = $1`, [rfq.rfqId])).toEqual([]);
-    expect(await db.any(
-      `SELECT id FROM tbl_approval_instances WHERE entity_type = 'NEGOTIATION_QUOTE' AND entity_id = $1`,
-      [line.rfqProductId]
-    )).toEqual([]);
+    expect(await awardTrail(rfq, line)).toEqual({ finalizations: [], pos: [], approvals: [] });
+  });
+
+  it("refuses a buyer of another company outright: scope error, nothing awarded, drafted or parked", async () => {
+    const rfq = await makeRfq();
+    const draft = await makePo(rfq, { variant: 1 });
+    const line = await quotedProduct(rfq);
+    const before = await poState(draft);
+    const trailBefore = await awardTrail(rfq, line);
+
+    for (const extra of [{}, { existing_po_id: draft }]) {
+      const res = await finalize(OTHER_COMPANY_BUYER, finalizeBody(rfq, line, extra));
+
+      expect(res.status).toBe(403);
+      expect(res.body).toMatchObject({ status: 3, code: "PROCESS_NOT_IN_USER_SCOPE" });
+    }
+    expect(await poState(draft)).toEqual(before);
+    expect(await awardTrail(rfq, line)).toEqual(trailBefore);
+  });
+
+  it("refuses an id that only coerces to this RFQ's draft (\"D.0\", \"De0\", [D]) with 400, writing nothing", async () => {
+    const rfq = await makeRfq();
+    const draft = await makePo(rfq, { hierarchy: 4242, variant: 1 });
+    const line = await quotedProduct(rfq);
+    const before = await poState(draft);
+    const trailBefore = await awardTrail(rfq, line);
+
+    for (const shape of malformed(draft)) {
+      const res = await finalize(BUYER, finalizeBody(rfq, line, { existing_po_id: shape }));
+
+      expect(res.status).toBe(400);
+      // [D] is not a number at all, so the request schema refuses it first.
+      if (!Array.isArray(shape)) expect(res.body).toMatchObject({ status: 0, code: "PO_MERGE_TARGET_INVALID" });
+      expect(await poState(draft)).toEqual(before);
+      expect(await awardTrail(rfq, line)).toEqual(trailBefore);
+    }
   });
 });
 
 describe("POST /negotiation/quotes/:rfq_product_id/approve with existing_po_id", () => {
   /** A finalize parked for approval, as rfqController.finalize stores it. */
+  // The payload asks for hierarchy 4243 and the targets below carry 4242, so
+  // the auto-merge never picks them: a line that lands on one got there as the
+  // chosen target.
   async function parkedAward(rfq, line, { parkedPoId = null } = {}) {
     const result = await createApprovalInstance({
       entity_type: "NEGOTIATION_QUOTE",
@@ -259,7 +357,7 @@ describe("POST /negotiation/quotes/:rfq_product_id/approve with existing_po_id",
         po_payload: {
           rfq_id: rfq.rfqId, rfq_no: rfq.rfqNo, product_variant_id: VARIANT, variant: 0, vendor_id: VENDOR,
           quote_id: line.quoteItemId, quote_item_id: line.quoteItemId, route_type: "PO", project_id: null,
-          product_info: productInfo(line), existing_po_id: parkedPoId,
+          product_info: productInfo(line), existing_po_id: parkedPoId, selected_hierarchy: 4243,
         },
         po_user: { id: BUYER, company_id: IDS.companies.A },
       },
@@ -268,8 +366,19 @@ describe("POST /negotiation/quotes/:rfq_product_id/approve with existing_po_id",
     return result.instance.id;
   }
   const instanceStatus = async (id) => (await db.one(`SELECT status FROM tbl_approval_instances WHERE id = $1`, [id])).status;
-  const approve = async (line, body) =>
-    (await httpClient(APPROVER)).post(`/api/v1/negotiation/quotes/${line.rfqProductId}/approve`).send(body);
+  const approve = async (line, body, userId = APPROVER) =>
+    (await httpClient(userId)).post(`/api/v1/negotiation/quotes/${line.rfqProductId}/approve`).send(body);
+  /** The approval engine's own endpoint, which runs negotiationQuotePostApproval. */
+  const engineApprove = async (instanceId) =>
+    (await httpClient(APPROVER)).post("/api/v1/general/hospitality/approval/action")
+      .send({ approval_instance_id: instanceId, action: "APPROVE", comment: "approving" });
+  /** Every PO of `rfq` carrying `line`. */
+  const posWithLine = async (rfq, line) => (await db.any(
+    `SELECT DISTINCT po.id FROM tbl_rfq_purchase_order po
+       JOIN tbl_purchase_order_product l ON l.purchase_order_id = po.id
+      WHERE po.rfq_id = $1 AND l.rfq_product_id = $2`,
+    [rfq.rfqId, line.rfqProductId]
+  )).map((r) => ({ id: Number(r.id) }));
 
   it("answers 400 for another RFQ's PO and records no approval", async () => {
     const rfq = await makeRfq();
@@ -308,5 +417,108 @@ describe("POST /negotiation/quotes/:rfq_product_id/approve with existing_po_id",
       [rfq.rfqId, line.rfqProductId]
     );
     expect(drafts).toHaveLength(1);
+  });
+
+  it("refuses an id that only coerces to this RFQ's draft (\"D.0\", \"De0\", [D]) with 400 and records no approval", async () => {
+    const rfq = await makeRfq();
+    const draft = await makePo(rfq, { hierarchy: 4242 });
+    const line = await quotedProduct(rfq);
+    const instanceId = await parkedAward(rfq, line);
+    const before = await poState(draft);
+
+    for (const shape of malformed(draft)) {
+      const res = await approve(line, { remarks: "approving", existing_po_id: shape });
+
+      expect(res.status).toBe(400);
+      expect(res.body).toMatchObject({ status: 0, code: "PO_MERGE_TARGET_INVALID" });
+      expect(await instanceStatus(instanceId)).toBe("PENDING");
+      expect(await poState(draft)).toEqual(before);
+      expect(await posWithLine(rfq, line)).toEqual([]);
+    }
+  });
+
+  it("a caller who is not an approver on the instance gets the engine's answer, whatever the target", async () => {
+    const rfq = await makeRfq();
+    const draft = await makePo(rfq, { hierarchy: 4242 });
+    const line = await quotedProduct(rfq);
+    const foreign = await makePo(await makeRfq());
+    const instanceId = await parkedAward(rfq, line);
+    const before = await poState(draft);
+
+    const answers = [];
+    for (const body of [{}, { existing_po_id: draft }, { existing_po_id: foreign }, { existing_po_id: "x" }]) {
+      const res = await approve(line, { remarks: "approving", ...body }, BUYER);
+      answers.push({ status: res.status, body: res.body });
+    }
+
+    // One answer for all four, and it is submitApprovalAction's own refusal
+    // of a non-approver: nothing about the PO ids leaks.
+    expect(answers[0]).toEqual({ status: 400, body: { status: 3, message: "User is not an approver for this step" } });
+    for (const a of answers) expect(a).toEqual(answers[0]);
+    expect(await instanceStatus(instanceId)).toBe("PENDING");
+    expect(await poState(draft)).toEqual(before);
+  });
+
+  it("a parked target that is still this RFQ's draft takes the line at approval", async () => {
+    const rfq = await makeRfq();
+    const parked = await makePo(rfq, { hierarchy: 4242 });
+    const line = await quotedProduct(rfq);
+    const instanceId = await parkedAward(rfq, line, { parkedPoId: parked });
+
+    const res = await approve(line, { remarks: "approving" });
+
+    expect(res.status).toBe(200);
+    expect(await instanceStatus(instanceId)).toBe("APPROVED");
+    expect(await poState(parked)).toMatchObject({ status: "draft", hierarchy: "4243", lines: 2 });
+    expect(await posWithLine(rfq, line)).toEqual([{ id: parked }]);
+  });
+
+  it("the approver's own target (sent as a digit string) takes the line", async () => {
+    const rfq = await makeRfq();
+    const chosen = await makePo(rfq, { hierarchy: 4242 });
+    const line = await quotedProduct(rfq);
+    const instanceId = await parkedAward(rfq, line);
+
+    const res = await approve(line, { remarks: "approving", existing_po_id: String(chosen) });
+
+    expect(res.status).toBe(200);
+    expect(await instanceStatus(instanceId)).toBe("APPROVED");
+    expect(await poState(chosen)).toMatchObject({ status: "draft", hierarchy: "4243", lines: 2 });
+    expect(await posWithLine(rfq, line)).toEqual([{ id: chosen }]);
+  });
+
+  describe("approved through the approval engine (negotiationQuotePostApproval)", () => {
+    it("a parked target that is still this RFQ's draft takes the line", async () => {
+      const rfq = await makeRfq();
+      const parked = await makePo(rfq, { hierarchy: 4242 });
+      const line = await quotedProduct(rfq);
+      const instanceId = await parkedAward(rfq, line, { parkedPoId: parked });
+
+      const res = await engineApprove(instanceId);
+
+      expect(res.status).toBe(200);
+      expect(await instanceStatus(instanceId)).toBe("APPROVED");
+      expect(await poState(parked)).toMatchObject({ status: "draft", hierarchy: "4243", lines: 2 });
+      expect(await posWithLine(rfq, line)).toEqual([{ id: parked }]);
+    });
+
+    it("a parked target that has left draft is set aside: the approved line still gets a draft", async () => {
+      const rfq = await makeRfq();
+      const parked = await makePo(rfq, { hierarchy: 4242 });
+      const line = await quotedProduct(rfq);
+      const instanceId = await parkedAward(rfq, line, { parkedPoId: parked });
+      await db.none(`UPDATE tbl_rfq_purchase_order SET status = 'pending_approval' WHERE id = $1`, [parked]);
+      const before = await poState(parked);
+
+      const res = await engineApprove(instanceId);
+
+      expect(res.status).toBe(200);
+      expect(await instanceStatus(instanceId)).toBe("APPROVED");
+      expect(await poState(parked)).toEqual(before);
+      const drafts = await posWithLine(rfq, line);
+      expect(drafts).toHaveLength(1);
+      expect(drafts[0].id).not.toBe(parked);
+      expect(await poState(drafts[0].id)).toMatchObject({ status: "draft", lines: 1 });
+    });
   });
 });

@@ -360,7 +360,11 @@ export const buildAuthoritativePOPayload = async (poInfo, txn) => {
   }
 };
 
-export const draftPO = async (poInfo, user, txn) => {
+/**
+ * @param {object} [opts] passed to draftPurchaseOrder; `staleTargetFallback`
+ *   for an award whose approval has already committed.
+ */
+export const draftPO = async (poInfo, user, txn, opts = {}) => {
   try {
     const { rfq_id, project_id, product_info, quote_item_id, existing_po_id, selected_hierarchy } = poInfo;
     const { id: initiated_by, company_id } = user;
@@ -423,7 +427,8 @@ export const draftPO = async (poInfo, user, txn) => {
       selected_hierarchy,
       txn,
       globalCharges,
-      line_total
+      line_total,
+      opts
     );
 
     return result;

@@ -6,7 +6,7 @@ import {
 import { logError } from '../../helper/common.js';
 import { notifyDraftCreated } from '../../services/po/poInitiateNotifier.js';
 import { draftPO, buildAuthoritativePOPayload } from '../po/purchaseOrderController.js';
-import { autoInitiateRFQPOs, withoutStaleMergeTarget } from '../../models/purchaseOrderModel.js';
+import { autoInitiateRFQPOs } from '../../models/purchaseOrderModel.js';
 import rfqModel from '../../models/rfqModel.js';
 import db from '../../config/dbConn.js';
 
@@ -51,11 +51,11 @@ export const handleNegotiationQuotePostApproval = async (approval_instance_id, a
       // Path A: PO payload stored by rfqController.finalize
       let txResult = null;
       await db.tx(async (t) => {
-        // A merge target parked at finalize that has since left draft is set
-        // aside: the approval is already recorded and must still get its PO.
-        const poPayload = await withoutStaleMergeTarget(t, metadata.po_payload);
-        const authPayload = await buildAuthoritativePOPayload(poPayload, t);
-        txResult = await draftPO(authPayload, metadata.po_user, t);
+        // The approval is already recorded and must still get its PO: a merge
+        // target parked at finalize that has since left draft is set aside
+        // under the PO lock (staleTargetFallback), not refused.
+        const authPayload = await buildAuthoritativePOPayload(metadata.po_payload, t);
+        txResult = await draftPO(authPayload, metadata.po_user, t, { staleTargetFallback: true });
 
         const entityType = metadata.is_tender === 1 ? 'TENDER' : 'RFQ';
         await recordLifecycleEvent({

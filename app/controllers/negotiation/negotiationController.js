@@ -48,7 +48,7 @@ import { draftPO, buildAuthoritativePOPayload } from '../po/purchaseOrderControl
 import { notifyDraftCreated } from '../../services/po/poInitiateNotifier.js';
 import { PoDecisionError } from '../../services/po/poDecisionError.js';
 import { buildDraftedPos } from '../../models/po/poInitiateGuide.js';
-import { initiatePurchaseOrder, assertDraftMergeTarget, withoutStaleMergeTarget } from '../../models/purchaseOrderModel.js';
+import { initiatePurchaseOrder, assertDraftMergeTarget } from '../../models/purchaseOrderModel.js';
 import {
   buildQuoteVisibilityMeta,
   createQuoteVisibilityError,
@@ -129,6 +129,33 @@ const formatErrorResponse = (res, error) => {
     message,
     meta: error.quoteVisibility ? { quoteVisibility: error.quoteVisibility } : undefined,
   });
+};
+
+// submitApprovalAction's refusal of a caller with no approver row on the
+// current step, word for word, so the early check below answers the same.
+const NOT_AN_APPROVER_MESSAGE = 'User is not an approver for this step';
+
+/**
+ * Is `userId` an approver on the CURRENT step of this PENDING instance, still
+ * to act or retrying the approve they already gave? The membership test
+ * submitApprovalAction makes under its lock (and getApprovalInstanceDetails'
+ * can_user_approve), read-only, so a handler can refuse a non-approver before
+ * it answers anything about the instance's RFQ or its POs. A REMOVED or
+ * otherwise inactive approver row does not count.
+ */
+const isApproverOnCurrentStep = async (instanceId, userId) => {
+  const row = await db.oneOrNone(
+    `SELECT 1
+       FROM tbl_approval_instances i
+       JOIN tbl_approval_instance_steps s
+         ON s.approval_instance_id = i.id AND s.step_order = i.current_step
+       JOIN tbl_approval_step_approvers sa
+         ON sa.approval_instance_step_id = s.id AND sa.approver_user_id = $2
+      WHERE i.id = $1 AND i.status = 'PENDING' AND sa.status IN ('PENDING', 'APPROVED')
+      LIMIT 1`,
+    [instanceId, userId]
+  );
+  return !!row;
 };
 
 const ensureNegotiationQuoteVisibilityUnlocked = async (rfqId, message) => {
@@ -3050,6 +3077,14 @@ const NegotiationController = {
         });
       }
 
+      // 1a. Only an approver on the current step gets past here. 1b and 1c
+      // answer about this RFQ's vendors and POs (1c says whether a PO id is a
+      // draft of this RFQ), so a caller who is not on the instance gets the
+      // answer submitApprovalAction would give them, before either runs.
+      if (!(await isApproverOnCurrentStep(pendingInstance.id, user_id))) {
+        return formatErrorResponse(res, new Error(NOT_AN_APPROVER_MESSAGE));
+      }
+
       // 1b. Technical-qualification pre-flight — BEFORE the approval action.
       //
       // ORDERING IS THE WHOLE POINT. submitApprovalAction below COMMITS the
@@ -3100,10 +3135,13 @@ const NegotiationController = {
 
       // 1c. A PO the approver chose to merge the award into must be this RFQ's
       // draft for the awarded vendor. Checked BEFORE the approval action, for
-      // the reason 1b gives: a refusal after it would leave an approval with
-      // no PO. (draftPurchaseOrder re-checks it under lock.)
+      // the reason 1b gives: a refusal here costs a 400 and nothing else. The
+      // checked int is what goes into the payload, never the raw body value.
+      // (draftPurchaseOrder re-checks it under the lock; if it has gone stale
+      // by then, the approval has committed, so the line is drafted without it.)
+      let mergeTargetId = null;
       if (existing_po_id && guardMeta.po_payload) {
-        await assertDraftMergeTarget(db, {
+        mergeTargetId = await assertDraftMergeTarget(db, {
           poId: existing_po_id,
           rfqId: guardMeta.po_payload.rfq_id ?? guardMeta.rfq_id,
           vendorId: guardMeta.po_payload.product_info?.finalized_vendor_id ?? guardMeta.vendor_id,
@@ -3129,16 +3167,17 @@ const NegotiationController = {
         // Path A: PO payload stored by rfqController.finalize (direct vendor finalization)
         if (metadata.po_payload && metadata.po_user) {
           // Final approver can choose to merge into an existing PO (checked in 1c)
-          let poPayload = { ...metadata.po_payload };
-          if (existing_po_id) {
-            poPayload.existing_po_id = existing_po_id;
+          const poPayload = { ...metadata.po_payload };
+          if (mergeTargetId) {
+            poPayload.existing_po_id = mergeTargetId;
           }
 
           await db.tx(async (t) => {
-            // A target parked at finalize that has since left draft is set aside.
-            if (!existing_po_id) poPayload = await withoutStaleMergeTarget(t, poPayload);
+            // The approval has committed: a target (the approver's or the one
+            // parked at finalize) that is no longer a draft of this RFQ for the
+            // vendor is set aside under the PO lock, not refused.
             const authPayload = await buildAuthoritativePOPayload(poPayload, t);
-            const poResult = await draftPO(authPayload, metadata.po_user, t);
+            const poResult = await draftPO(authPayload, metadata.po_user, t, { staleTargetFallback: true });
             if (poResult?.po_id) { draftedPoIds.push(poResult.po_id); draftedRfqId = metadata.rfq_id; if (poResult.created) createdPoIds.push(poResult.po_id); }
 
             await recordLifecycleEvent({

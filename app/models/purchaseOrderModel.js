@@ -771,24 +771,50 @@ const LINE_VARIANT_FROM_RFQ_PRODUCT =
 //
 // finalize and approveQuotes take existing_po_id from the request body. It
 // must name a DRAFT PO of the SAME RFQ for the SAME vendor: the auto-merge
-// criteria below, minus the project/hierarchy match. The RFQ is tenant-scoped
-// by those paths, so a same-RFQ match scopes the PO too. Unknown, foreign,
-// other-vendor and past-draft POs get the same answer, so the refusal never
-// confirms that a PO exists.
+// criteria below, minus the project/hierarchy match. A same-RFQ match scopes
+// the PO to the RFQ's tenant only because every path that reaches here has
+// already gated the RFQ itself:
+//   - rfqController.finalize: assertCanReadParentRfq on rfq_id, first thing;
+//   - negotiationController.approveQuotes: the caller must be an approver on
+//     the current step of the instance that carries the RFQ (and the approval
+//     engine resolved those approvers inside the RFQ's company scope);
+//   - negotiationQuotePostApproval: only runs for an instance the approval
+//     engine has APPROVED, with the target parked by a gated finalize.
+// A new caller must gate the RFQ the same way first. Unknown, foreign,
+// other-vendor, past-draft and malformed ids get the same answer, so the
+// refusal never confirms that a PO exists.
 
 export const MERGE_TARGET_INVALID_MESSAGE =
   "The selected PO can't take this line. Choose a draft purchase order of this RFQ for the same vendor.";
 
+const PG_INT_MAX = 2147483647;
+const isPgId = (n) => Number.isSafeInteger(n) && n > 0 && n <= PG_INT_MAX;
+
+/**
+ * A client-supplied PO id as an int: a JS integer, or a string of digits.
+ * Anything else ("5.0", "5e0", " 5", [5], {}, true) is null, never coerced.
+ */
+export function parsePoId(value) {
+  if (typeof value === 'number') return isPgId(value) ? value : null;
+  if (typeof value === 'string' && /^\d+$/.test(value)) {
+    const n = Number(value);
+    return isPgId(n) ? n : null;
+  }
+  return null;
+}
+
 /**
  * Check a caller-chosen merge target. With `lock`, the PO row is taken FOR
- * UPDATE (inside the award's transaction).
+ * UPDATE (inside the award's transaction). Use the returned int for every
+ * write, never the raw input.
  * @returns {Promise<number>} the PO id
  * @throws PoDecisionError 400 PO_MERGE_TARGET_INVALID
  */
 export async function assertDraftMergeTarget(dbCtx, { poId, rfqId, vendorId, lock = false }) {
-  const [id, rfq, vendor] = [poId, rfqId, vendorId].map(Number);
   const refused = () => new PoDecisionError(MERGE_TARGET_INVALID_MESSAGE, { code: 'PO_MERGE_TARGET_INVALID', httpStatus: 400 });
-  if (![id, rfq, vendor].every((n) => Number.isSafeInteger(n) && n > 0 && n <= 2147483647)) throw refused();
+  const id = parsePoId(poId);
+  const [rfq, vendor] = [rfqId, vendorId].map(Number);
+  if (id === null || !isPgId(rfq) || !isPgId(vendor)) throw refused();
   const row = await dbCtx.oneOrNone(
     `SELECT id FROM tbl_rfq_purchase_order
       WHERE id = $1 AND rfq_id = $2 AND finalized_vendor_id = $3 AND status = $4
@@ -800,40 +826,18 @@ export async function assertDraftMergeTarget(dbCtx, { poId, rfqId, vendorId, loc
 }
 
 /**
- * A finalize payload parked in an approval keeps the merge target chosen at
- * finalize time. If that PO has since left draft (initiated, merged away,
- * cancelled) by the time the award is approved, the target is set aside and
- * the line is drafted as if none had been chosen (auto-merge or a new draft):
- * the approval is already recorded, and refusing now would leave it with no PO.
- * @returns {Promise<object>} the payload, without existing_po_id when stale
+ * @param {object} [opts]
+ * @param {boolean} [opts.staleTargetFallback] For an award whose approval has
+ *   already committed: a requested merge target that is refused under the lock
+ *   (it left draft, or never qualified) is logged and set aside, and the line is
+ *   drafted as if none had been chosen (auto-merge or a new draft). Refusing
+ *   there would leave the approval with no PO. Off by default: before approval,
+ *   a refused target is a 400 and nothing is written.
  */
-export async function withoutStaleMergeTarget(dbCtx, poPayload) {
-  if (!poPayload?.existing_po_id) return poPayload;
-  try {
-    await assertDraftMergeTarget(dbCtx, {
-      poId: poPayload.existing_po_id,
-      rfqId: poPayload.rfq_id,
-      vendorId: poPayload.product_info?.finalized_vendor_id,
-    });
-    return poPayload;
-  } catch (err) {
-    if (!(err instanceof PoDecisionError)) throw err;
-    logger.warn(
-      { rfqId: poPayload.rfq_id, existingPoId: poPayload.existing_po_id },
-      '[draftPO] parked merge target is no longer a draft of this RFQ for the vendor; drafting without it'
-    );
-    const rest = { ...poPayload };
-    delete rest.existing_po_id;
-    return rest;
-  }
-}
-
-export const draftPurchaseOrder = async (rfq_id, project_id, quote_item_id, total_value, product_info, initiated_by, company_id, user, existing_po_id, selected_hierarchy, t, global_charges = [], line_total = null) => {
+export const draftPurchaseOrder = async (rfq_id, project_id, quote_item_id, total_value, product_info, initiated_by, company_id, user, existing_po_id, selected_hierarchy, t, global_charges = [], line_total = null, { staleTargetFallback = false } = {}) => {
     try {
       const { rfq_product_id, quantity, unit, unit_price, charges_meta, finalized_vendor_id } =
         product_info;
-      // The caller's choice, before the auto-merge below fills it in itself.
-      const requestedPoId = existing_po_id || null;
       // Per-line total goes onto tbl_purchase_order_product.total_price.
       // Grand total (line + document-level global charges) goes onto
       // tbl_rfq_purchase_order.total_value. When the caller didn't separate
@@ -867,6 +871,26 @@ export const draftPurchaseOrder = async (rfq_id, project_id, quote_item_id, tota
       }
 
       let po = null;
+
+      // A target the caller chose must be this RFQ's draft for this vendor.
+      // Checked and locked here, after the pending PO above, the same order the
+      // auto-merge below takes its locks in; from here on existing_po_id is the
+      // checked int, never the raw input.
+      if (existing_po_id) {
+        const requested = existing_po_id;
+        try {
+          existing_po_id = await assertDraftMergeTarget(t, {
+            poId: requested, rfqId: rfq_id, vendorId: finalized_vendor_id, lock: true,
+          });
+        } catch (err) {
+          if (!(staleTargetFallback && err instanceof PoDecisionError && err.code === 'PO_MERGE_TARGET_INVALID')) throw err;
+          logger.warn(
+            { rfqId: rfq_id, rfqProductId: rfq_product_id, existingPoId: requested },
+            '[draftPO] merge target is no longer a draft of this RFQ for the vendor; the approved line is drafted without it'
+          );
+          existing_po_id = null;
+        }
+      }
 
       // Auto-merge: if the caller did not nominate a merge target, look for an
       // existing draft PO on this RFQ for the same vendor that shares the same
@@ -904,13 +928,6 @@ export const draftPurchaseOrder = async (rfq_id, project_id, quote_item_id, tota
       const created = !existing_po_id;
 
       if(existing_po_id) {
-        // A target the caller chose must be this RFQ's draft for this vendor
-        // (the auto-merge target above already is). Locked after the pending
-        // PO above, the same order the auto-merge takes its locks in.
-        if (requestedPoId) {
-          await assertDraftMergeTarget(t, { poId: requestedPoId, rfqId: rfq_id, vendorId: finalized_vendor_id, lock: true });
-        }
-
         po = await t.one(
           `UPDATE tbl_rfq_purchase_order
             SET
