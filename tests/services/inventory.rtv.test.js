@@ -365,6 +365,34 @@ describe("return to vendor", () => {
     });
   });
 
+  it("a credit return on a receipt line booked to no delivery is refused, writing nothing", async () => {
+    await withTx(async (t) => {
+      await grantStores(t);
+      const { poId, lineIds: [line] } = await makeRfqPo(t, { lines: [{ qty: 10, unit: "kg" }] });
+      const grn = await postReceiptGrn(t, { poId, lines: [{ poLineId: line, accepted: 10 }] });
+      const [g] = grn.lines;
+      // A receipt that never reached the delivery plan (e.g. a legacy-received PO).
+      await t.none(`DELETE FROM tbl_grn_line_alloc WHERE grn_line_id = $1`, [g.grnLineId]);
+      const credit = await createRtv(t, STORES, {
+        grnId: grn.grnId, disposition: "CREDIT", lines: [{ grnLineId: g.grnLineId, qty: 3, reason: "Spoilt" }],
+      });
+      const snapshot = async () => ({
+        log: await t.any(`SELECT id FROM tbl_po_short_close WHERE po_id = $1`, [poId]),
+        dls: await deliveryLinesOf(t, poId),
+        moves: await rtvMovements(t, credit.id),
+        balance: await balanceOf(t, A1, g.invItemId),
+        rtv: await t.one(`SELECT status, rtv_number FROM tbl_rtv WHERE id = $1`, [credit.id]),
+      });
+      const before = await snapshot();
+      const err = await expectInvError(
+        t.tx((sp) => dispatchRtv(sp, STORES, credit.id, {})), "CONFLICT", { rtvId: credit.id, grnId: grn.grnId }
+      );
+      expect(err.message).toBe("This receipt line isn't booked to any delivery, so the credit can't be closed against the PO");
+      expect(await snapshot()).toEqual(before);
+      expect(before.rtv).toEqual({ status: "draft", rtv_number: null });
+    });
+  });
+
   it("RTV_OUT stock qty is exact: 3.3333 at 0.5 is 1.6667, 1.0003 at 1.5 is 1.5005", async () => {
     await withTx(async (t) => {
       await grantStores(t);
