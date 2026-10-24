@@ -209,11 +209,14 @@ export const applyLineDecisions = (products, decisions, actorUserId) => {
 };
 
 // Per-vendor negotiation fields for one product (or 'RFQ_LEVEL') of a round.
+// ARC rounds key their entries by arc_item_id / is_arc_level instead, so an id
+// matches either key and 'RFQ_LEVEL' covers both whole-parent flags.
 export const getVendorFieldsForProduct = (round, vendorId, rfqProductId) => {
   if (Array.isArray(round?.products) && round.products.length > 0) {
     const entry = round.products.find(p => rfqProductId === 'RFQ_LEVEL'
-      ? p?.is_rfq_level === true
-      : Number(p?.rfq_product_id) === Number(rfqProductId));
+      ? p?.is_rfq_level === true || p?.is_arc_level === true
+      : Number(p?.rfq_product_id) === Number(rfqProductId)
+        || (p?.arc_item_id != null && Number(p.arc_item_id) === Number(rfqProductId)));
     const vt = (entry?.vendor_targets || []).find(v => Number(v?.vendor_id) === Number(vendorId));
     return vt?.fields || [];
   }
