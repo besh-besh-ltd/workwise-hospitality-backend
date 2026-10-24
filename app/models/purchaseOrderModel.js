@@ -1,8 +1,11 @@
 import db from "../config/dbConn.js";
 import { sendApprovalNotification } from "../controllers/po/purchaseOrderEmails.js";
-import { consoleLogData, generateSignature, logError } from "../helper/common.js";
+import { consoleLogData, logError } from "../helper/common.js";
 import { scheduleGRNReminders } from "../helper/cronManager.js";
-import { sendDispatchedEmail, sendGRNRepresentativeEmail, sendGRNUpdationEmail, sendInvoiceEmail } from "../helper/sendEmailFunctions/generalReminderEmails.js";
+import { sendDispatchedEmail, sendGRNUpdationEmail, sendInvoiceEmail } from "../helper/sendEmailFunctions/generalReminderEmails.js";
+import { normalizeOwnS3Url } from "../helper/s3Urls.js";
+import { LIVE_TOKEN_SQL } from "../helper/receiveToken.js";
+import { InventoryError } from "../services/inventory/errors.js";
 import { AVAILABLE_HIERARCHY_TYPES, INVALID_PO_STATUSES_FOR_VENDOR, PO_STATUSES } from "../util/constants.js";
 import { logger } from "../util/logger.js";
 import generalModel, { markPOStatusChange, createApprovalInstance, getApprovalWorkflowUsers } from "./generalModel.js";
@@ -2094,20 +2097,45 @@ export const getPODetailsById = async (po_id, user_id) => {
                 ),
                 '[]'::json
               ) AS documents,
+              -- Site-rep links that still work: site_rep is the newest,
+              -- site_reps all of them (one per hotel at most). "Live" is
+              -- LIVE_TOKEN_SQL, the predicate the token auth itself uses, so the
+              -- page never shows a link as working when auth would refuse it.
               (
                 SELECT JSON_BUILD_OBJECT(
-                  'id', TTLD.id,
-                  'name', TTLD.name,
-                  'email', TTLD.email,
-                  'phone', TTLD.phone,
-                  'created_at', TTLD.created_at
+                  'id', tl.id,
+                  'name', tl.name,
+                  'email', tl.email,
+                  'phone', tl.phone,
+                  'hotel_id', tl.hotel_id,
+                  'expires_at', COALESCE(tl.expires_at, tl.created_at + interval '14 days'),
+                  'last_used_at', tl.last_used_at,
+                  'created_at', tl.created_at
                 )
-                FROM tbl_token_login_data TTLD
-                WHERE TTLD.token_type = 'GRN'
-                AND entity_id = po.id
-
+                FROM tbl_token_login_data tl
+                WHERE tl.entity_id = po.id
+                AND ${LIVE_TOKEN_SQL}
+                ORDER BY tl.id DESC
                 LIMIT 1
               ) AS site_rep,
+              COALESCE(
+                (
+                  SELECT JSON_AGG(JSON_BUILD_OBJECT(
+                    'id', tl.id,
+                    'name', tl.name,
+                    'email', tl.email,
+                    'phone', tl.phone,
+                    'hotel_id', tl.hotel_id,
+                    'expires_at', COALESCE(tl.expires_at, tl.created_at + interval '14 days'),
+                    'last_used_at', tl.last_used_at,
+                    'created_at', tl.created_at
+                  ) ORDER BY tl.id DESC)
+                  FROM tbl_token_login_data tl
+                  WHERE tl.entity_id = po.id
+                  AND ${LIVE_TOKEN_SQL}
+                ),
+                '[]'::json
+              ) AS site_reps,
               COALESCE(
               (
                 SELECT JSON_AGG(
@@ -2955,9 +2983,22 @@ export const getMilestonesByPOId = async (company_id, po_id, includeDeleted = fa
   );
 };
 
-export const createMilestone = async (data, user) => {
+/**
+ * rfq_id and company_id come from the PO (`po`: the tenancy row assertPoAccess
+ * returned), never from the body: a call-off PO has no RFQ (D9), and a body
+ * rfq_id could name another tenant's RFQ.
+ */
+const poOwnedIds = async (po_id, user, po) => {
+  const tenancy = po ?? (await resolvePoTenancy(po_id));
+  if (!tenancy) throw new PoAccessError();
+  return {
+    rfq_id: tenancy.rfq_id ?? null,
+    company_id: tenancy.company_id ?? user?.company_id ?? null,
+  };
+};
+
+export const createMilestone = async (data, user, po = null) => {
   const {
-    rfq_id,
     po_id,
     milestone_name,
     due_date,
@@ -2966,12 +3007,14 @@ export const createMilestone = async (data, user) => {
     attachments = [],
   } = data;
 
+  const { rfq_id, company_id } = await poOwnedIds(po_id, user, po);
+
   const milestone = await db.oneOrNone(
     `INSERT INTO tbl_payment_milestone 
       (rfq_id, po_id, company_id, milestone_name, due_date, milestone_description, created_by, reminder_users, attachments) 
      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
      RETURNING *`,
-    [rfq_id, po_id, user.company_id, milestone_name, due_date, milestone_description, user.id, reminder_users, attachments ? JSON.stringify(attachments) : []]
+    [rfq_id, po_id, company_id, milestone_name, due_date, milestone_description, user.id, reminder_users, attachments ? JSON.stringify(attachments) : []]
   );
 
   return milestone;
@@ -3046,9 +3089,8 @@ export const getTasksByPOId = async (company_id, po_id, page, limit) => {
   return [pos, total]
 };
 
-export const createTask = async (data, user) => {
+export const createTask = async (data, user, po = null) => {
   const {
-    rfq_id,
     po_id,
     task_name,
     completion_date,
@@ -3056,12 +3098,14 @@ export const createTask = async (data, user) => {
     task_description,
   } = data;
 
+  const { rfq_id, company_id } = await poOwnedIds(po_id, user, po);
+
   const task = await db.oneOrNone(
     `INSERT INTO tbl_purchase_order_tasks 
       (rfq_id, po_id, company_id, task_name, completion_date, task_description, status, created_by) 
      VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
      RETURNING *`,
-    [rfq_id, po_id, user.company_id, task_name, completion_date, task_description, status, user.id]
+    [rfq_id, po_id, company_id, task_name, completion_date, task_description, status, user.id]
   );
 
   return task;
@@ -3183,7 +3227,12 @@ const resolvePoNotificationRecipients = async (po, t = db) => {
   return [...ids];
 };
 
-export const handleRaiseInvoice = async (po_id, invoice_url, vendor_id) => {
+export const handleRaiseInvoice = async (po_id, invoice_url_input, vendor_id) => {
+  // Only our own S3 objects, stored in normalized (WHATWG href) form.
+  const invoice_url = normalizeOwnS3Url(invoice_url_input);
+  if (!invoice_url) {
+    throw new InventoryError('VALIDATION', 'Please upload the invoice again: the file link is not one of ours.', { field: 'invoice_url' });
+  }
   return await db.tx(async t => {
     const po = await t.oneOrNone(
       `SELECT * FROM tbl_rfq_purchase_order
@@ -3408,70 +3457,20 @@ export const handleMarkDispatched = async (po_id, vendor_id) => {
   })
 };
 
-export const handleAddSiteRepresentative = async (po_id, added_by, name, email, phone) => {
-  return await db.tx(async t => {
-    const existing = await t.oneOrNone(
-      `SELECT id FROM tbl_token_login_data
-      WHERE token_type = 'GRN'
-      AND entity_id = $1`,
-      [po_id]
-    );
-    let result = null;
-
-    const secret = process.env.WEBHOOK_SECRET;
-    const expires = Math.floor(Date.now() / 1000) + 12 * 60 * 60;
-    const message = `${name}_${email}_${phone}_${expires}`;
-
-    const token = generateSignature(message, secret);
-
-    if(existing) {
-      result = await t.one(
-        `UPDATE tbl_token_login_data
-        SET name = $1,
-        email = $2,
-        phone = $3,
-        added_by = $4
-        token = $5
-        
-        WHERE id = $6
-        RETURNING *`,
-        [name, email, phone, added_by, token, existing.id]
-      );
-    } else {
-      result = await t.one(
-        `INSERT INTO tbl_token_login_data
-        (token_type, entity_id, name, email, phone, added_by, token)
-        VALUES ('GRN', $1, $2, $3, $4, $5, $6)
-        
-        RETURNING *`,
-        [po_id, name, email, phone, added_by, token]
-      );
-    }
-
-    const formattedPOData = await t.one(
-      `SELECT PO.*,
-      TU.name AS finalized_vendor_name,
-      TU.email AS finalized_vendor_email,
-      COALESCE(TAHH.created_at, TAI.completed_at) AS po_approved_on,
-      QI.delivery_period
-
-      FROM tbl_rfq_purchase_order PO
-      JOIN tbl_purchase_order_product TPOP ON TPOP.purchase_order_id = PO.id
-      JOIN tbl_quote_items QI ON QI.id = TPOP.quote_id
-      LEFT JOIN tbl_approval_hierarchy_transactions TAHT ON TAHT.hierarchy_type = 'po' AND TAHT.target_entity_id = PO.id
-      LEFT JOIN tbl_approval_hierarchy_history TAHH ON TAHT.id = TAHH.approval_transaction_id AND TAHH.action = 'approved'
-      LEFT JOIN tbl_approval_instances TAI ON TAI.id = PO.approval_instance_id AND TAI.status = 'APPROVED'
-      JOIN tbl_users TU ON PO.finalized_vendor_id = TU.id
-      JOIN tbl_company TC ON TU.company_id = TC.id
-
-      WHERE PO.id = $1`,
-      [po_id]
-    );
-
-    await sendGRNRepresentativeEmail(formattedPOData, email, token);
-
-    return result;
-  })
+/**
+ * Add (or replace) the GRN site representative for a PO and email them the
+ * receiving link. Delegates to services/inventory/siteRepService.js (hashed
+ * 14-day token, one live link per PO hotel, grn.create at that hotel); see
+ * there for the rules. `hotel_id` is required for a PO delivered to several
+ * hotels. Returns the row without the token.
+ *
+ * (D2: this used to UPDATE with a missing comma and read the PO through a
+ * `t.one` over its quote lines, which threw for multi-line and call-off POs.)
+ */
+export const handleAddSiteRepresentative = async (user, { po_id, hotel_id = null, name, email, phone } = {}) => {
+  // Lazy: siteRepService imports this module (assertPoAccess).
+  const { issueSiteRepToken } = await import('../services/inventory/siteRepService.js');
+  return issueSiteRepToken(user, { poId: po_id, hotelId: hotel_id, name, email, phone });
 };
 
 /**

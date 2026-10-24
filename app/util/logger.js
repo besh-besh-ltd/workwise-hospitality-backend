@@ -3,7 +3,8 @@ import pino from 'pino';
 import pinoHttp from 'pino-http';
 import { logs, SeverityNumber } from '@opentelemetry/api-logs';
 import { trace, context } from '@opentelemetry/api';
-import { isNoisyRoute } from './telemetryConfig.js';
+import { isNoisyRoute, redactQuerySecrets } from './telemetryConfig.js';
+import { sanitizeObject } from './sanitize.js';
 
 const isDev = ['development', 'uat'].includes(process.env.NODE_ENV);
 
@@ -74,6 +75,19 @@ const getPath = (req) => {
   return url.split('?')[0];
 };
 
+/**
+ * The request fields the access log keeps (dev/uat only). `?token=` / `?t=`
+ * carry a credential (site-rep and vendor links): their values are replaced
+ * before the query is logged, then the usual sensitive-key and size
+ * sanitising applies.
+ */
+export const reqLogFields = (req) => ({
+  method: req.method,
+  query: Object.keys(req.query || {}).length
+    ? sanitizeObject(redactQuerySecrets(req.query))
+    : undefined,
+});
+
 const logger = pino({
   level: process.env.LOG_LEVEL || (isDev ? 'debug' : 'info'),
   timestamp: pino.stdTimeFunctions.isoTime,
@@ -111,10 +125,7 @@ const httpLogger = pinoHttp({
     return `${req.method} ${getPath(req)} (${res.statusCode}) / IP: ${ip} - ${err.message}`;
   },
   serializers: {
-    req: (req) => isDev ? {
-      method: req.method,
-      query: Object.keys(req.query || {}).length ? req.query : undefined,
-    } : undefined,
+    req: (req) => isDev ? reqLogFields(req) : undefined,
     res: () => undefined,
   },
 });

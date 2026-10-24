@@ -23,6 +23,9 @@ import { deriveScope } from "./poDashboardController.js";
 import { handleCallOffRejection, notifyCallOffRejected } from "../../services/callOffPoService.js";
 import { deferJson, isDeferred, sendDeferred } from "../../helper/deferredResponse.js";
 import { poFieldsFor } from "../../services/po/buyerOnlyPoFields.js";
+import { normalizeOwnS3Url } from "../../helper/s3Urls.js";
+import { InventoryError, sendInventoryError } from "../../services/inventory/errors.js";
+import { redactForReceiveToken } from "../../helper/receiveTokenView.js";
 
 // Tiny tagged-error class for controllers that need to map a thrown
 // failure mode to a specific HTTP status code (instead of the historic
@@ -155,8 +158,11 @@ export const getPODetails = async (req, res) => {
 
         // Vendors and GRN token users get the row without buyer-only fields
         // (replaces_po_id: the rejected PO this one re-awards, often another
-        // vendor's).
-        const result = poFieldsFor(req.user, await getPODetailsById(po_id, id));
+        // vendor's; site_rep(s): who holds receive links). A token holder gets
+        // less again: no prices, taxes or totals at any depth, no buyer
+        // contacts, no priced documents (redactForReceiveToken).
+        const row = poFieldsFor(req.user, await getPODetailsById(po_id, id));
+        const result = req.user.is_token_user ? redactForReceiveToken(row) : row;
 
         // Additively merge the new contract-shaped detail-full object under a
         // `detail` key so the new PO Detail page can consume the structured
@@ -1542,13 +1548,26 @@ export const raiseInvoice = async (req, res) => {
 
     if (!(await guardPo(req, res, po_id))) return;
 
-    const result = await handleRaiseInvoice(po_id, invoice_url, id);
+    // Only a file we stored: a pasted third-party link would be emailed to the
+    // buyer team and shown on the PO as "the invoice". The normalized href is
+    // what gets stored.
+    const invoiceHref = normalizeOwnS3Url(invoice_url);
+    if (!invoiceHref) {
+      return res.status(400).json({
+        status: 0,
+        message: 'Please upload the invoice again: the file link is not one of ours.',
+        code: 'INVALID_DOCUMENT_URL',
+      });
+    }
+
+    const result = await handleRaiseInvoice(po_id, invoiceHref, id);
     return res.json({
       status: 1,
       message: 'Invoice has been raised for this PO.',
       data: result
     });
   } catch (error) {
+    if (error instanceof InventoryError) return sendInventoryError(res, error);
     logError('raiseInvoice failed', error);
     return res.status(500).json({
       status: 0,
@@ -1609,29 +1628,40 @@ export const markDispatched = async (req, res) => {
 };
 
 export const addSiteRepresentative = async (req, res) => {
+  // This endpoint mints a GRN receiving link and EMAILS it to a caller-supplied
+  // address, so it hands receiving rights at a hotel to someone outside the
+  // system. handleAddSiteRepresentative gates it on PO visibility (404) AND
+  // grn.create at the link's hotel (403).
+  let result;
   try {
-    const { po_id, name, email, phone } = req.body;
-    const { id, company_id } = req.user;
-
-    // This endpoint mints a GRN login token and EMAILS it to a caller-supplied
-    // address. Without a tenant gate, any authenticated user could hand a
-    // third party standing access to another tenant's purchase order.
-    if (!(await guardPo(req, res, po_id))) return;
-
-    const result = await handleAddSiteRepresentative(po_id, id, name, email, phone);
-    return res.json({
-      status: 1,
-      message: 'Site Rep has been added for this PO',
-      data: result
-    });
+    const { po_id, hotel_id, name, email, phone } = req.body || {};
+    result = await handleAddSiteRepresentative(req.user, { po_id, hotel_id, name, email, phone });
   } catch (error) {
-    logError('addSiteRepresentative failed', error);
-    return res.status(500).json({
-      status: 0,
-      message: error.message || 'An error occurred while approving the PO.',
-      error
-    });
+    return sendInventoryError(res, error);
   }
+
+  // Activity trail: "Site rep link issued", filed under the link's hotel. Who
+  // the link went to stays out of the trail (it names an outsider's email).
+  res.locals.activityDetail = {
+    scope: {
+      hospitalityCompanyId: result.companyId,
+      hotelId: result.hotelId,
+      entityLabel: result.poNumber,
+    },
+    metadata: {
+      token_id: result.siteRep?.id ?? null,
+      revoked_token_ids: result.revokedIds,
+      email_sent: result.emailSent,
+    },
+  };
+
+  return res.json({
+    status: 1,
+    message: result.emailSent
+      ? 'Site representative added. The receiving link has been emailed to them.'
+      : 'Site representative added, but the email could not be sent. Please send the link again.',
+    data: { ...result.siteRep, email_sent: result.emailSent },
+  });
 };
 
 // ---------------------------------------------------------------------------
@@ -1660,9 +1690,11 @@ export const getMilestonesController = async (req, res) => {
 
 export const createMilestoneController = async (req, res) => {
   try {
-    if (!(await guardPo(req, res, req.body?.po_id))) return;
+    const po = await guardPo(req, res, req.body?.po_id);
+    if (!po) return;
 
-    let milestone = await createMilestone(req.body, req.user);
+    // rfq_id is the PO's own (NULL for a call-off PO), never the body's.
+    let milestone = await createMilestone(req.body, req.user, po);
     if(milestone) {
       await scheduleMilestoneReminder(milestone)
     };
@@ -1724,9 +1756,10 @@ export const getTasksController = async (req, res) => {
 
 export const createTaskController = async (req, res) => {
   try {
-    if (!(await guardPo(req, res, req.body?.po_id))) return;
+    const po = await guardPo(req, res, req.body?.po_id);
+    if (!po) return;
 
-    const milestone = await createTask(req.body, req.user);
+    const milestone = await createTask(req.body, req.user, po);
 
     return res.status(201).json({ success: true, data: milestone });
   } catch (error) {

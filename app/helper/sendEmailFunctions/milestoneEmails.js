@@ -36,7 +36,7 @@ export const sendReminderMail = async (milestone, userList) => {
           <li><strong>Milestone Name:</strong> ${milestone_name}</li>
           <li><strong>Due Date:</strong> ${new Date(due_date).toDateString()}</li>
           <li><strong>Linked PO ID:</strong> ${po_id}</li>
-          <li><strong>Linked RFQ ID:</strong> ${rfq_id}</li>
+          <li><strong>Linked RFQ ID:</strong> ${rfq_id ?? "N/A (call-off order)"}</li>
           <li><strong>Description:</strong> ${milestone_description || 'N/A'}</li>
         </ul>
 

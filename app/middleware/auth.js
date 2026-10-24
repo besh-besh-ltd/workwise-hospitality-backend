@@ -7,6 +7,8 @@ import { decryptClaim } from '../helper/claimCrypto.js';
 
 import JWT from 'jsonwebtoken';
 import db from '../config/dbConn.js';
+import { findLiveReceiveToken, tokenRequestUser, RECEIVE_TOKEN_HEADER } from '../helper/receiveToken.js';
+import { receiveTokenAuth } from './receiveTokenAuth.js';
 
 /**
  * RBAC permission middleware
@@ -209,39 +211,34 @@ const auth = {
         .end();
     }
   },
+  /**
+   * JWT user, else the GRN site-rep token (legacy GET /po/:po_id and
+   * POST /po/markGRN). The token is accepted from the X-Receive-Token header or,
+   * for links already in inboxes, the `token` query parameter; either way it is
+   * bound to the request's po_id, compared by its sha256 hash, and must be
+   * unrevoked and unexpired (helper/receiveToken.js). Refusal stays 403 so the
+   * legacy GRN page behaves as before. The token is never logged.
+   */
   authUserOrGRNToken: (req, res, next) => {
-    // Use passport in "custom callback" mode
-    logger.debug({ body: req.body }, "REQ BODY");
     passport.authenticate(
       "jwtUsr",
       { session: false },
-      async (err, user, info) => {
-        logger.debug("LOGGED IN USING PASSPORT AUTHENTICATE")
+      async (err, user) => {
         if (err) {
           return next(err);
         }
 
         // If normal user auth works, proceed as usual
         if (user) {
-          logger.debug("USER FOUND AUTHENTICATED QUICKLY")
           req.user = user;
           return next();
         }
 
-        // Fallback to GRN token auth
-        const { token } = req.query;
-
-        let po_id = null;
-        if(req.params.po_id) {
-          po_id = req.params.po_id
-        } else if (req.body.po_id) {
-          po_id = req.body.po_id
-        }
-
-        logger.debug({ token, po_id }, "UNAUTHENTICATED TOKEN");
+        // Fallback to the site-rep token.
+        const token = req.get(RECEIVE_TOKEN_HEADER) || (typeof req.query?.token === 'string' ? req.query.token : null);
+        const po_id = req.params?.po_id ?? req.body?.po_id ?? null;
 
         if (!token || !po_id) {
-          // No JWT and no token → unauthorized
           return res.status(403).json({
             status: 0,
             message: "Unauthorized: missing authentication or token.",
@@ -249,42 +246,22 @@ const auth = {
         }
 
         try {
-          // Validate token against tbl_token_login_data
-          const tokenRow = await db.oneOrNone(
-            `
-              SELECT id, token_type, entity_id, name, email, phone, token
-              FROM tbl_token_login_data
-              WHERE token_type = $1
-                AND entity_id = $2
-                AND token = $3
-            `,
-            ["GRN", Number(po_id), token]
-          );
-
-          logger.debug({ tokenRow }, "TOKEN ROW");
-
-          if (!tokenRow) {
-            logger.debug("TOKEN ROW NOT FOUND!")
+          const tok = await findLiveReceiveToken(token, { poId: po_id });
+          if (!tok) {
+            logger.info({ route: req.originalUrl?.split('?')[0], method: req.method }, '[grn-token] refused');
             return res.status(403).json({
               status: 0,
               message: "Forbidden: invalid or expired GRN token.",
             });
           }
 
-          // Mock user object representing Site Representative (token-based)
-          req.user = {
-            id: -1, // special marker for "token login / site rep"
-            name: tokenRow.name,
-            email: tokenRow.email,
-            phone: tokenRow.phone,
-            tokenLoginId: tokenRow.id,
-            tokenType: tokenRow.token_type,
-            entityId: tokenRow.entity_id,
-            is_token_user: true,
-          };
-
-          logger.debug({ user: req.user }, "REQ USER");
-
+          // The GRN site representative, bound to exactly this PO.
+          req.user = tokenRequestUser(tok);
+          req.receiveToken = { tokenId: tok.id, poId: tok.poId, hotelId: tok.hotelId };
+          logger.info(
+            { tokenId: tok.id, poId: tok.poId, route: req.originalUrl?.split('?')[0], method: req.method },
+            '[grn-token] used'
+          );
           return next();
         } catch (dbErr) {
           logError("Error validating GRN token", dbErr);
@@ -293,5 +270,7 @@ const auth = {
       }
     )(req, res, next);
   },
+  receiveTokenAuth,
 };
+export { receiveTokenAuth };
 export default auth;

@@ -11,7 +11,7 @@ import { pgp } from './app/config/dbConn.js';
 // env config
 dotenv.config();
 
-import { rescheduleAllMilestoneReminders, rescheduleAllRfqPublishJobs, startVendorAcceptanceReminderCron, rescheduleAllNegotiationRoundExpirations, rescheduleAllArcNegotiationRoundExpirations, startRfqStuckPublishWatchdog, startNegotiationRoundClosureSweeper, startPoDocumentWatchdog, startVendorRoutingSweep, startPoInitiateReminderCron } from './app/helper/cronManager.js';
+import { rescheduleAllMilestoneReminders, rescheduleAllRfqPublishJobs, startVendorAcceptanceReminderCron, rescheduleAllNegotiationRoundExpirations, rescheduleAllArcNegotiationRoundExpirations, startRfqStuckPublishWatchdog, startNegotiationRoundClosureSweeper, startPoDocumentWatchdog, startVendorRoutingSweep, startPoInitiateReminderCron, startPhaseDueSweeper } from './app/helper/cronManager.js';
 import { startArcAmendmentLifecycleCron } from './app/services/arcAmendmentLifecycleService.js';
 import { logger } from './app/util/logger.js';
 
@@ -32,6 +32,8 @@ rescheduleAllArcNegotiationRoundExpirations();
 startRfqStuckPublishWatchdog();
 startVendorRoutingSweep();
 startPoDocumentWatchdog();
+// Delivery-phase reminders (replaces the in-memory GRN reminder jobs).
+startPhaseDueSweeper();
 startArcAmendmentLifecycleCron();
 
 

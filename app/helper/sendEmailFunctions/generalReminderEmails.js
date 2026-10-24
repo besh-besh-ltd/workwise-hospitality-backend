@@ -1,7 +1,7 @@
 import config from "../../config/app.config.js";
 import userModel from "../../models/userModel.js";
 import { sendMail, logError } from "../common.js";
-import { generateEmailTemplate } from "../notificationEmailLayout.js";
+import { emailButton, generateEmailTemplate } from "../notificationEmailLayout.js";
 import { logger } from '../../util/logger.js';
 import { dispatch as dispatchNotification, resolveRecipientUserIds } from "../../services/notificationService.js";
 import { buyerPoDetail, buyerPoList, toAbsoluteUrl, vendorPoDetail, vendorPoList } from "../../services/notificationLinks.js";
@@ -14,163 +14,6 @@ const buildVendorPoActionUrl = (po_id) => vendorPoDetail(po_id) || vendorPoList(
 // explicit NULL when no rows match — a `= []` parameter default never fires on
 // that, so every entry point normalises before it iterates.
 const toRecipientList = (userList) => (Array.isArray(userList) ? userList.filter(Boolean) : []);
-
-export const sendGRNEmail = async (purchase_order, userList, grnRepData, day = 0) => {
-  return new Promise(async (resolve, reject) => {
-    try {
-      const list = toRecipientList(userList);
-      const {
-        id: po_id,
-        rfq_id,
-        po_number,
-        delivery_period,
-        po_approved_on,
-        finalized_vendor_name,
-      } = purchase_order || {};
-
-      // Compute delivery date from po_approved_on + delivery_period (days)
-      let deliveryDate = null;
-      let deliveryDateLabel = "N/A";
-
-      if (po_approved_on && delivery_period) {
-        const deliveryDays = parseInt(delivery_period, 10);
-        if (!Number.isNaN(deliveryDays)) {
-          const base = new Date(po_approved_on);
-          if (!Number.isNaN(base.getTime())) {
-            deliveryDate = new Date(base.getTime());
-            deliveryDate.setDate(deliveryDate.getDate() + deliveryDays);
-            deliveryDateLabel = deliveryDate.toDateString();
-          }
-        }
-      }
-
-      // Day-specific copy
-      let subjectSuffix = "GRN reminder";
-      let reminderTagLine = "";
-      let sequenceNote = "";
-
-      if (day === -3) {
-        subjectSuffix = "Delivery in 3 days";
-        reminderTagLine = `This is a reminder that the shipment linked to PO #${po_number} is scheduled to be delivered in approximately 3 days.`;
-        sequenceNote = `
-          You will receive another reminder on the scheduled delivery date, 
-          and one more reminder 3 days after that if the PO status is still <strong>Dispatched</strong>.
-        `;
-      } else if (day === 0) {
-        subjectSuffix = "Scheduled delivery today";
-        reminderTagLine = `Today is the scheduled delivery date for PO #${po_number}.`;
-        sequenceNote = `
-          If the material has already been received at site, please update the PO status to <strong>GRN</strong> in Phileein Hospitality.
-          You will receive one more reminder 3 days from today if the PO remains in <strong>Dispatched</strong> status.
-        `;
-      } else if (day === 3) {
-        subjectSuffix = "Follow-up: GRN pending";
-        reminderTagLine = `This is a follow-up reminder, 3 days after the scheduled delivery date for PO #${po_number}.`;
-        sequenceNote = `
-          If the material has been received at site, please update the PO status to <strong>GRN</strong> as soon as possible.
-          If the shipment is delayed or partially delivered, kindly update the status/remarks accordingly in Phileein Hospitality.
-        `;
-      } else {
-        // Fallback / generic
-        subjectSuffix = "GRN reminder";
-        reminderTagLine = `This is a reminder related to Goods Received Note (GRN) for PO #${po_number}.`;
-        sequenceNote = `
-          If the shipment has been delivered, please update the PO status to <strong>GRN</strong> in Phileein Hospitality.
-        `;
-      }
-
-      const vendorName = finalized_vendor_name || "N/A";
-
-      const linkPath = buildPoActionUrl(po_id);
-      const emailUrl = toAbsoluteUrl(linkPath);
-
-      const headerContent = `<h2>Goods Received Note (GRN) Reminder</h2>`;
-
-      const containerContent = `
-      <div style="font-size:16px; font-family:'Roboto', sans-serif; color:#333;">
-        <p>${reminderTagLine}</p>
-
-        <h4>PO Details</h4>
-        <ul>
-          <li><strong>PO Number:</strong> ${po_number}</li>
-          <li><strong>RFQ ID:</strong> ${rfq_id ?? "N/A"}</li>
-          <li><strong>Vendor:</strong> ${vendorName}</li>
-          <li><strong>Scheduled Delivery Date:</strong> ${deliveryDateLabel}</li>
-        </ul>
-
-        <p style="margin-top:16px;">
-          This reminder is for you to verify whether the shipment has been delivered at site 
-          and, if so, to update the PO status to <strong>GRN</strong> in Phileein Hospitality.
-        </p>
-
-        <p style="margin-top:10px;">
-          ${sequenceNote}
-        </p>
-
-        <div style="text-align:center; margin-top:24px;">
-          <a href="${emailUrl}"
-            style="background-color: #3B82F6; color: white; text-align: center; padding: 12px 24px; border-radius: 8px; text-decoration: none; display: inline-block; font-weight: 600;">
-            View PO in Dashboard
-          </a>
-        </div>
-
-        <p style="text-align:center; margin-top: 30px;">
-          Thank you for keeping your GRNs up to date.<br/>
-          <strong>— Phileein Hospitality Team</strong>
-        </p>
-      </div>`;
-
-      const htmlContent = generateEmailTemplate(headerContent, containerContent);
-
-      let recipients = {
-        from: config.webmasterMail,
-        subject: `GRN Reminder: PO #${po_number} - ${subjectSuffix}`,
-        html: htmlContent,
-      };
-
-      const emails = [];
-
-      for (let user of list) {
-        let u = await userModel.getUserById(user);
-        u = u?.[0];
-
-        if (u && u.email) emails.push(u.email);
-      }
-
-      if(grnRepData && grnRepData.email)
-        emails.push(grnRepData.email);
-
-      if (emails && emails.length > 0) {
-        recipients.to = emails;
-      } else {
-        // No valid recipients, nothing to send
-        return resolve(false);
-      }
-
-      sendMail(recipients);
-
-      try {
-        const userIds = await resolveRecipientUserIds(list);
-        await dispatchNotification({
-          userIds,
-          category: 'po',
-          type: `grn_reminder_${day}`,
-          title: `GRN reminder — PO #${po_number} (${subjectSuffix})`,
-          body: reminderTagLine,
-          data: { po_id, rfq_id, day },
-          actionUrl: linkPath
-        });
-      } catch (notifyErr) {
-        logError(`dispatch grn_reminder_${day} failed`, notifyErr);
-      }
-
-      return resolve(true);
-    } catch (err) {
-      logError("Error sending GRN reminder:", err);
-      return reject(err);
-    }
-  });
-};
 
 export const sendInvoiceEmail = async (purchase_order, invoice_url, userList = []) => {
   return new Promise(async (resolve, reject) => {
@@ -479,12 +322,12 @@ export const sendDispatchedEmail = async (purchase_order, userList) => {
         </p>
 
         <p style="margin-top:10px;">
-          As part of the GRN reminder workflow, you will receive automatic email reminders around the expected delivery:
+          Each hotel's receiving team gets a daily reminder for deliveries that are:
         </p>
         <ul>
-          <li><strong>3 days before</strong> the scheduled delivery date</li>
-          <li><strong>On</strong> the scheduled delivery date</li>
-          <li><strong>3 days after</strong> the scheduled delivery date (if GRN is still not posted)</li>
+          <li><strong>due tomorrow</strong>,</li>
+          <li><strong>due today</strong>, or</li>
+          <li><strong>3 days overdue</strong> with goods still to receive.</li>
         </ul>
 
         <p style="margin-top:10px;">
@@ -554,124 +397,138 @@ export const sendDispatchedEmail = async (purchase_order, userList) => {
   });
 };
 
-export const sendGRNRepresentativeEmail = async (purchase_order, siteRepEmail, token) => {
-  return new Promise(async (resolve, reject) => {
-    try {
-      const {
-        id: po_id,
-        rfq_id,
-        po_number,
-        finalized_vendor_name,
-        finalized_vendor_email,
-        delivery_period,
-        po_approved_on,
-      } = purchase_order || {};
+// --- Site representative (receiving link) emails ---------------------------
+//
+// The receiving link carries the plain token (shown nowhere else; only its
+// hash is stored). Site-rep views never show prices or buyer contacts, so
+// neither does this mail.
 
-      const vendorName = finalized_vendor_name || "Vendor";
+const esc = (v) =>
+  String(v ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 
-      // Compute scheduled delivery date from po_approved_on + delivery_period (days)
-      let deliveryDate = null;
-      let deliveryDateLabel = "N/A";
+const IST_DATE = new Intl.DateTimeFormat("en-IN", { timeZone: "Asia/Kolkata", day: "numeric", month: "short", year: "numeric" });
 
-      if (po_approved_on && delivery_period) {
-        const deliveryDays = parseInt(delivery_period, 10);
-        if (!Number.isNaN(deliveryDays)) {
-          const base = new Date(po_approved_on);
-          if (!Number.isNaN(base.getTime())) {
-            deliveryDate = new Date(base.getTime());
-            deliveryDate.setDate(deliveryDate.getDate() + deliveryDays);
-            deliveryDateLabel = deliveryDate.toDateString();
-          }
-        }
-      }
+/** "24 Oct 2026" for a Date/ISO timestamp, or a YYYY-MM-DD date as given. */
+const fmtDate = (v) => {
+  if (!v) return null;
+  if (typeof v === "string" && /^\d{4}-\d{2}-\d{2}$/.test(v)) {
+    const [y, m, d] = v.split("-").map(Number);
+    return IST_DATE.format(new Date(Date.UTC(y, m - 1, d, 6, 30)));
+  }
+  const d = new Date(v);
+  return Number.isNaN(d.getTime()) ? null : IST_DATE.format(d);
+};
 
-      const headerContent = `<h2>GRN Login Steps for Purchase Order</h2>`;
+/** The link the site rep opens; the page lifts the token out of the URL on load. */
+export const siteRepReceiveLink = (token) => toAbsoluteUrl(`/receive/token?t=${encodeURIComponent(token)}`);
 
-      const containerContent = `
-        <div style="font-size:16px; font-family:'Roboto', sans-serif; color:#333;">
-            <p>
-                You have been assigned as the site representative for 
-                Purchase Order <strong>#${po_number}</strong>. ${purchase_order.status == 'dispatched' ? (
-                    `The goods for this PO have been
-                    dispatched by <strong>${vendorName}</strong> and will be delivered to your site.`
-                ) : (
-                    `The goods for this PO will soon be
-                    dispatched by <strong>${vendorName}</strong> and will be delivered to your site.`
-                )}
-            </p>
+/**
+ * Email a site representative their receiving link.
+ *
+ * @param {{poNumber:string, status?:string, vendorName?:string, hotelName?:string,
+ *   nextDueDate?:string|null, expiresAt:string|Date}} details
+ * @param {string} siteRepEmail
+ * @param {string} token  the plain token (never logged)
+ * @returns {Promise<boolean>} whether the mail was handed to SMTP
+ */
+export const sendGRNRepresentativeEmail = async (details, siteRepEmail, token) => {
+  const { poNumber, status, vendorName, hotelName, nextDueDate, expiresAt } = details || {};
+  if (!siteRepEmail || !token) return false;
 
-            <h4>PO Details</h4>
-            <ul>
-                <li><strong>PO Number:</strong> ${po_number}</li>
-                <li><strong>PO ID:</strong> ${po_id}</li>
-                <li><strong>RFQ ID:</strong> ${rfq_id ?? "N/A"}</li>
-                <li><strong>Vendor:</strong> ${vendorName}</li>
-                <li><strong>Vendor Email:</strong> ${finalized_vendor_email || "N/A"}</li>
-                <li><strong>Expected Delivery (tentative):</strong> ${deliveryDateLabel}</li>
-            </ul>
+  const vendor = esc(vendorName || "the vendor");
+  const expiry = fmtDate(expiresAt);
+  const due = fmtDate(nextDueDate);
 
-            <p style="margin-top:16px;">
-                <strong>Your responsibility:</strong> Once the material reaches the site, 
-                please check the quantity and condition of the goods and update the 
-                <strong>Goods Received Note (GRN)</strong> for this PO.
-            </p>
+  const headerContent = `<h2>Receive goods for PO #${esc(poNumber)}</h2>`;
+  const containerContent = `
+    <div style="font-size:16px; font-family:'Roboto', sans-serif; color:#333;">
+      <p>
+        You have been named the site representative for purchase order <strong>#${esc(poNumber)}</strong>${hotelName ? ` at <strong>${esc(hotelName)}</strong>` : ""}.
+        ${status === "dispatched"
+          ? `The goods have been dispatched by <strong>${vendor}</strong>.`
+          : `The goods will be delivered by <strong>${vendor}</strong>.`}
+      </p>
+      <ul>
+        <li><strong>PO number:</strong> ${esc(poNumber)}</li>
+        <li><strong>Vendor:</strong> ${vendor}</li>
+        ${hotelName ? `<li><strong>Deliver to:</strong> ${esc(hotelName)}</li>` : ""}
+        ${due ? `<li><strong>Next delivery due:</strong> ${esc(due)}</li>` : ""}
+      </ul>
+      <p style="margin-top:16px;">
+        When the goods arrive, open the link below, check the quantity and condition of each item,
+        and record what you received.
+      </p>
+      <div style="text-align:center; margin-top:24px; margin-bottom:12px;">
+        ${emailButton(siteRepReceiveLink(token), "Open receiving page", { bg: "#10B981" })}
+      </div>
+      <p style="margin-top:10px; font-size:14px; color:#555;">
+        This link is personal to you; please do not forward it.
+        ${expiry ? `It works until <strong>${esc(expiry)}</strong>, or until everything on the order has been received.` : ""}
+        Keep this email: the delivery reminders we send you do not repeat the link. If it stops working,
+        ask the buyer to send it again.
+      </p>
+      <p style="text-align:center; margin-top: 30px;">
+        Thank you for helping keep delivery records accurate.<br/>
+        <strong>— Phileein Hospitality Team</strong>
+      </p>
+    </div>`;
 
-            <p style="margin-top:10px;">
-                You can use the secure link below to open the GRN page directly. This link is
-                unique to you and is used to verify your access, so please do not share it with others.
-            </p>
+  return sendMail({
+    from: config.webmasterMail,
+    to: siteRepEmail,
+    subject: `Receiving link for PO #${poNumber}`,
+    html: generateEmailTemplate(headerContent, containerContent),
+  });
+};
 
-            <div style="text-align:center; margin-top:24px;">
-                <a
-                    href="${toAbsoluteUrl(`/dashboard/buyer/purchase-order/grn?rfq=${purchase_order.rfq_id}&po=${purchase_order.id}&token=${token}`)}"
-                    style="background-color:#10B981; color:white; text-align:center; padding:12px 24px; border-radius:8px; text-decoration:none; display:inline-block; font-weight:600; margin-bottom:12px;"
-                >
-                    Open GRN Page
-                </a>
-            </div>
+const BUCKET_COPY = {
+  due_tomorrow: "due tomorrow",
+  due_today: "due today",
+  overdue: "overdue",
+};
 
-            <p style="margin-top:10px;">
-                You will also receive reminder emails around the expected delivery date to help you
-                remember to complete the GRN once the goods arrive.
-            </p>
+/**
+ * Remind a site representative of their PO's deliveries that are due tomorrow,
+ * due today or 3 days overdue. Carries NO link and no token (the plain token
+ * is never stored, and the buyer's login page would not let them in): it
+ * points them at the link in their original email.
+ *
+ * @param {{to:string, name?:string, poNumber:string, hotelName?:string,
+ *   expiresAt?:string|Date, deliveries:Array<{phaseNo:number, dueDate:string, bucket:string}>}} reminder
+ * @returns {Promise<boolean>}
+ */
+export const sendSiteRepDeliveryReminderEmail = async (reminder) => {
+  const { to, name, poNumber, hotelName, expiresAt, deliveries = [] } = reminder || {};
+  if (!to || !deliveries.length) return false;
 
-            <p style="text-align:center; margin-top: 30px;">
-                Thank you for helping keep delivery records accurate.<br/>
-                <strong>— Phileein Hospitality Team</strong>
-            </p>
-        </div>`;
+  const overdue = deliveries.some((d) => d.bucket === "overdue");
+  const rows = deliveries
+    .map((d) => `<li>Phase ${esc(d.phaseNo)}: ${esc(fmtDate(d.dueDate) || d.dueDate)} (${esc(BUCKET_COPY[d.bucket] || d.bucket)})</li>`)
+    .join("");
+  const expiry = fmtDate(expiresAt);
 
-      const htmlContent = generateEmailTemplate(headerContent, containerContent);
+  const headerContent = `<h2>${overdue ? "Delivery overdue" : "Delivery due"}: PO #${esc(poNumber)}</h2>`;
+  const containerContent = `
+    <div style="font-size:16px; font-family:'Roboto', sans-serif; color:#333;">
+      <p>${name ? `Hello ${esc(name)},` : "Hello,"}</p>
+      <p>
+        Purchase order <strong>#${esc(poNumber)}</strong>${hotelName ? ` (${esc(hotelName)})` : ""} has deliveries to receive:
+      </p>
+      <ul>${rows}</ul>
+      <p style="margin-top:16px;">
+        When the goods arrive, record them using the receiving link in the email we sent when you were named
+        site representative${expiry ? ` (it works until ${esc(expiry)})` : ""}. If you cannot find it, or it has
+        stopped working, ask the buyer to send it again.
+      </p>
+      <p style="text-align:center; margin-top: 30px;">
+        <strong>— Phileein Hospitality Team</strong>
+      </p>
+    </div>`;
 
-      let recipients = {
-        from: config.webmasterMail,
-        subject: `GRN Login Info for PO #${po_number}`,
-        html: htmlContent,
-      };
-
-      const emails = [];
-
-    //   for (let user of userList) {
-    //     let u = await userModel.getUserById(user);
-    //     u = u?.[0];
-
-    //     if (u && u.email) emails.push(u.email);
-    //   }
-
-      emails.push(siteRepEmail)
-
-      if (emails && emails.length > 0) {
-        recipients.to = emails;
-      } else {
-        // no recipients -> nothing to send
-        return resolve(false);
-      }
-
-      sendMail(recipients);
-      return resolve(true);
-    } catch (err) {
-      logError("Error sending dispatched email:", err);
-      return reject(err);
-    }
+  return sendMail({
+    from: config.webmasterMail,
+    to,
+    subject: `${overdue ? "Overdue" : "Reminder"}: deliveries to receive for PO #${poNumber}`,
+    html: generateEmailTemplate(headerContent, containerContent),
   });
 };
