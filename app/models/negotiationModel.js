@@ -114,7 +114,7 @@ export const arcNegotiationReadScopeSql = (alias, userParam) =>
           AND (
             (_p.resource = 'negotiation'::resource_type AND _p.action = 'read')
             OR (_p.resource = 'arc-comm'::resource_type AND _p.action IN ('read', 'evaluate', 'approve'))
-            OR (_p.resource = 'arc'::resource_type AND _p.action = 'admin')
+            OR (_p.resource = 'arc'::resource_type AND _p.action::text = 'admin')
           )
           AND _urs.company_id = ${alias}.hospitality_company_id
           AND (_urs.hotel_id IS NULL OR _urs.hotel_id = ${alias}.hotel_id)
