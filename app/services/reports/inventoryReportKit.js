@@ -16,9 +16,13 @@
 // which is the module's convention for a foreign facet.
 //
 // ── Rules every report here follows ─────────────────────────────────────────
-//   - Value columns sum movement `value`. Only the quantity reconciles with
-//     tbl_inv_balance (a reversal at receipt cost can leave a value residue),
-//     so nothing here cross-checks value against the balance table.
+//   - Position reports (stock on hand, slow-moving) value stock as the
+//     balance does: tbl_inv_balance for "now", and a past date's qty_after ×
+//     avg_cost_after of the last movement before it. Summing movement `value`
+//     would carry a write-off residue forever (a reversal at receipt cost
+//     floors the balance's value at 0; the movement sum goes negative).
+//   - Flow reports (ledger, consumption, adjustments, GRN value, count
+//     variance) sum movement `value`: what moved in the window.
 //   - Days are IST calendar days. A period { from, to } is [from, to): `to`
 //     is exclusive, as resolvePeriod() hands it over.
 //   - Rows with no hotel (unallocated delivery rows) belong to no hotel and

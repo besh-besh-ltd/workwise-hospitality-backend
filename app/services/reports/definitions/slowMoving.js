@@ -1,20 +1,25 @@
 // ============================================================================
 // 7.6 — Slow-moving & Non-moving Stock
 // ----------------------------------------------------------------------------
-// Items a hotel holds (qty > 0) that nothing has been marked out of for the
-// last 90 days (IST, counted back from today):
-//   Non-moving  — never marked out since it arrived;
+// Items a hotel holds that nothing has been marked out of for the last 90
+// days (IST, counted back from today):
+//   Non-moving  — never marked out at this hotel;
 //   Slow-moving — last marked out more than 90 days ago.
 //
-// Two choices, both so the list only names stock that is genuinely idle:
+// Only stock that is genuinely idle is named:
 //   - "Outbound" means a mark-out to a department (consumption). A count loss,
 //     a wastage write-off or a return to the vendor is not use, and would
 //     otherwise hide an idle item for another 90 days.
-//   - The item must have been in the store for the whole window (its first
-//     movement at the hotel is older than 90 days); stock received last week
-//     has not had the chance to move.
+//   - The stock must have been on hand for the whole window: qty > 0 at the
+//     cut-off (qty_after of the last movement before it), and the balance
+//     never ran out since. An item used up long ago and received again last
+//     week has not had the chance to move.
 //
-// Quantity and value are the ledger sums to date (value = Σ movement value).
+// Driven by tbl_inv_balance (qty > 0 now), with index probes per (hotel,
+// item) on ix_inv_movement_hotel_item_posted: the position at the cut-off,
+// any mark-out or run-out since it (a 90-day range), and, for the rows that
+// survive, the last mark-out and the day the current holding began. Quantity
+// and value are the balance's (a position, not a sum of movement values).
 // The report is "as of today", so the period filter does not apply.
 // ============================================================================
 
@@ -43,7 +48,7 @@ const COLUMNS = [
   { header: "Value (₹)", key: "value", width: 14, align: "right", numFmt: FMT.INR, type: "money", total: "sum" },
   { header: "Last Mark-out", key: "last_outbound_at", width: 14, align: "center", numFmt: FMT.DATE, type: "date" },
   { header: "Days Since Mark-out", key: "days_since_outbound", width: 14, align: "right", numFmt: FMT.INT, type: "int" },
-  { header: "In Store Since", key: "first_in_at", width: 14, align: "center", numFmt: FMT.DATE, type: "date" },
+  { header: "Held Since", key: "held_since", width: 14, align: "center", numFmt: FMT.DATE, type: "date" },
   { header: "Days in Store", key: "days_in_store", width: 12, align: "right", numFmt: FMT.INT, type: "int" },
 ];
 
@@ -60,27 +65,62 @@ export default {
   async fetch(scope) {
     const hotels = await reportHotels(scope, "inventory");
     const cutoff = `((${IST_TODAY} - $2::int)::timestamp AT TIME ZONE 'Asia/Kolkata')`;
+    const SAME_ITEM = `m.hotel_id = idle.hotel_id AND m.inv_item_id = idle.inv_item_id`;
     const raw = hotels.length
       ? await db.any(
-          `WITH held AS (
-             SELECT m.hotel_id, m.inv_item_id, sum(m.qty) AS qty, sum(m.value) AS value,
-                    min(m.posted_at) AS first_in_at,
-                    max(m.posted_at) FILTER (WHERE m.movement_type = 'MARK_OUT') AS last_out_at
-               FROM tbl_inv_movement m
-              WHERE m.hotel_id = ANY($1::int[])
-              GROUP BY m.hotel_id, m.inv_item_id
+          `WITH idle AS MATERIALIZED (
+             SELECT b.hotel_id, b.inv_item_id, b.qty, b.value
+               FROM tbl_inv_balance b
+               CROSS JOIN LATERAL (
+                 SELECT m.qty_after
+                   FROM tbl_inv_movement m
+                  WHERE m.hotel_id = b.hotel_id AND m.inv_item_id = b.inv_item_id
+                    AND m.posted_at < ${cutoff}
+                  ORDER BY m.posted_at DESC, m.id DESC
+                  LIMIT 1
+               ) at_cut
+              WHERE b.hotel_id = ANY($1::int[])
+                AND b.qty > 0
+                AND at_cut.qty_after > 0
+                AND NOT EXISTS (
+                  SELECT 1
+                    FROM tbl_inv_movement m
+                   WHERE m.hotel_id = b.hotel_id AND m.inv_item_id = b.inv_item_id
+                     AND m.posted_at >= ${cutoff}
+                     AND (m.movement_type = 'MARK_OUT' OR m.qty_after <= 0)
+                )
            )
            SELECT h.name AS hotel_name, i.display_name AS item_name, i.item_code, i.stock_uom,
-                  held.qty::float8 AS qty, held.value::float8 AS value, held.first_in_at, held.last_out_at,
-                  (${IST_TODAY} - (held.first_in_at AT TIME ZONE 'Asia/Kolkata')::date) AS days_in_store,
-                  (${IST_TODAY} - (held.last_out_at AT TIME ZONE 'Asia/Kolkata')::date) AS days_since_outbound
-             FROM held
-             JOIN tbl_inv_item i ON i.id = held.inv_item_id
-             JOIN tbl_hospitality_company_hotels h ON h.id = held.hotel_id
-            WHERE held.qty > 0
-              AND held.first_in_at < ${cutoff}
-              AND (held.last_out_at IS NULL OR held.last_out_at < ${cutoff})
-            ORDER BY h.name, h.id, held.value DESC, i.display_name, i.id`,
+                  idle.qty::float8 AS qty, idle.value::float8 AS value,
+                  last_out.posted_at AS last_out_at, held.posted_at AS held_since,
+                  (${IST_TODAY} - (held.posted_at AT TIME ZONE 'Asia/Kolkata')::date) AS days_in_store,
+                  (${IST_TODAY} - (last_out.posted_at AT TIME ZONE 'Asia/Kolkata')::date) AS days_since_outbound
+             FROM idle
+             JOIN tbl_inv_item i ON i.id = idle.inv_item_id
+             JOIN tbl_hospitality_company_hotels h ON h.id = idle.hotel_id
+             LEFT JOIN LATERAL (
+               SELECT m.posted_at
+                 FROM tbl_inv_movement m
+                WHERE ${SAME_ITEM} AND m.movement_type = 'MARK_OUT'
+                ORDER BY m.posted_at DESC, m.id DESC
+                LIMIT 1
+             ) last_out ON true
+             LEFT JOIN LATERAL (
+               SELECT m.posted_at, m.id
+                 FROM tbl_inv_movement m
+                WHERE ${SAME_ITEM} AND m.qty_after <= 0
+                ORDER BY m.posted_at DESC, m.id DESC
+                LIMIT 1
+             ) ran_out ON true
+             CROSS JOIN LATERAL (
+               SELECT m.posted_at
+                 FROM tbl_inv_movement m
+                WHERE ${SAME_ITEM}
+                  AND (ran_out.id IS NULL OR (m.posted_at, m.id) > (ran_out.posted_at, ran_out.id))
+                ORDER BY m.posted_at, m.id
+                LIMIT 1
+             ) held
+            ORDER BY h.name, h.id, idle.value DESC, i.display_name, i.id`,
           [hotels, SLOW_MOVING_DAYS]
         )
       : [];
@@ -95,7 +135,7 @@ export default {
       value: num(r.value),
       last_outbound_at: r.last_out_at ? new Date(r.last_out_at).toISOString() : null,
       days_since_outbound: num(r.days_since_outbound),
-      first_in_at: new Date(r.first_in_at).toISOString(),
+      held_since: new Date(r.held_since).toISOString(),
       days_in_store: num(r.days_in_store),
     }));
 
@@ -115,14 +155,15 @@ export default {
       params: [
         ["As of", asOf],
         ["Business units", hotelsLabel(names)],
-        ["Idle", `Nothing marked out in the last ${SLOW_MOVING_DAYS} days, and in store for at least that long`],
+        ["Idle", `Nothing marked out in the last ${SLOW_MOVING_DAYS} days, and held without running out for at least that long`],
+        ["Held since", "When the current holding began: the first movement after the balance last ran out"],
         ["Non-moving", "Never marked out at this hotel"],
       ],
       columns: COLUMNS,
       rows: rows.map((r) => ({
         ...r,
         last_outbound_at: istDate(r.last_outbound_at),
-        first_in_at: istDate(r.first_in_at),
+        held_since: istDate(r.held_since),
       })),
       totalLabel: "Total",
       freezeCols: 2,

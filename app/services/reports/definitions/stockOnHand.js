@@ -4,12 +4,17 @@
 // Quantity and value of every item held at each hotel the caller can read,
 // as at the end of the chosen period (today, for the current year).
 //
-// Built from the ledger, not tbl_inv_balance, so a past period reports the
-// stock as it stood then: qty = Σ movement qty and value = Σ movement value up
-// to the period's end. For "now" the quantity equals the balance table's
-// (the ledger guarantees it); the value can differ from the balance's by a
-// write-off residue (a reversal at receipt cost), and the movement sum is the
-// figure every inventory report uses.
+// A position, so it is valued the way the balance is, never by summing
+// movement values (a reversal at receipt cost floors the balance's value at
+// 0 while the movement sum goes negative, and that residue would never
+// clear):
+//   - As at today or later: tbl_inv_balance as it stands (qty, avg cost,
+//     value, last movement).
+//   - As at a past day: per (hotel, item), the last movement before the end
+//     of that day (ix_inv_movement_hotel_item_posted, newest first): its
+//     qty_after and avg_cost_after, value = qty_after × avg_cost_after.
+// Every (hotel, item) that has ever moved has a balance row (the ledger
+// writes one with its first movement), so the balance table drives both.
 // ============================================================================
 
 import { FMT, istDate, istDateLabel, reportSheet, writeReportSheet } from "../excelKit.js";
@@ -63,32 +68,52 @@ export default {
   async fetch(scope, period) {
     const hotels = await reportHotels(scope, "inventory");
     const asAtDay = lastDayOf(period);
-    const raw = hotels.length
-      ? await db.any(
-          `WITH held AS (
-             SELECT m.hotel_id, m.inv_item_id, sum(m.qty) AS qty, sum(m.value) AS value,
-                    max(m.posted_at) AS last_at
+    const today = (await db.one(`SELECT ${IST_TODAY}::text AS d`)).d;
+    const current = asAtDay >= today;
+    const ITEM_JOINS = `
+             JOIN tbl_inv_item i ON i.id = b.inv_item_id
+             JOIN tbl_hospitality_company_hotels h ON h.id = b.hotel_id
+             LEFT JOIN tbl_inv_hotel_item hi ON hi.hotel_id = b.hotel_id AND hi.inv_item_id = b.inv_item_id`;
+    const ITEM_COLS = `b.hotel_id, h.name AS hotel_name, i.display_name AS item_name, i.item_code, i.stock_uom,
+                  hi.bin_label, hi.reorder_level::float8 AS reorder_level`;
+    let raw = [];
+    if (hotels.length && current) {
+      raw = await db.any(
+        `SELECT ${ITEM_COLS},
+                b.qty::float8 AS qty, b.avg_cost::float8 AS avg_cost, b.value::float8 AS value,
+                b.last_movement_at AS last_at
+           FROM tbl_inv_balance b
+           ${ITEM_JOINS}
+          WHERE b.hotel_id = ANY($1::int[])
+            AND b.qty <> 0
+          ORDER BY h.name, h.id, i.display_name, i.id`,
+        [hotels]
+      );
+    } else if (hotels.length) {
+      raw = await db.any(
+        `SELECT ${ITEM_COLS},
+                pos.qty_after::float8 AS qty, pos.avg_cost_after::float8 AS avg_cost,
+                round(pos.qty_after * pos.avg_cost_after, 4)::float8 AS value, pos.posted_at AS last_at
+           FROM tbl_inv_balance b
+           CROSS JOIN LATERAL (
+             SELECT m.qty_after, m.avg_cost_after, m.posted_at
                FROM tbl_inv_movement m
-              WHERE m.hotel_id = ANY($1::int[])
+              WHERE m.hotel_id = b.hotel_id
+                AND m.inv_item_id = b.inv_item_id
                 AND m.posted_at < ${istDayStart("$2")}
-              GROUP BY m.hotel_id, m.inv_item_id
-           )
-           SELECT h.name AS hotel_name, i.display_name AS item_name, i.item_code, i.stock_uom,
-                  hi.bin_label, hi.reorder_level::float8 AS reorder_level,
-                  held.qty::float8 AS qty, held.value::float8 AS value,
-                  CASE WHEN held.qty > 0 THEN round(held.value / held.qty, 4)::float8 END AS avg_cost,
-                  held.last_at
-             FROM held
-             JOIN tbl_inv_item i ON i.id = held.inv_item_id
-             JOIN tbl_hospitality_company_hotels h ON h.id = held.hotel_id
-             LEFT JOIN tbl_inv_hotel_item hi ON hi.hotel_id = held.hotel_id AND hi.inv_item_id = held.inv_item_id
-            WHERE held.qty <> 0
-            ORDER BY h.name, h.id, i.display_name, i.id`,
-          [hotels, period.to]
-        )
-      : [];
+              ORDER BY m.posted_at DESC, m.id DESC
+              LIMIT 1
+           ) pos
+           ${ITEM_JOINS}
+          WHERE b.hotel_id = ANY($1::int[])
+            AND pos.qty_after <> 0
+          ORDER BY h.name, h.id, i.display_name, i.id`,
+        [hotels, period.to]
+      );
+    }
 
     const rows = raw.map((r) => ({
+      hotel_id: Number(r.hotel_id),
       hotel_name: r.hotel_name,
       item_name: r.item_name,
       item_code: r.item_code || null,
@@ -101,19 +126,19 @@ export default {
       last_movement: r.last_at ? new Date(r.last_at).toISOString() : null,
     }));
 
+    // Keyed by hotel id: two hotels can share a name.
     const byHotel = new Map();
     for (const r of rows) {
-      const s = byHotel.get(r.hotel_name) || { hotel_name: r.hotel_name, items: 0, value: 0 };
+      const s = byHotel.get(r.hotel_id) || { hotel_name: r.hotel_name, items: 0, value: 0 };
       s.items += 1;
       s.value = round4(s.value + (r.value || 0));
-      byHotel.set(r.hotel_name, s);
+      byHotel.set(r.hotel_id, s);
     }
 
-    const today = (await db.one(`SELECT ${IST_TODAY}::text AS d`)).d;
     return {
       rows,
       summaryRows: [...byHotel.values()],
-      asAt: asAtDay < today ? asAtDay : today,
+      asAt: current ? today : asAtDay,
       hotelNames: await hotelNames(hotels),
     };
   },
@@ -127,7 +152,7 @@ export default {
     const params = [
       ["As at", `End of ${asOf}`],
       ["Business units", hotelsLabel(names)],
-      ["Valuation", "Moving weighted average; value is the sum of ledger movement values"],
+      ["Valuation", "Moving weighted average, as the stock balance carries it"],
     ];
     const ws = reportSheet(wb, "Stock on Hand", { footerTitle: "Stock on Hand" });
     writeReportSheet(ws, {

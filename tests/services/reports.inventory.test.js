@@ -26,6 +26,13 @@ import { nextDocNumber } from "../../app/services/inventory/docNumber.js";
 import { recomputePoReceipt } from "../../app/services/inventory/receiptRollup.js";
 import { LEAF_CATEGORY_JOIN } from "../../app/models/reportsModel.js";
 import { allReports } from "../../app/services/reports/definitions/index.js";
+import { resolvePeriod } from "../../app/services/reports/filters.js";
+import { SHORT_CLOSE_REASONS } from "../../app/services/inventory/shortCloseService.js";
+import {
+  SHORT_CLOSE_ATTRIBUTION,
+  VENDOR_SHORT_CLOSE_REASONS,
+} from "../../app/services/reports/definitions/vendorDeliveryPerformance.js";
+import { LEDGER_REASON_LABELS } from "../../app/services/reports/definitions/stockLedger.js";
 
 const CO_A = IDS.hospitality.A;
 const CO_B = IDS.hospitality.B;
@@ -251,11 +258,15 @@ async function seedWorld() {
       pepper: await makeItem(t, { name: "D4 Pepper", code: "D4-PEPPER", uom: "kg", variantId: spare[5] }),
       tea: await makeItem(t, { name: "D4 Tea", code: "D4-TEA", uom: "kg", variantId: spare[6] }),
       coffee: await makeItem(t, { name: "D4 Coffee", code: "D4-COFFEE", uom: "kg", variantId: spare[7] }),
+      mint: await makeItem(t, { name: "D4 Mint", code: "D4-MINT", uom: "kg", variantId: spare[8] }),
+      saffron: await makeItem(t, { name: "D4 Saffron", code: "D4-SAFFRON", uom: "g" }),
+      matches: await makeItem(t, { name: "D4 Matches", code: "D4-MATCHES", uom: "nos" }),
+      wicks: await makeItem(t, { name: "D4 Wicks", code: "D4-WICKS", uom: "nos" }),
       bRice: await makeItem(t, { companyId: CO_B, name: "D4 Foreign Rice", code: "D4-BRICE", uom: "kg" }),
     };
   });
   W.variant = { rice: Number(riceV.id), oil: Number(oilV.id), milk: spare[0], sugar: spare[1], vinegar: spare[2],
-    flour: spare[3], salt: spare[4], pepper: spare[5], tea: spare[6], coffee: spare[7] };
+    flour: spare[3], salt: spare[4], pepper: spare[5], tea: spare[6], coffee: spare[7], mint: spare[8] };
 
   // ── Stock received at A1 and A2 ─────────────────────────────────────────
   W.grn = {};
@@ -306,6 +317,19 @@ async function seedWorld() {
     { invItemId: W.item.oil, system: 17, counted: 15, avg: 200, reason: "not yet approved" },
   ] });
 
+  // ── A write-off residue (A2's ledger sequence, at A1) ──────────────────
+  // 10 @100 + 5 @400 (avg 200), 9 out at 200, then the dearer lot reversed at
+  // its receipt cost: the balance ends at qty 1, value 0, while the movement
+  // values sum to −800. The out is a count loss and the documents are made
+  // up, so no flow report picks these rows up.
+  const saffron = (type, qty, extra = {}) => ({
+    companyId: CO_A, hotelId: A1, invItemId: W.item.saffron, type, qty, sourceType: type === "COUNT_OUT" ? "CNT" : "GRN",
+    sourceId: 999999, postedBy: BUYER, ...extra,
+  });
+  await db.tx((t) => postMovements(t, [saffron("GRN_IN", 10, { unitCost: 100 }), saffron("GRN_IN", 5, { unitCost: 400 })]));
+  await db.tx((t) => postMovements(t, [saffron("COUNT_OUT", -9)]));
+  await db.tx((t) => postMovements(t, [saffron("GRN_REVERSAL", -5, { unitCost: 400 })]));
+
   // ── Stock that has sat for months (A1), and a foreign company's (B1) ────
   await db.tx(async (t) => {
     const opening = await t.one(
@@ -324,10 +348,28 @@ async function seedWorld() {
       qtyAfter: 5, sourceType: "ADJ", sourceId: opening.id, reasonCode: "OPENING", postedAt: istInstant(-150) });
     await backdatedMovement(t, { hotelId: A1, invItemId: W.item.candle, type: "MARK_OUT", qty: -1, unitCost: 20,
       qtyAfter: 4, departmentId: FB, sourceType: "OUT", sourceId: oldOut.id, postedAt: istInstant(-120) });
+    // Matches: held a year ago, used up (a count loss) long before the
+    // slow-moving cut-off, received again 10 days ago: nothing on hand at
+    // the cut-off. Wicks: on hand at the cut-off, but ran out 60 days ago and
+    // was received again: not held for the whole window. Neither is idle.
+    await backdatedMovement(t, { hotelId: A1, invItemId: W.item.matches, type: "OPENING", qty: 5, unitCost: 10,
+      qtyAfter: 5, sourceType: "ADJ", sourceId: opening.id, reasonCode: "OPENING", postedAt: istInstant(-400) });
+    await backdatedMovement(t, { hotelId: A1, invItemId: W.item.matches, type: "COUNT_OUT", qty: -5, unitCost: 10,
+      qtyAfter: 0, sourceType: "CNT", sourceId: 999999, postedAt: istInstant(-350) });
+    await backdatedMovement(t, { hotelId: A1, invItemId: W.item.matches, type: "GRN_IN", qty: 3, unitCost: 40,
+      qtyAfter: 3, sourceType: "GRN", sourceId: 999999, postedAt: istInstant(-10) });
+    await backdatedMovement(t, { hotelId: A1, invItemId: W.item.wicks, type: "OPENING", qty: 6, unitCost: 5,
+      qtyAfter: 6, sourceType: "ADJ", sourceId: opening.id, reasonCode: "OPENING", postedAt: istInstant(-400) });
+    await backdatedMovement(t, { hotelId: A1, invItemId: W.item.wicks, type: "COUNT_OUT", qty: -6, unitCost: 5,
+      qtyAfter: 0, sourceType: "CNT", sourceId: 999999, postedAt: istInstant(-60) });
+    await backdatedMovement(t, { hotelId: A1, invItemId: W.item.wicks, type: "GRN_IN", qty: 2, unitCost: 5,
+      qtyAfter: 2, sourceType: "GRN", sourceId: 999999, postedAt: istInstant(-30) });
     await t.none(
       `INSERT INTO tbl_inv_balance (hotel_id, inv_item_id, hospitality_company_id, qty, avg_cost, value, last_movement_at)
-       VALUES ($1, $2, $3, 10, 30, 300, $4::timestamptz), ($1, $5, $3, 4, 20, 80, $6::timestamptz)`,
-      [A1, W.item.soap, CO_A, istInstant(-200), W.item.candle, istInstant(-120)]
+       VALUES ($1, $2, $3, 10, 30, 300, $4::timestamptz), ($1, $5, $3, 4, 20, 80, $6::timestamptz),
+              ($1, $7, $3, 3, 40, 120, $8::timestamptz), ($1, $9, $3, 2, 5, 10, $10::timestamptz)`,
+      [A1, W.item.soap, CO_A, istInstant(-200), W.item.candle, istInstant(-120), W.item.matches, istInstant(-10),
+        W.item.wicks, istInstant(-30)]
     );
   });
   await db.tx(async (t) => {
@@ -383,6 +425,34 @@ async function seedWorld() {
       `INSERT INTO tbl_po_short_close (hospitality_company_id, po_id, delivery_line_id, qty, reason_code, action, acted_by)
        VALUES ($1, $2, $3, 10, 'vendor_cannot_supply', 'close', $4)`,
       [CO_A, po.poId, d3.lines[ly], BUYER]
+    );
+    await recomputePoReceipt(t, po.poId);
+  });
+  // PO-N at A1: 12 of 20 arrived early; a vendor short-close of 5 was
+  // reopened, then the buyer closed the last 8 as no longer needed. Only the
+  // buyer's close is in force, so the row is excluded from OTIF, not failed.
+  await db.tx(async (t) => {
+    const po = await makeRfqPo(t, { hotel: A1, lines: [{ qty: 20, unit: "kg", variantId: W.variant.mint, unitPrice: 15 }] });
+    const [ln] = po.lineIds;
+    const [dn] = await setPlan(t, po.poId, [{ hotelId: A1, phaseNo: 1, dueDate: addDays(T, -4), lines: { [ln]: 20 } }]);
+    W.po.N = po.poNumber;
+    W.grn.N1 = (await postReceiptGrn(t, { poId: po.poId, hotelId: A1, receivedAt: addDays(T, -6), lines: [
+      { poLineId: ln, accepted: 12, unitCost: 15, deliveryLineId: dn.lines[ln] },
+    ] })).grnNumber;
+    await t.none(
+      `INSERT INTO tbl_po_short_close (hospitality_company_id, po_id, delivery_line_id, qty, reason_code, remarks, action, acted_by)
+       VALUES ($1, $2, $3, 5, 'vendor_cannot_supply', NULL, 'close', $4)`,
+      [CO_A, po.poId, dn.lines[ln], BUYER]
+    );
+    await t.none(
+      `INSERT INTO tbl_po_short_close (hospitality_company_id, po_id, delivery_line_id, qty, reason_code, remarks, action, acted_by)
+       VALUES ($1, $2, $3, 5, NULL, 'vendor found stock', 'reopen', $4)`,
+      [CO_A, po.poId, dn.lines[ln], BUYER]
+    );
+    await t.none(
+      `INSERT INTO tbl_po_short_close (hospitality_company_id, po_id, delivery_line_id, qty, reason_code, remarks, action, acted_by)
+       VALUES ($1, $2, $3, 8, 'no_longer_needed', NULL, 'close', $4)`,
+      [CO_A, po.poId, dn.lines[ln], BUYER]
     );
     await recomputePoReceipt(t, po.poId);
   });
@@ -560,12 +630,45 @@ describe("stock reports", () => {
     // Another company's store never appears.
     expect(rows.some((r) => r.item_code === "D4-BRICE")).toBe(false);
 
-    // A past period reports the stock as it stood at the end of it.
+    // A past period reports the stock as it stood at the end of it: the
+    // last movement's qty_after × avg_cost_after. Wicks were still held
+    // then; the matches had been used up.
     const then = await rowsOf(WIDE, "stock_on_hand", { from: addDays(T, -300), to: addDays(T, -100) });
-    expect(then.map((r) => [r.item_code, r.qty, r.value])).toEqual([
-      ["D4-CANDLE", 4, 80],
-      ["D4-SOAP", 10, 300],
+    expect(then.map((r) => [r.item_code, r.qty, r.avg_cost, r.value])).toEqual([
+      ["D4-CANDLE", 4, 20, 80],
+      ["D4-SOAP", 10, 30, 300],
+      ["D4-WICKS", 6, 5, 30],
     ]);
+  });
+
+  it("stock_on_hand values a write-off residue as the balance does, not as the movement sum", async () => {
+    const balance = await db.one(
+      `SELECT qty::float8 AS qty, avg_cost::float8 AS avg_cost, value::float8 AS value
+         FROM tbl_inv_balance WHERE hotel_id = $1 AND inv_item_id = $2`,
+      [A1, W.item.saffron]
+    );
+    const { sum } = await db.one(
+      `SELECT sum(value)::float8 AS sum FROM tbl_inv_movement WHERE hotel_id = $1 AND inv_item_id = $2`,
+      [A1, W.item.saffron]
+    );
+    expect(balance).toEqual({ qty: 1, avg_cost: 0, value: 0 });
+    expect(sum).toBe(-800);
+
+    const rows = await rowsOf(WIDE, "stock_on_hand");
+    const [saffron] = byItem(rows, "D4-SAFFRON", A1);
+    expect(saffron).toMatchObject({ qty: balance.qty, avg_cost: balance.avg_cost, value: balance.value });
+
+    // The By Hotel summary adds the same figures.
+    const wb = await download(WIDE, "stock_on_hand");
+    const sheet = sheetRows(wb.getWorksheet("Stock on Hand"), "Hotel");
+    const a1Total = sheet.filter((r) => r.Hotel === W.hotelName[A1]).reduce((acc, r) => acc + r["Value (₹)"], 0);
+    const summary = sheetRows(wb.getWorksheet("By Hotel"), "Hotel").find((r) => r.Hotel === W.hotelName[A1]);
+    expect(summary["Stock Value (₹)"]).toBeCloseTo(a1Total, 4);
+    const { v } = await db.one(
+      `SELECT sum(value)::float8 AS v FROM tbl_inv_balance WHERE hotel_id = $1 AND qty <> 0`,
+      [A1]
+    );
+    expect(summary["Stock Value (₹)"]).toBeCloseTo(v, 4);
   });
 
   it("stock_ledger returns expected rows for seeded movements", async () => {
@@ -643,11 +746,22 @@ describe("stock reports", () => {
 
   it("slow_moving returns expected rows for seeded movements", async () => {
     const rows = await rowsOf(WIDE, "slow_moving");
+    // Matches (nothing on hand at the cut-off), wicks (ran out since) and
+    // saffron (first received today) are not idle stock.
     expect(rows.map((r) => [r.item_code, r.status, r.qty, r.value, r.days_since_outbound])).toEqual([
       ["D4-SOAP", "Non-moving", 10, 300, null],
       ["D4-CANDLE", "Slow-moving", 4, 80, 120],
     ]);
-    expect(rows[0].days_in_store).toBe(200);
+    expect(rows.map((r) => r.days_in_store)).toEqual([200, 150]);
+  });
+
+  it("slow_moving needs stock on hand at the cut-off, not just an old first movement", async () => {
+    const rows = await rowsOf(WIDE, "slow_moving");
+    const codes = rows.map((r) => r.item_code);
+    // First movement 400 days ago, never marked out, qty > 0 today: the old
+    // rule called both non-moving.
+    expect(codes).not.toContain("D4-MATCHES");
+    expect(codes).not.toContain("D4-WICKS");
   });
 
   it("near_expiry returns expected rows for seeded movements", async () => {
@@ -663,7 +777,7 @@ describe("stock reports", () => {
 describe("receiving reports", () => {
   it("grn_register returns expected rows for seeded movements", async () => {
     const rows = await rowsOf(WIDE, "grn_register", RECENT());
-    expect(rows.map((r) => r.grn_number)).toEqual([W.grn.X1, W.grn.Y1, W.grn.A21, W.grn.X2, W.grn.G1, W.grn.G2]);
+    expect(rows.map((r) => r.grn_number)).toEqual([W.grn.X1, W.grn.Y1, W.grn.A21, W.grn.N1, W.grn.X2, W.grn.G1, W.grn.G2]);
     const g1 = rows.find((r) => r.grn_number === W.grn.G1);
     expect(g1).toMatchObject({
       type: "Receipt", hotel_name: W.hotelName[A1], po_number: W.stockPoA1, vendor_name: W.vendorName,
@@ -695,7 +809,9 @@ describe("receiving reports", () => {
     const period = { from: addDays(T, -60), to: addDays(T, 30) };
     const rows = await rowsOf(WIDE, "vendor_delivery_performance", period);
     expect(rows).toHaveLength(1);
-    expect(rows[0]).toMatchObject({ vendor_name: W.vendorName, deliveries: 5, on_time: 3, in_full: 2, otif: 2 });
+    expect(rows[0]).toMatchObject({
+      vendor_name: W.vendorName, deliveries: 5, buyer_closed: 1, on_time: 3, in_full: 2, otif: 2,
+    });
     expect(rows[0].otif_pct).toBeCloseTo(0.4, 6);
   });
 
@@ -704,26 +820,115 @@ describe("receiving reports", () => {
     const [v] = await rowsOf(WIDE, "vendor_delivery_performance", period);
     expect(v.on_time_pct).toBeCloseTo(3 / 5, 6);
     expect(v.in_full_pct).toBeCloseTo(2 / 5, 6);
-    // rejected ÷ received over the judged rows: 2 ÷ (70 + 50 + 20 + 0 + 10)
-    expect(v.rejection_pct).toBeCloseTo(2 / 150, 6);
-    // short-closed ÷ planned: 10 ÷ (70 + 50 + 30 + 10 + 10)
-    expect(v.short_close_pct).toBeCloseTo(10 / 170, 6);
 
     const wb = await download(WIDE, "vendor_delivery_performance", period);
     const d = sheetRows(wb.getWorksheet("Deliveries"), "PO Number");
     const row = (po, phase) => d.find((r) => r["PO Number"] === po && r.Phase === phase);
-    expect(d).toHaveLength(5);
+    expect(d).toHaveLength(6);
     // early and in full
     expect(row(W.po.X, 1)).toMatchObject({ "On Time": "Yes", "In Full": "Yes", OTIF: "Yes", "Days Late": 0 });
     // received 2 days late, 2 of 10 rejected
     expect(row(W.po.X, 2)).toMatchObject({ "On Time": "No", "In Full": "No", OTIF: "No", "Days Late": 2 });
-    // on its due date, then short-closed: on time, never in full
+    // on its due date, then short-closed by the vendor: on time, never in full
     expect(row(W.po.Y, 1)).toMatchObject({ "On Time": "Yes", "In Full": "No", OTIF: "No", "Days Late": 0 });
     // due 2 days ago, nothing received
     expect(row(W.po.Y, 2)).toMatchObject({ "On Time": "No", "In Full": "No", OTIF: "No", "Days Late": 2 });
     expect(row(W.po.A2, 1)).toMatchObject({ OTIF: "Yes" });
     // Not yet due, unscheduled and legacy rows are not judged.
     expect(d.some((r) => [W.po.Z, W.po.U, W.po.L].includes(r["PO Number"]))).toBe(false);
+  });
+
+  it("OTIF does not count a buyer's short-close against the vendor", async () => {
+    // B5's reasons, each attributed once; credit returns are vendor-side in SQL.
+    expect(Object.keys(SHORT_CLOSE_ATTRIBUTION).sort()).toEqual([...SHORT_CLOSE_REASONS].sort());
+    expect([...VENDOR_SHORT_CLOSE_REASONS].sort()).toEqual(["price_dispute", "vendor_cannot_supply"]);
+    expect(new Set(Object.values(SHORT_CLOSE_ATTRIBUTION))).toEqual(new Set(["vendor", "buyer"]));
+
+    const period = { from: addDays(T, -60), to: addDays(T, 30) };
+    const wb = await download(WIDE, "vendor_delivery_performance", period);
+    const d = sheetRows(wb.getWorksheet("Deliveries"), "PO Number");
+    const row = (po, phase) => d.find((r) => r["PO Number"] === po && r.Phase === phase);
+    // PO-N: 12 of 20 early, the vendor's close reopened, the buyer closed 8.
+    // Excluded, not failed; only the close in force counts, and it is the buyer's.
+    expect(row(W.po.N, 1)).toMatchObject({
+      Assessed: "No — buyer short-close", "On Time": "—", "In Full": "—", OTIF: "—",
+      "Planned (₹)": 300, "Received (₹)": 180, "Vendor Short-close (₹)": 0, "Buyer Short-close (₹)": 120,
+    });
+    // PO-Y phase 1: the vendor could not supply 10 of 30.
+    expect(row(W.po.Y, 1)).toMatchObject({
+      Assessed: "Yes", "Planned (₹)": 600, "Vendor Short-close (₹)": 200, "Buyer Short-close (₹)": 0,
+    });
+
+    const [v] = await rowsOf(WIDE, "vendor_delivery_performance", period);
+    expect(v).toMatchObject({ deliveries: 5, buyer_closed: 1, otif: 2 });
+  });
+
+  it("OTIF rates are weighted by value, so units do not mix", async () => {
+    const period = { from: addDays(T, -60), to: addDays(T, 30) };
+    const [v] = await rowsOf(WIDE, "vendor_delivery_performance", period);
+    // Rejected ÷ received, at each PO line's rate, over every row in scope:
+    // 2 ltr vinegar @30 = 60 of X1 900 + X2 700 + Y1 400 + Y2 0 + A2 1000 + N 180.
+    expect(v.rejection_pct).toBeCloseTo(60 / 3180, 6);
+    // Vendor short-close ÷ (planned − buyer short-close):
+    // flour 10 @20 = 200 of (900 + 700 + 600 + 200 + 1000 + 300) − 120.
+    expect(v.short_close_pct).toBeCloseTo(200 / 3580, 6);
+
+    const wb = await download(WIDE, "vendor_delivery_performance", period);
+    const d = sheetRows(wb.getWorksheet("Deliveries"), "PO Number");
+    const x2 = d.find((r) => r["PO Number"] === W.po.X && r.Phase === 2);
+    // sugar 40 kg @10 + vinegar 10 ltr @30, never "50" of nothing in particular
+    expect(x2).toMatchObject({ "Planned (₹)": 700, "Received (₹)": 700, "Rejected (₹)": 60, "Net Accepted (₹)": 640 });
+  });
+});
+
+describe("custom period", () => {
+  it("a custom range includes its end date, and a single day is a range", () => {
+    expect(resolvePeriod({ from: "2026-10-01", to: "2026-10-25" })).toEqual({
+      label: "2026-10-01 to 2026-10-25",
+      from: "2026-10-01",
+      to: "2026-10-26", // exclusive, internally
+      priorLabel: "2026-09-06 to 2026-09-30",
+      priorFrom: "2026-09-06",
+      priorTo: "2026-10-01",
+    });
+    expect(resolvePeriod({ from: "2026-10-25", to: "2026-10-25" })).toEqual({
+      label: "2026-10-25 to 2026-10-25",
+      from: "2026-10-25",
+      to: "2026-10-26",
+      priorLabel: "2026-10-24 to 2026-10-24",
+      priorFrom: "2026-10-24",
+      priorTo: "2026-10-25",
+    });
+    // A month boundary and a leap day.
+    expect(resolvePeriod({ from: "2028-02-29", to: "2028-02-29" })).toMatchObject({ to: "2028-03-01" });
+    // Backwards or impossible dates fall back to the financial year.
+    expect(resolvePeriod({ from: "2026-10-25", to: "2026-10-24", fy: "2026-27" }).label).toBe("2026-27");
+    expect(resolvePeriod({ from: "2026-02-30", to: "2026-03-02", fy: "2026-27" }).label).toBe("2026-27");
+  });
+
+  it("picking today as the end date includes today's movements", async () => {
+    const res = await preview(WIDE, "grn_register", { from: addDays(T, -3), to: T });
+    expect(res.status).toBe(200);
+    expect(res.body.data.period.label).toBe(`${addDays(T, -3)} to ${T}`);
+    expect(res.body.data.rows.map((r) => r.grn_number)).toEqual([W.grn.X2, W.grn.G1, W.grn.G2]);
+  });
+
+  it("a single-day range reports that day, not the financial year", async () => {
+    const res = await preview(WIDE, "stock_ledger", { from: T, to: T });
+    expect(res.status).toBe(200);
+    expect(res.body.data.period.label).toBe(`${T} to ${T}`);
+    const { rows } = res.body.data;
+    expect(rows.some((r) => r.doc_number === W.grn.G1)).toBe(true);
+    // Movements posted on other days (the matches ten days ago) are outside it.
+    expect(rows.some((r) => r.item_code === "D4-MATCHES")).toBe(false);
+
+    const oneDay = await rowsOf(WIDE, "grn_register", { from: addDays(T, -3), to: addDays(T, -3) });
+    expect(oneDay.map((r) => r.grn_number)).toEqual([W.grn.X2]);
+  });
+
+  it("the ledger names the GRN reversal reason in words", () => {
+    expect(LEDGER_REASON_LABELS.GRN_REVERSAL).toBe("GRN reversed");
+    expect(LEDGER_REASON_LABELS.WASTAGE).toBe("Wastage");
   });
 });
 
@@ -750,7 +955,7 @@ describe("hotel scope", () => {
     const fbRice = consumption.find((r) => r.department_name === W.deptName[FB] && r.category === W.cat.rice);
     expect(fbRice.net_value).toBe(1250);
     const [otif] = await rowsOf(NARROW, "vendor_delivery_performance", { from: addDays(T, -60), to: addDays(T, 30) });
-    expect(otif).toMatchObject({ deliveries: 4, on_time: 2, in_full: 1, otif: 1 });
+    expect(otif).toMatchObject({ deliveries: 4, buyer_closed: 1, on_time: 2, in_full: 1, otif: 1 });
   });
 
   it("every inventory report downloads as a workbook", async () => {

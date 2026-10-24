@@ -26,6 +26,16 @@ import {
   reportHotels,
 } from "../inventoryReportKit.js";
 
+/**
+ * Reason codes a movement can carry: an adjustment's reason, and the code a
+ * GRN reversal stamps on the RETURN_IN that puts marked-out stock back before
+ * it leaves again (grnReverse.js).
+ */
+export const LEDGER_REASON_LABELS = Object.freeze({
+  ...ADJUSTMENT_REASON_LABELS,
+  GRN_REVERSAL: "GRN reversed",
+});
+
 const COLUMNS = [
   { header: "Hotel", key: "hotel_name", width: 24, type: "text" },
   { header: "Item", key: "item_name", width: 30, type: "text" },
@@ -92,7 +102,7 @@ export default {
       movement: MOVEMENT_LABELS[r.movement_type] || r.movement_type,
       doc_number: r.doc_number || null,
       department_name: r.department_name || null,
-      reason: r.reason_code ? ADJUSTMENT_REASON_LABELS[r.reason_code] || r.reason_code : null,
+      reason: r.reason_code ? LEDGER_REASON_LABELS[r.reason_code] || r.reason_code : null,
       batch_no: r.batch_no || null,
       qty_in: r.qty > 0 ? num(r.qty) : null,
       qty_out: r.qty < 0 ? -num(r.qty) : null,
