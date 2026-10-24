@@ -1,0 +1,144 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>{{title}} {{grnNumber}}</title>
+<style>
+  :root { color-scheme: light; }
+  * { box-sizing: border-box; }
+  html, body { background: #ffffff; }
+  body { margin: 0; font-family: -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; font-size: 10.5px; color: #1f2937; }
+  .head { display: flex; justify-content: space-between; align-items: flex-start; border-bottom: 2px solid #1f2937; padding-bottom: 8px; }
+  .doc-title { font-size: 18px; font-weight: 700; letter-spacing: 0.2px; }
+  .doc-no { font-size: 13px; font-weight: 600; margin-top: 2px; }
+  .muted { color: #6b7280; }
+  .qr { text-align: center; width: 120px; }
+  .qr svg { width: 96px; height: 96px; }
+  .qr-url { font-size: 8px; color: #4b5563; word-break: break-all; margin-top: 2px; }
+  table { width: 100%; border-collapse: collapse; }
+  .parties { margin-top: 10px; }
+  .parties td { width: 50%; vertical-align: top; padding: 6px 8px; border: 1px solid #d1d5db; }
+  .label { font-size: 9px; text-transform: uppercase; letter-spacing: 0.4px; color: #6b7280; margin-bottom: 2px; }
+  .facts { margin-top: 8px; }
+  .facts td { padding: 4px 8px; border: 1px solid #e5e7eb; width: 25%; vertical-align: top; }
+  .lines { margin-top: 10px; }
+  .lines th { background: #f3f4f6; font-size: 9.5px; text-align: left; padding: 5px 6px; border: 1px solid #d1d5db; }
+  .lines td { padding: 5px 6px; border: 1px solid #e5e7eb; vertical-align: top; }
+  .lines .num { text-align: right; white-space: nowrap; }
+  .lines tfoot td { font-weight: 600; background: #f9fafb; }
+  .rejected { color: #b91c1c; font-weight: 600; }
+  .remarks { margin-top: 10px; padding: 6px 8px; border: 1px solid #e5e7eb; }
+  .sign { margin-top: 36px; }
+  .sign td { width: 33.33%; padding: 0 10px; text-align: center; vertical-align: bottom; }
+  .sign .line { border-top: 1px solid #1f2937; padding-top: 4px; font-weight: 600; }
+  .sign .who { min-height: 14px; color: #4b5563; }
+  .foot { margin-top: 14px; font-size: 8.5px; color: #6b7280; display: flex; justify-content: space-between; }
+</style>
+</head>
+<body>
+  <div class="head">
+    <div>
+      <div class="doc-title">{{title}}</div>
+      <div class="doc-no">{{grnNumber}}</div>
+      {{#if reversesGrnNumber}}<div class="muted">Reverses {{reversesGrnNumber}}</div>{{/if}}
+      <div class="muted">Purchase order {{poNumber}}</div>
+    </div>
+    <div class="qr">
+      {{{qrSvg}}}
+      <div class="qr-url">{{qrUrl}}</div>
+    </div>
+  </div>
+
+  <table class="parties">
+    <tr>
+      <td>
+        <div class="label">Received at</div>
+        <div><strong>{{hotel.name}}</strong></div>
+        {{#if hotel.companyName}}<div>{{hotel.companyName}}</div>{{/if}}
+        {{#if hotel.address}}<div>{{hotel.address}}</div>{{/if}}
+        {{#if hotel.gstin}}<div>GSTIN {{hotel.gstin}}</div>{{/if}}
+      </td>
+      <td>
+        <div class="label">Vendor</div>
+        <div><strong>{{vendor.name}}</strong></div>
+        {{#if vendor.address}}<div>{{vendor.address}}</div>{{/if}}
+        {{#if vendor.gstin}}<div>GSTIN {{vendor.gstin}}</div>{{/if}}
+      </td>
+    </tr>
+  </table>
+
+  <table class="facts">
+    <tr>
+      <td><div class="label">PO number</div>{{poNumber}}</td>
+      <td><div class="label">Received on</div>{{receivedAt}}</td>
+      <td><div class="label">Posted</div>{{postedAt}}{{#if postedByName}} by {{postedByName}}{{/if}}</td>
+      <td><div class="label">Vehicle</div>{{vehicleNo}}</td>
+    </tr>
+    <tr>
+      <td><div class="label">Vendor challan</div>{{vendorChallanNo}}{{#if vendorChallanDate}} · {{vendorChallanDate}}{{/if}}</td>
+      <td><div class="label">Vendor invoice</div>{{vendorInvoiceNo}}{{#if vendorInvoiceDate}} · {{vendorInvoiceDate}}{{/if}}</td>
+      <td><div class="label">E-way bill</div>{{ewayBillNo}}</td>
+      <td><div class="label">Status</div>{{status}}</td>
+    </tr>
+  </table>
+
+  <table class="lines">
+    <thead>
+      <tr>
+        <th>#</th>
+        <th>Item</th>
+        <th>Unit</th>
+        <th class="num">Ordered for this hotel</th>
+        <th class="num">Received</th>
+        <th class="num">Accepted</th>
+        <th class="num">Rejected</th>
+        <th>Rejection reason</th>
+        <th>Batch</th>
+        <th>Expiry</th>
+      </tr>
+    </thead>
+    <tbody>
+      {{#each lines}}
+      <tr>
+        <td>{{sn}}</td>
+        <td>{{productName}}{{#if hsn}}<div class="muted">HSN {{hsn}}</div>{{/if}}{{#if remarks}}<div class="muted">{{remarks}}</div>{{/if}}</td>
+        <td>{{unit}}</td>
+        <td class="num">{{qty orderedForHotel}}</td>
+        <td class="num">{{qty received}}</td>
+        <td class="num">{{qty accepted}}</td>
+        <td class="num{{#if rejectionLabel}} rejected{{/if}}">{{qty rejected}}</td>
+        <td>{{rejectionLabel}}</td>
+        <td>{{batchNo}}</td>
+        <td>{{expiry}}</td>
+      </tr>
+      {{/each}}
+    </tbody>
+    <tfoot>
+      <tr>
+        <td colspan="4">Total</td>
+        <td class="num">{{qty totals.received}}</td>
+        <td class="num">{{qty totals.accepted}}</td>
+        <td class="num">{{qty totals.rejected}}</td>
+        <td colspan="3"></td>
+      </tr>
+    </tfoot>
+  </table>
+
+  {{#if remarks}}
+  <div class="remarks"><div class="label">Remarks</div>{{remarks}}</div>
+  {{/if}}
+
+  <table class="sign">
+    <tr>
+      <td><div class="who">{{receivedByName}}</div><div class="line">Received by</div></td>
+      <td><div class="who"></div><div class="line">Checked by</div></td>
+      <td><div class="who"></div><div class="line">Approved by</div></td>
+    </tr>
+  </table>
+
+  <div class="foot">
+    <span>{{grnNumber}}</span>
+    <span>Generated {{generatedAt}}</span>
+  </div>
+</body>
+</html>

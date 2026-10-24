@@ -9,6 +9,7 @@ import { buildVendorPoReference } from '../helper/poReference.js';
 import { normalizeArcCharges } from '../models/arc_v2/arcEvaluationModel.js';
 import { effectiveSupplierExpr } from './vendorNetwork/fulfilmentSql.js';
 import { computeCallOffLine } from '../helper/arc_v2/callOffLineTax.js';
+import { InventoryError } from './inventory/errors.js';
 
 // Phase 2 — run the pricing engine for a contract line at a given quantity.
 // Shared by the per-unit landed price (qty=1) and the LINE total (qty=N) so the
@@ -398,6 +399,166 @@ export async function releaseForMr(mrId, txContext = null) {
   return released;
 }
 
+// ─── Contract consumption: give back / take again ───────────────────────────
+//
+// A call-off PO consumes its rate contract at release: the contract line's
+// consumed_qty (the hard cap for the whole group) and, for a Group ARC, the
+// ordering hotel's tbl_arc_contract_line_hotel row. Three paths return or
+// retake that quantity: the vendor rejecting the PO (handleCallOffRejection),
+// the buyer short-closing an undelivered remainder, and reopening that
+// short-close (inventory shortCloseService). They share these two helpers so
+// the arithmetic and the lock order cannot drift apart.
+//
+// `lines` = [{ arcContractLineId, hotelId, qty }], qty in contract units (a
+// call-off PO line's unit is its contract line's unit). hotelId is the
+// ordering hotel whose ledger row was consumed at release; null skips the
+// hotel ledger (a single-hotel ARC has no rows there anyway).
+
+function consumptionLines(lines) {
+  return (Array.isArray(lines) ? lines : [])
+    .map((l) => ({
+      arcContractLineId: Number(l?.arcContractLineId),
+      hotelId: l?.hotelId == null ? null : Number(l.hotelId),
+      qty: l?.qty,
+    }))
+    .filter((l) => Number.isSafeInteger(l.arcContractLineId) && l.arcContractLineId > 0 && Number(l.qty) > 0);
+}
+
+/**
+ * Lock order of the release (buildCallOffBuckets): the hotel ledger rows first,
+ * in id order, then the contract lines, in id order.
+ */
+async function lockConsumptionRows(runner, lines) {
+  const withHotel = lines.filter((l) => l.hotelId != null);
+  if (withHotel.length) {
+    await runner.any(
+      `SELECT clh.id FROM tbl_arc_contract_line_hotel clh
+        WHERE (clh.arc_contract_line_id, clh.hotel_id) IN
+              (SELECT * FROM unnest($1::bigint[], $2::int[]))
+        ORDER BY clh.id
+          FOR UPDATE`,
+      [withHotel.map((l) => l.arcContractLineId), withHotel.map((l) => l.hotelId)]
+    );
+  }
+  await runner.any(
+    `SELECT id FROM tbl_arc_contract_line WHERE id = ANY($1::bigint[]) ORDER BY id FOR UPDATE`,
+    [[...new Set(lines.map((l) => l.arcContractLineId))]]
+  );
+}
+
+/**
+ * Give consumed quantity back to the rate contract: the contract line and the
+ * ordering hotel's Group-ARC ledger row, each floored at 0. Run inside the
+ * caller's transaction.
+ *
+ * @param {object} runner pg-promise transaction
+ * @param {{poId?:number, lines:Array<{arcContractLineId:number, hotelId:number|null, qty:number|string}>}} args
+ * @returns {Promise<Array<{arcContractLineId:number, hotelId:number|null, qty:number|string}>>} the lines applied
+ */
+export async function giveBackCallOffQty(runner, { poId = null, lines = [] } = {}) {
+  const items = consumptionLines(lines);
+  if (!items.length) return [];
+  await lockConsumptionRows(runner, items);
+  for (const l of items) {
+    await runner.none(
+      `UPDATE tbl_arc_contract_line
+         SET consumed_qty = GREATEST(consumed_qty - $1, 0),
+             updated_at   = NOW()
+       WHERE id = $2`,
+      [l.qty, l.arcContractLineId]
+    );
+    // Group rate contract: give the ordering hotel its usage back too.
+    await runner.none(
+      `UPDATE tbl_arc_contract_line_hotel
+          SET consumed_qty = GREATEST(consumed_qty - $1, 0),
+              updated_at   = NOW()
+        WHERE arc_contract_line_id = $2 AND hotel_id = $3`,
+      [l.qty, l.arcContractLineId, l.hotelId]
+    );
+  }
+  logger.info({ poId, lines: items }, '[callOffPo] contract quantity given back');
+  return items;
+}
+
+/**
+ * Take quantity from the rate contract again (a reopened short-close), by the
+ * release's rules (recordCallOffAndUpdateConsumption): the contract line is the
+ * hard cap (consumed + qty <= committed, else CONFLICT); the ordering hotel's
+ * Group-ARC share is soft: a hotel may go past it, which is logged as the
+ * same CALL_OFF_OVER_HOTEL_SHARE arc event and returned so the caller can
+ * tell head office after commit. Run inside the caller's transaction; a
+ * refusal throws, so the caller's rollback undoes any line already taken.
+ *
+ * @returns {Promise<{lines:Array<{arcContractLineId, hotelId, qty}>,
+ *   overShare:Array<{arcId:number, payload:object}>}>} payload is release's
+ *   over-share entry {arc_contract_line_id, hotel_id, hotel_name,
+ *   committed_qty, consumed_qty, mr_id, po_id}
+ * @throws InventoryError CONFLICT details {poId, arcContractLineId, requested,
+ *   remaining} when the contract line has too little left.
+ */
+export async function reconsumeCallOffQty(runner, { poId = null, lines = [] } = {}) {
+  const items = consumptionLines(lines);
+  if (!items.length) return { lines: [], overShare: [] };
+  await lockConsumptionRows(runner, items);
+  const overShare = [];
+  for (const l of items) {
+    const taken = await runner.result(
+      `UPDATE tbl_arc_contract_line
+          SET consumed_qty = consumed_qty + $1, updated_at = NOW()
+        WHERE id = $2 AND consumed_qty + $1 <= committed_qty`,
+      [l.qty, l.arcContractLineId]
+    );
+    if (taken.rowCount === 0) {
+      const row = await runner.oneOrNone(
+        `SELECT GREATEST(committed_qty - consumed_qty, 0)::float AS remaining FROM tbl_arc_contract_line WHERE id = $1`,
+        [l.arcContractLineId]
+      );
+      throw new InventoryError(
+        'CONFLICT',
+        `The rate contract has only ${row?.remaining ?? 0} left on this item, so ${Number(l.qty)} cannot be reopened`,
+        { poId, arcContractLineId: l.arcContractLineId, requested: Number(l.qty), remaining: row?.remaining ?? 0 }
+      );
+    }
+    if (l.hotelId == null) continue;
+    const hotelRow = await runner.oneOrNone(
+      `UPDATE tbl_arc_contract_line_hotel
+          SET consumed_qty = consumed_qty + $1, updated_at = NOW()
+        WHERE arc_contract_line_id = $2 AND hotel_id = $3
+       RETURNING hotel_id, committed_qty, consumed_qty`,
+      [l.qty, l.arcContractLineId, l.hotelId]
+    );
+    if (!hotelRow || Number(hotelRow.consumed_qty) <= Number(hotelRow.committed_qty)) continue;
+    const ctx = await runner.one(
+      `SELECT ac.arc_id, h.name AS hotel_name, po.source_mr_id
+         FROM tbl_arc_contract_line cl
+         JOIN tbl_arc_contract ac ON ac.id = cl.arc_contract_id
+         LEFT JOIN tbl_hospitality_company_hotels h ON h.id = $2
+         LEFT JOIN tbl_rfq_purchase_order po ON po.id = $3
+        WHERE cl.id = $1`,
+      [l.arcContractLineId, hotelRow.hotel_id, poId]
+    );
+    const payload = {
+      arc_contract_line_id: Number(l.arcContractLineId),
+      hotel_id: Number(hotelRow.hotel_id),
+      hotel_name: ctx.hotel_name || null,
+      committed_qty: Number(hotelRow.committed_qty),
+      consumed_qty: Number(hotelRow.consumed_qty),
+      mr_id: ctx.source_mr_id == null ? null : Number(ctx.source_mr_id),
+      po_id: poId == null ? null : Number(poId),
+    };
+    await logArcEvent({
+      arcId: ctx.arc_id,
+      eventType: ARC_EVENT_TYPES.CALL_OFF_OVER_HOTEL_SHARE,
+      actorId: null,
+      payload,
+      txContext: runner,
+    });
+    overShare.push({ arcId: Number(ctx.arc_id), payload });
+  }
+  logger.info({ poId, lines: items, overShare: overShare.length }, '[callOffPo] contract quantity taken again');
+  return { lines: items, overShare };
+}
+
 /**
  * Handler for vendor-rejected call-off POs. Reverses consumption + re-opens
  * the MR. Does NOT run the RFQ-side de-finalisation cascade (handlePORejection)
@@ -426,23 +587,14 @@ export async function handleCallOffRejection(poId, reason, txContext = null) {
   const mrHotel = (await runner.oneOrNone(`SELECT hotel_id FROM tbl_material_requisition WHERE id = $1`, [mrId]))?.hotel_id;
   // Same lock order as the release: the hotel's ledger rows (id order), then lines.
   await lockMrHotelLedgerRows(runner, mrId, mrHotel ?? null);
-  for (const link of links) {
-    await runner.none(
-      `UPDATE tbl_arc_contract_line
-         SET consumed_qty = GREATEST(consumed_qty - $1, 0),
-             updated_at   = NOW()
-       WHERE id = $2`,
-      [link.quantity, link.arc_contract_line_id]
-    );
-    // Group rate contract: give the ordering hotel its usage back too.
-    await runner.none(
-      `UPDATE tbl_arc_contract_line_hotel
-          SET consumed_qty = GREATEST(consumed_qty - $1, 0),
-              updated_at   = NOW()
-        WHERE arc_contract_line_id = $2 AND hotel_id = $3`,
-      [link.quantity, link.arc_contract_line_id, mrHotel ?? null]
-    );
-  }
+  await giveBackCallOffQty(runner, {
+    poId,
+    lines: links.map((link) => ({
+      arcContractLineId: link.arc_contract_line_id,
+      hotelId: mrHotel ?? null,
+      qty: link.quantity,
+    })),
+  });
   await runner.none(
     `UPDATE tbl_material_requisition SET status = 'approved', updated_at = NOW() WHERE id = $1`,
     [mrId]

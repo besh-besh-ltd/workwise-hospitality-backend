@@ -1,0 +1,149 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Delivery challan {{rtvNumber}}</title>
+<style>
+  :root { color-scheme: light; }
+  * { box-sizing: border-box; }
+  html, body { background: #ffffff; }
+  body { margin: 0; font-family: -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; font-size: 10.5px; color: #1f2937; }
+  .head { display: flex; justify-content: space-between; align-items: flex-start; border-bottom: 2px solid #1f2937; padding-bottom: 8px; }
+  .doc-title { font-size: 18px; font-weight: 700; }
+  .doc-sub { font-size: 11px; color: #4b5563; margin-top: 1px; }
+  .doc-no { font-size: 13px; font-weight: 600; margin-top: 4px; }
+  .purpose { display: inline-block; margin-top: 4px; padding: 2px 8px; border: 1px solid #1f2937; border-radius: 3px; font-weight: 600; }
+  .muted { color: #6b7280; }
+  .qr { text-align: center; width: 120px; }
+  .qr svg { width: 96px; height: 96px; }
+  .qr-url { font-size: 8px; color: #4b5563; word-break: break-all; margin-top: 2px; }
+  table { width: 100%; border-collapse: collapse; }
+  .parties { margin-top: 10px; }
+  .parties td { width: 50%; vertical-align: top; padding: 6px 8px; border: 1px solid #d1d5db; }
+  .label { font-size: 9px; text-transform: uppercase; letter-spacing: 0.4px; color: #6b7280; margin-bottom: 2px; }
+  .facts { margin-top: 8px; }
+  .facts td { padding: 4px 8px; border: 1px solid #e5e7eb; width: 25%; vertical-align: top; }
+  .lines { margin-top: 10px; }
+  .lines th { background: #f3f4f6; font-size: 9.5px; text-align: left; padding: 5px 6px; border: 1px solid #d1d5db; }
+  .lines td { padding: 5px 6px; border: 1px solid #e5e7eb; vertical-align: top; }
+  .lines .num { text-align: right; white-space: nowrap; }
+  .lines tfoot td { font-weight: 600; background: #f9fafb; }
+  .remarks { margin-top: 10px; padding: 6px 8px; border: 1px solid #e5e7eb; }
+  .note { margin-top: 8px; font-size: 9px; color: #4b5563; }
+  .sign { margin-top: 36px; }
+  .sign td { width: 33.33%; padding: 0 10px; text-align: center; vertical-align: bottom; }
+  .sign .line { border-top: 1px solid #1f2937; padding-top: 4px; font-weight: 600; }
+  .foot { margin-top: 14px; font-size: 8.5px; color: #6b7280; display: flex; justify-content: space-between; }
+</style>
+</head>
+<body>
+  <div class="head">
+    <div>
+      <div class="doc-title">Delivery challan</div>
+      <div class="doc-sub">Return to vendor (not a sale)</div>
+      <div class="doc-no">{{rtvNumber}}</div>
+      <div class="purpose">{{purpose}}</div>
+    </div>
+    <div class="qr">
+      {{{qrSvg}}}
+      <div class="qr-url">{{qrUrl}}</div>
+    </div>
+  </div>
+
+  <table class="parties">
+    <tr>
+      <td>
+        <div class="label">Consignor (from)</div>
+        <div><strong>{{consignor.name}}</strong></div>
+        {{#if consignor.companyName}}<div>{{consignor.companyName}}</div>{{/if}}
+        {{#if consignor.address}}<div>{{consignor.address}}</div>{{/if}}
+        {{#if consignor.state}}<div>{{consignor.state}}</div>{{/if}}
+        {{#if consignor.gstin}}<div>GSTIN {{consignor.gstin}}</div>{{/if}}
+      </td>
+      <td>
+        <div class="label">Consignee (to)</div>
+        <div><strong>{{consignee.name}}</strong></div>
+        {{#if consignee.address}}<div>{{consignee.address}}</div>{{/if}}
+        {{#if consignee.state}}<div>{{consignee.state}}</div>{{/if}}
+        {{#if consignee.gstin}}<div>GSTIN {{consignee.gstin}}</div>{{/if}}
+      </td>
+    </tr>
+  </table>
+
+  <table class="facts">
+    <tr>
+      <td><div class="label">PO number</div>{{poNumber}}</td>
+      <td><div class="label">Against GRN</div>{{grnNumber}}{{#if grnReceivedAt}} · {{grnReceivedAt}}{{/if}}</td>
+      <td><div class="label">Gate pass / challan</div>{{challanNo}}</td>
+      <td><div class="label">Dispatched</div>{{dispatchedAt}}</td>
+    </tr>
+    {{#if creditNoteRef}}
+    <tr>
+      <td colspan="4"><div class="label">Vendor credit note</div>{{creditNoteRef}}</td>
+    </tr>
+    {{/if}}
+  </table>
+
+  <table class="lines">
+    <thead>
+      <tr>
+        <th>#</th>
+        <th>Item</th>
+        <th>HSN</th>
+        <th>Unit</th>
+        <th class="num">Qty</th>
+        <th class="num">Rate</th>
+        <th class="num">Taxable value</th>
+        <th class="num">GST</th>
+        <th>Reason</th>
+      </tr>
+    </thead>
+    <tbody>
+      {{#each lines}}
+      <tr>
+        <td>{{sn}}</td>
+        <td>{{productName}}{{#if batchNo}}<div class="muted">Batch {{batchNo}}{{#if expiry}} · exp {{expiry}}{{/if}}</div>{{/if}}</td>
+        <td>{{hsn}}</td>
+        <td>{{unit}}</td>
+        <td class="num">{{qty qty}}</td>
+        <td class="num">{{money rate}}</td>
+        <td class="num">{{money taxable}}</td>
+        <td class="num">{{money gst}} <span class="muted">({{qty gstPct}}%)</span></td>
+        <td>{{reason}}</td>
+      </tr>
+      {{/each}}
+    </tbody>
+    <tfoot>
+      <tr>
+        <td colspan="6">Total</td>
+        <td class="num">{{money totals.taxable}}</td>
+        <td class="num">{{money totals.gst}}</td>
+        <td></td>
+      </tr>
+      <tr>
+        <td colspan="6">Total value including GST</td>
+        <td class="num" colspan="2">{{money totals.total}}</td>
+        <td></td>
+      </tr>
+    </tfoot>
+  </table>
+  <div class="note">Values in INR at the purchase order's taxable rate. The goods are returned to the vendor {{#if (eq disposition "CREDIT")}}against a credit note{{else}}for replacement{{/if}}.</div>
+
+  {{#if remarks}}
+  <div class="remarks"><div class="label">Remarks</div>{{remarks}}</div>
+  {{/if}}
+
+  <table class="sign">
+    <tr>
+      <td><div class="line">Dispatched by</div></td>
+      <td><div class="line">Security / gate</div></td>
+      <td><div class="line">Received by vendor</div></td>
+    </tr>
+  </table>
+
+  <div class="foot">
+    <span>{{rtvNumber}}</span>
+    <span>Generated {{generatedAt}}</span>
+  </div>
+</body>
+</html>
