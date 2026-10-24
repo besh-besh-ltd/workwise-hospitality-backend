@@ -7,15 +7,20 @@
 // inside that transaction, the same for every receiving action:
 //   1. the PO row            (getPoContext {forUpdate})
 //   2. its delivery lines    (SELECT … FOR UPDATE ORDER BY id)
+//   2a. item rows, FOR NO KEY UPDATE, in product-variant order, only for a
+//       line that sets an item's unit conversion (resolvePostLine)
 //   3. the doc sequence row  (nextDocNumber)
 //   4. stock balances        (postMovements, called once)
-// The PO row lock (step 1) is the serialisation point: every posting, draft
-// edit and reversal on a PO takes it first, so two receivers on the same PO
-// run one after the other and the second checks over-receipt against the
-// first's committed receipt (Review Focus 1). The delivery-line locks (step 2)
-// are a second guard for writers that touch the plan without the PO lock.
-// Items are resolved in product-variant order inside that, so lazy item
-// creation never locks in opposite orders.
+// The PO row lock (step 1) is the serialisation point. These entry points take
+// it first, before any GRN row lock: postGrn (new receipt or saved draft),
+// saveGrnDraft on an existing draft, discardGrn, reverseGrn and
+// postLegacyFullReceipt; getReceiveContext takes it only when it creates the
+// default plan (ensureDefaultPlan). Saving a NEW draft and the attachment
+// calls take no PO lock. So two receivers on the same PO run one after the
+// other and the second checks over-receipt against the first's committed
+// receipt (Review Focus 1). The delivery-line locks (step 2) are a second
+// guard for writers that touch the plan without the PO lock. Step 2a stops
+// two receipts on DIFFERENT POs from both setting an item's first conversion.
 //
 // Quantities are handled as integers of 1/10000 (NUMERIC(18,4)) so sums and
 // tolerance checks have no float drift. Plan quantities (planned, accepted,
@@ -215,8 +220,18 @@ async function resolvePostLine(t, { ctx, hotelId, poLine, line, receivedAt, user
     return { ...line, poLine, item: null, factor: null, stockQ: 0, unitCost: null };
   }
 
+  const settingFactor = line.uomFactor != null && !sameUom(poUnit, item.stockUom);
+  if (settingFactor) {
+    // Serialise conversions of this item across POs: a concurrent receipt that
+    // sets this unit first commits, and the read below then sees its factor
+    // (and refuses a different one) instead of both writing. NO KEY UPDATE, not
+    // UPDATE: it still excludes other writers here but not the FK key-share
+    // locks ledger inserts take on the item, so it cannot deadlock with them.
+    // Lines resolve in variant order, so two receipts take these in one order.
+    await t.one(`SELECT 1 FROM tbl_inv_item WHERE id = $1 FOR NO KEY UPDATE`, [item.id]);
+  }
   let factor = await resolveUomFactor(t, { invItemId: item.id, uomLabel: poUnit });
-  if (line.uomFactor != null && !sameUom(poUnit, item.stockUom)) {
+  if (settingFactor) {
     const supplied = round6(line.uomFactor);
     if (factor == null) {
       // First receipt in this unit: the receiver may set the conversion.
@@ -761,10 +776,13 @@ export async function saveGrnDraft(t, user, input = {}, { grnId = null, viaToken
   return { grn: { ...(await getGrnPayload(t, id, { hidePrices: !!viaToken })), warnings: [] }, replayed: false, created: grnId == null };
 }
 
-/** Delete a draft GRN (grn.update). */
+/** Delete a draft GRN (grn.update). PO row, then GRN row, as posting does. */
 export async function discardGrn(t, user, grnId) {
-  const grn = await loadGrnRow(t, grnId, { forUpdate: true });
-  await assertGrnAccess(t, user, grn, 'update');
+  const first = await loadGrnRow(t, grnId);
+  await assertGrnAccess(t, user, first, 'update');
+  await getPoContext(t, first.po_id, { forUpdate: true });
+  const grn = await loadGrnRow(t, first.id, { forUpdate: true });
+  if (Number(grn.hotel_id) !== Number(first.hotel_id)) await assertGrnAccess(t, user, grn, 'update');
   if (grn.status !== 'draft') {
     throw new InventoryError('CONFLICT', 'Only a draft GRN can be discarded', { grnId: grn.id, status: grn.status });
   }

@@ -125,7 +125,8 @@ export const createGrn = async (req, res) => {
     }
   }
   const { grn, replayed } = result;
-  grnActivity(res, grn, { replayed: !!replayed, posted: grn.status !== 'draft' });
+  // A replay records nothing (the registry entry requires the detail).
+  if (!replayed) grnActivity(res, grn, { posted: grn.status !== 'draft' });
   res.status(replayed ? 200 : 201).json({
     status: 1,
     message: replayed ? 'GRN already recorded' : grn.status === 'draft' ? 'GRN draft saved' : 'GRN posted',
@@ -192,7 +193,7 @@ export const postGrn = async (req, res) => {
     return sendInventoryError(res, err);
   }
   const { grn, replayed } = result;
-  grnActivity(res, grn, { replayed: !!replayed });
+  if (!replayed) grnActivity(res, grn);
   res.status(200).json({ status: 1, message: replayed ? 'GRN already posted' : 'GRN posted', data: grn });
   if (!replayed) await afterPost(grn);
   return undefined;

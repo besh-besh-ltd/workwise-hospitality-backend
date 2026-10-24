@@ -228,18 +228,23 @@ export async function reverseGrn(t, user, { grnId, reason, lines } = {}) {
         const markOut = await t.oneOrNone(
           `SELECT unit_cost::text AS unit_cost
              FROM tbl_inv_movement
-            WHERE hospitality_company_id = $1 AND source_type = 'GRN' AND source_line_id = $2
-              AND movement_type = 'MARK_OUT'
+            WHERE source_type = 'GRN' AND source_id = $1 AND source_line_id = $2
+              AND movement_type = 'MARK_OUT' AND hospitality_company_id = $3
             ORDER BY id
             LIMIT 1`,
-          [companyId, lineId]
+          [grn.id, lineId, companyId]
         );
+        if (!markOut) {
+          throw new InventoryError('CONFLICT', 'Original mark-out for this line not found', {
+            grnId: Number(grn.id), grnLineId: lineId,
+          });
+        }
         movements.push({
           ...base,
           ...batch,
           type: 'RETURN_IN',
           qty: qStr(stockQ),
-          unitCost: numOrNull(markOut?.unit_cost) ?? base.unitCost,
+          unitCost: Number(markOut.unit_cost),
           departmentId: Number(l.mark_out_department_id),
           reasonCode: 'GRN_REVERSAL',
         });
