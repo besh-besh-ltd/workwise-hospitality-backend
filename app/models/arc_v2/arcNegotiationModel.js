@@ -1,5 +1,9 @@
 import db from '../../config/dbConn.js';
 import { NEGOTIATION_TIMESTAMP_KEYS, parseAsUTC, withIsoTimestamps } from '../../helper/dbTime.js';
+import { redactDisqualifiedQuotes } from '../../helper/arc_v2/quoteRedaction.js';
+import { arcNegotiationSeatSql, assembleApprovalInstances } from '../negotiationModel.js';
+import arcModel from './arcModel.js';
+import arcEvalModel from './arcEvaluationModel.js';
 
 /**
  * ARC Negotiation Model
@@ -398,6 +402,145 @@ const arcNegotiationModel = {
           AND end_date <= NOW()
         ORDER BY end_date ASC`
     );
+  },
+
+  // ──────────────────────────────────────────────────────────────────────────
+  // Approval page
+  // ──────────────────────────────────────────────────────────────────────────
+
+  /** Does the user hold a live seat on the approval of any round of this ARC? */
+  isApproverOnArcNegotiation: async (arcId, userId) => {
+    const row = await db.one(
+      `SELECT ${arcNegotiationSeatSql('$1::int', '$2')} AS seated`,
+      [Number(arcId), Number(userId)]
+    );
+    return row.seated === true;
+  },
+
+  /**
+   * Everything the negotiation approval page reads for an ARC, in the RFQ
+   * approval bundle's shape (rounds_history + negotiation_instances keyed by
+   * round id), plus the ARC header and the items, quotes and technical
+   * qualifications the rounds negotiate over.
+   *
+   * Only the rounds' own vendors and items leave the server: an item entry
+   * brings that item × its target vendors; an ARC-level entry (or a legacy
+   * round with no item) brings its vendors' whole quote. Prices the technical
+   * committee ruled out are redacted exactly as on the commercial evaluation.
+   *
+   * Access is the caller's concern (arcNegotiationController.getApprovalBundle).
+   * Returns null when the ARC does not exist.
+   */
+  getApprovalBundleForArc: async (arcId, userId) => {
+    const [arc, rounds] = await Promise.all([
+      db.oneOrNone(
+        `SELECT a.id, a.arc_number, a.title, a.status,
+                a.hospitality_company_id, a.hotel_id, a.department_id,
+                hc.name   AS company_name,
+                h.name    AS hotel_name,
+                d.title   AS department_title,
+                cat.title AS category_title
+           FROM tbl_arc a
+           LEFT JOIN tbl_hospitality_companies hc     ON hc.id = a.hospitality_company_id
+           LEFT JOIN tbl_hospitality_company_hotels h ON h.id = a.hotel_id
+           LEFT JOIN tbl_department d                 ON d.id = a.department_id
+           LEFT JOIN tbl_category cat                 ON cat.id = a.category_id
+          WHERE a.id = $1`,
+        [arcId]
+      ),
+      db.any(
+        `SELECT nr.*, u.name AS created_by_name, u.email AS created_by_email,
+                pv.name AS arc_item_name
+           FROM tbl_negotiation_rounds nr
+           LEFT JOIN tbl_users u            ON u.id = nr.created_by
+           LEFT JOIN tbl_arc_item ai        ON ai.id = nr.arc_item_id
+           LEFT JOIN tbl_product_variant pv ON pv.id = ai.product_variant_id
+          WHERE nr.source_type = 'ARC' AND nr.source_id = $1
+          ORDER BY nr.round_number ASC, nr.created_at DESC`,
+        [arcId]
+      ),
+    ]);
+    if (!arc) return null;
+
+    const [instances, allItems, allQuotes, qualifiedByItem, universallyFailed] = await Promise.all([
+      assembleApprovalInstances(['ARC_NEGOTIATION'], rounds.map((r) => Number(r.id)), userId),
+      arcModel.listItems(arcId),
+      arcEvalModel.listAllQuotesForArc(arcId),
+      arcEvalModel.qualifiedVendorsByItem(arcId),
+      arcEvalModel.universallyFailedVendorIds(arcId),
+    ]);
+
+    // What the rounds negotiate: item × vendor pairs, and vendors asked at ARC level.
+    const pairs = new Set();
+    const wholeQuoteVendors = new Set();
+    const roundVendors = new Set();
+    for (const r of rounds) {
+      const entries = Array.isArray(r.products) && r.products.length > 0
+        ? r.products
+        : [{
+            arc_item_id: r.arc_item_id,
+            is_arc_level: r.arc_item_id == null,
+            vendor_targets: [
+              ...(r.vendor_ids || []),
+              ...(r.vendor_approvals || []).map((va) => va?.vendor_id),
+            ].filter((v) => v != null).map((v) => ({ vendor_id: v })),
+          }];
+      for (const e of entries) {
+        for (const vt of e?.vendor_targets || []) {
+          const vendorId = Number(vt?.vendor_id);
+          if (!Number.isFinite(vendorId)) continue;
+          roundVendors.add(vendorId);
+          if (e.is_arc_level === true || e.arc_item_id == null) wholeQuoteVendors.add(vendorId);
+          else pairs.add(`${Number(e.arc_item_id)}:${vendorId}`);
+        }
+      }
+    }
+
+    const inPlay = allQuotes.filter((q) =>
+      wholeQuoteVendors.has(Number(q.vendor_id)) ||
+      pairs.has(`${Number(q.arc_item_id)}:${Number(q.vendor_id)}`)
+    );
+    const itemIds = new Set(inPlay.map((q) => Number(q.arc_item_id)));
+    for (const key of pairs) itemIds.add(Number(key.split(':')[0]));
+
+    const qualified_by_item = {};
+    for (const [itemId, vendorIds] of Object.entries(qualifiedByItem)) {
+      if (!itemIds.has(Number(itemId))) continue;
+      qualified_by_item[itemId] = vendorIds.filter((v) => roundVendors.has(Number(v)));
+    }
+
+    const negotiation_instances = {};
+    for (const inst of instances) {
+      const key = String(inst.entity_id);
+      (negotiation_instances[key] ||= []).push(inst);
+    }
+
+    const rounds_history = rounds.map((r) => {
+      withIsoTimestamps(r, NEGOTIATION_TIMESTAMP_KEYS);
+      const current = negotiation_instances[String(r.id)]?.[0];
+      return {
+        ...r,
+        approvals: current
+          ? current.steps.flatMap((st) => st.approvers.map((ap) => ({
+              id: ap.id,
+              approver_name: ap.user_name,
+              approver_email: ap.user_email,
+              status: ap.status,
+              acted_at: ap.acted_at,
+              comment: ap.comment,
+            })))
+          : [],
+      };
+    });
+
+    return {
+      arc,
+      rounds_history,
+      negotiation_instances,
+      items: allItems.filter((i) => itemIds.has(Number(i.id))),
+      quotes: redactDisqualifiedQuotes(inPlay, qualifiedByItem, universallyFailed),
+      qualified_by_item,
+    };
   },
 };
 

@@ -20,6 +20,7 @@ import { parseAsUTC } from '../../helper/dbTime.js';
 import { resolveArcPolicyFor, noArcPolicyError } from '../../helper/arc_v2/arcPolicy.js';
 import { normalizeCreatorRemarks, stripInternalRoundFields } from '../../helper/negotiation/roundRemarks.js';
 import { roundWindowError } from '../../helper/negotiation/roundWindow.js';
+import { heldArcPermissions } from '../../middleware/arcPermission.js';
 
 /**
  * ARC Negotiation Controller
@@ -469,6 +470,44 @@ export async function listRounds(req, res) {
     return ok(res, enriched);
   } catch (err) {
     return fail(res, err, '[arcNegotiationController.listRounds]');
+  }
+}
+
+// ============================================================
+// BUYER — approval page bundle
+// ============================================================
+
+// Read grants that open the approval page. arc-comm.approve joins the
+// commercial read keys: an approver holding it was granted to approve, so it
+// reads what they approve. A live seat on any of this ARC's round approvals
+// opens it too — policy approvers may hold no module role, which is also why
+// approve/reject below carry no requireArcPermission.
+const APPROVAL_BUNDLE_READ_KEYS = ['arc-comm.read', 'arc-comm.evaluate', 'arc-comm.approve', 'arc.admin'];
+
+export async function getApprovalBundle(req, res) {
+  try {
+    const arcId  = Number(req.params.arcId);
+    const userId = req.user?.id;
+
+    const arc = await db.oneOrNone(
+      `SELECT id, hotel_id, department_id, process_id FROM tbl_arc WHERE id = $1`, [arcId]
+    );
+    if (!arc) return bad(res, 404, 'ARC not found', 2);
+
+    if (Number(req.user?.user_type) !== 8) {
+      const held = await heldArcPermissions(userId, arc);
+      const allowed = APPROVAL_BUNDLE_READ_KEYS.some((k) => held.has(k))
+        || await arcNegotiationModel.isApproverOnArcNegotiation(arcId, userId);
+      if (!allowed) {
+        return bad(res, 403, "You don't have access to this rate contract's negotiation rounds.");
+      }
+    }
+
+    const bundle = await arcNegotiationModel.getApprovalBundleForArc(arcId, userId);
+    if (!bundle) return bad(res, 404, 'ARC not found', 2);
+    return ok(res, bundle);
+  } catch (err) {
+    return fail(res, err, '[arcNegotiationController.getApprovalBundle]');
   }
 }
 
