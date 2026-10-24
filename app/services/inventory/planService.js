@@ -30,6 +30,8 @@ import { InventoryError } from './errors.js';
 import { getPoContext, listPoLines, ensureDefaultPlan, defaultDueDate } from './planCore.js';
 import { recomputePoReceipt } from './receiptRollup.js';
 import { hotelIdsWithPermission } from './scope.js';
+import { listGrnSummariesForPo } from './grnRead.js';
+import { listShortCloses } from './shortCloseService.js';
 import { LEGACY_PO_STATUS_ORDER } from './poStatus.js';
 import { notifyPlanChanged } from './notices/planNotices.js';
 import { assertPoAccess, assertPoInitiateAccess, canInitiateOnTuple } from '../../models/purchaseOrderModel.js';
@@ -396,37 +398,6 @@ export async function loadDispatches(t, poId, { dispatchId = null } = {}) {
   }));
 }
 
-/** GrnSummary[] of a PO (B1's tables), oldest first. */
-async function loadGrnSummaries(t, poId) {
-  const rows = await t.any(
-    `SELECT g.id, g.grn_number, g.hotel_id, h.name AS hotel_name, g.status, g.doc_type,
-            g.received_at::text AS received_at, g.posted_at, u.name AS posted_by_name,
-            (SELECT count(*)::int FROM tbl_grn_line gl WHERE gl.grn_id = g.id) AS line_count,
-            (SELECT COALESCE(SUM(COALESCE(gl.stock_qty, gl.accepted_qty * COALESCE(gl.uom_factor, 1))
-                                 * COALESCE(gl.unit_cost, 0)), 0)::text
-               FROM tbl_grn_line gl WHERE gl.grn_id = g.id) AS accepted_value
-       FROM tbl_grn g
-       LEFT JOIN tbl_hospitality_company_hotels h ON h.id = g.hotel_id
-       LEFT JOIN tbl_users u ON u.id = g.posted_by
-      WHERE g.po_id = $1
-      ORDER BY g.id`,
-    [poId]
-  );
-  return rows.map((r) => ({
-    id: Number(r.id),
-    grnNumber: r.grn_number ?? null,
-    hotelId: Number(r.hotel_id),
-    hotelName: r.hotel_name ?? null,
-    status: r.status,
-    docType: r.doc_type,
-    receivedAt: r.received_at,
-    postedAt: r.posted_at ? new Date(r.posted_at).toISOString() : null,
-    postedByName: r.posted_by_name ?? null,
-    lineCount: r.line_count,
-    acceptedValue: Math.round(Number(r.accepted_value) * 100) / 100,
-  }));
-}
-
 /** RtvSummary[] of a PO (B5's tables), oldest first. */
 async function loadRtvSummaries(t, poId) {
   const rows = await t.any(
@@ -477,42 +448,6 @@ async function rtvLines(t, rtvIds) {
   return out;
 }
 
-/** The PO's short-close log (close and reopen rows), oldest first. */
-async function loadShortCloses(t, poId) {
-  const rows = await t.any(
-    `SELECT sc.id, sc.delivery_line_id, dl.delivery_id, dl.po_line_id, d.hotel_id, h.name AS hotel_name, d.phase_no,
-            pv.name AS product_name, sc.qty::text AS qty, sc.reason_code, sc.remarks, sc.action, sc.acted_at,
-            u.name AS acted_by_name
-       FROM tbl_po_short_close sc
-       JOIN tbl_po_delivery_line dl ON dl.id = sc.delivery_line_id
-       JOIN tbl_po_delivery d ON d.id = dl.delivery_id
-       JOIN tbl_purchase_order_product pop ON pop.id = dl.po_line_id
-       LEFT JOIN tbl_rfq_products rp ON rp.id = pop.rfq_product_id
-       LEFT JOIN tbl_product_variant pv ON pv.id = COALESCE(pop.product_variant_id, rp.product_variant_id)
-       LEFT JOIN tbl_hospitality_company_hotels h ON h.id = d.hotel_id
-       LEFT JOIN tbl_users u ON u.id = sc.acted_by
-      WHERE sc.po_id = $1
-      ORDER BY sc.acted_at, sc.id`,
-    [poId]
-  );
-  return rows.map((r) => ({
-    id: Number(r.id),
-    deliveryId: Number(r.delivery_id),
-    deliveryLineId: Number(r.delivery_line_id),
-    poLineId: Number(r.po_line_id),
-    hotelId: r.hotel_id == null ? null : Number(r.hotel_id),
-    hotelName: r.hotel_name ?? null,
-    phaseNo: Number(r.phase_no),
-    productName: r.product_name ?? null,
-    qty: Number(r.qty),
-    reasonCode: r.reason_code ?? null,
-    remarks: r.remarks ?? null,
-    action: r.action,
-    actedAt: r.acted_at ? new Date(r.acted_at).toISOString() : null,
-    actedByName: r.acted_by_name ?? null,
-  }));
-}
-
 /** The vendor-safe views of the receiving documents: no prices, no buyer staff names. */
 export async function loadVendorDocuments(t, poId) {
   const [grns, rtvs, shortCloses] = await Promise.all([
@@ -525,7 +460,7 @@ export async function loadVendorDocuments(t, poId) {
       [poId]
     ),
     loadRtvSummaries(t, poId),
-    loadShortCloses(t, poId),
+    listShortCloses(t, poId),
   ]);
   const grnLines = grns.length
     ? await t.any(
@@ -617,10 +552,10 @@ async function buyerPayload(t, user, poId, tenancy) {
     loadHotels(t, ctx.hotelIds),
     loadDeliveries(t, ctx),
     loadPoLineRolls(t, poId),
-    loadGrnSummaries(t, poId),
+    listGrnSummariesForPo(t, poId),
     loadDispatches(t, poId),
     loadRtvSummaries(t, poId),
-    loadShortCloses(t, poId),
+    listShortCloses(t, poId),
     canFlags(t, user, tenancy, ctx),
     planHasActivity(t, poId),
   ]);

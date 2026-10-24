@@ -41,6 +41,12 @@ function toSummary(r, { hidePrices = false } = {}) {
   return s;
 }
 
+/** GrnSummary[] of one PO, oldest first (the Deliveries tab's GRN list). */
+export async function listGrnSummariesForPo(t, poId) {
+  const rows = await t.any(`${SUMMARY_SELECT} WHERE g.po_id = $1 ORDER BY g.id`, [poId]);
+  return rows.map((r) => toSummary(r));
+}
+
 /**
  * The Grn payload (api-contract): header, PO/hotel/vendor names, lines with
  * allocations and reversed qty, attachments, reversals and the reversed GRN.
