@@ -25,6 +25,7 @@ import { getPoContext } from './planCore.js';
 import { advanceLegacyPoStatus } from './poStatus.js';
 import { parseDay } from './planService.js';
 import { INVALID_PO_STATUSES_FOR_VENDOR } from '../../util/constants.js';
+import { resolvePoTenancy } from '../../models/purchaseOrderModel.js';
 
 /** PO statuses an invoice can be raised on: accepted by the vendor, or completed. */
 export const INVOICEABLE_PO_STATUSES = Object.freeze(['approved', 'dispatched', 'GRN', 'invoice_raised', 'completed']);
@@ -34,6 +35,12 @@ const DETAIL_KEYS = ['invoice_number', 'invoice_date', 'invoice_amount', 'dispat
 // numeric(18,4) holds 14 whole digits; an invoice amount has at most 2 decimals.
 const AMOUNT = /^\d{1,14}(\.\d{1,2})?$/;
 const IST_TODAY = `(CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Kolkata')::date`;
+
+/** A validated amount ("4500", "007.5") as stored: 2 decimals, no float round trip. */
+const padAmount = (text) => {
+  const [whole, frac = ''] = text.split('.');
+  return `${whole.replace(/^0+(?=\d)/, '')}.${frac.padEnd(2, '0')}`;
+};
 
 const positiveInt = (v) => {
   const n = Number(v);
@@ -80,7 +87,7 @@ export function parseInvoiceDetails(body = {}) {
   if (!AMOUNT.test(amountText) || !(Number(amountText) > 0)) {
     throw invalid('invoice_amount', 'Invoice amount must be more than zero, with at most 2 decimals');
   }
-  const invoiceAmount = Number(amountText).toFixed(2);
+  const invoiceAmount = padAmount(amountText);
 
   let dispatchId = null;
   if (!blank(b.dispatch_id)) {
@@ -210,11 +217,19 @@ export async function raiseInvoice(t, actor, poId, { invoiceUrl, body } = {}) {
     );
   }
 
+  // The trail files the invoice under the hotel it bills: its dispatch's,
+  // else the PO's only hotel, else (a multi-hotel PO, no dispatch named) the
+  // PO's own hotel.
   const ctx = await getPoContext(t, id);
   const billedHotel = dispatch?.hotel_id == null ? null : Number(dispatch.hotel_id);
+  let hotelId = billedHotel ?? (ctx.hotelIds.length === 1 ? ctx.hotelIds[0] : null);
+  if (hotelId == null) {
+    const tenancy = await resolvePoTenancy(id, t);
+    hotelId = positiveInt(tenancy?.hotel_id) ?? ctx.hotelIds[0] ?? null;
+  }
   const scope = {
     hospitalityCompanyId: ctx.companyId,
-    hotelId: billedHotel ?? (ctx.hotelIds.length === 1 ? ctx.hotelIds[0] : null),
+    hotelId,
     entityLabel: ctx.po.po_number || null,
   };
   const [invoice] = await loadInvoices(t, id, { documentId: Number(document.id) });

@@ -3395,7 +3395,10 @@ export const handleRaiseInvoice = async (po_id, invoice_url_input, vendor_id, de
     );
     if (formattedPOData) {
       const reminderUsers = await resolvePoNotificationRecipients(formattedPOData, db);
-      await sendInvoiceEmail(formattedPOData, invoice_url, reminderUsers);
+      const { invoiceNumber, invoiceDate, invoiceAmount } = raised.details;
+      await sendInvoiceEmail(formattedPOData, invoice_url, reminderUsers, {
+        invoiceNumber, invoiceDate, invoiceAmount, dispatchNumber: raised.invoice?.dispatchNumber ?? null,
+      });
     }
   } catch (err) {
     logError(`[po ${po_id}] invoice notification failed`, err);

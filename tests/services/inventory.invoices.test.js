@@ -9,19 +9,27 @@
 // the GRN does not move the PO's status back from invoice_raised.
 //
 // Everything goes through HTTP and commits; the suite truncates the dynamic
-// tables before and after.
+// tables before and after. sendMail is wrapped (the transport is already
+// stubbed by jestEnv) so the buyer team's email can be read.
 
-import { describe, it, expect, beforeAll, afterAll } from "@jest/globals";
+import { describe, it, expect, beforeAll, afterAll, jest } from "@jest/globals";
 import { randomUUID } from "crypto";
-import { db, closeDb, truncateDynamic } from "../setup/db.js";
-import { IDS } from "../fixtures/ids.js";
-import { httpClient } from "../helpers/http.js";
-import { grantRoleScope, revokeRoleScopes } from "../helpers/roleScope.js";
-import * as fx from "../helpers/invPlanFixtures.js";
-import { drainReceivingNotices } from "../../app/services/inventory/notifier.js";
+
+const actualCommon = await import("../../app/helper/common.js");
+const sendMail = jest.fn((opts) => actualCommon.sendMail(opts));
+jest.unstable_mockModule("../../app/helper/common.js", () => ({ ...actualCommon, sendMail }));
+
+const { db, closeDb, truncateDynamic } = await import("../setup/db.js");
+const { IDS } = await import("../fixtures/ids.js");
+const { httpClient } = await import("../helpers/http.js");
+const { grantRoleScope, revokeRoleScopes } = await import("../helpers/roleScope.js");
+const fx = await import("../helpers/invPlanFixtures.js");
+const { drainReceivingNotices } = await import("../../app/services/inventory/notifier.js");
+const { getPODetailFull } = await import("../../app/models/poDashboardModel.js");
 
 const { A1, A2, CO, VENDOR } = fx;
 const OTHER_VENDOR = IDS.users.vendor_beta;
+const LAPSED_VENDOR = IDS.users.vendor_gamma; // subscription ended 30 days ago
 const RECV = IDS.users.a1_proc_techEval; // Storekeeper at A1 for the GRN test
 
 const BUCKET_HOST = `${process.env.AWS_S3_BUCKET}.s3.${process.env.AWS_REGION}.amazonaws.com`;
@@ -44,7 +52,7 @@ beforeAll(async () => {
   await truncateDynamic();
   TODAY = (await db.one(`SELECT (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Kolkata')::date::text AS d`)).d;
   // Fixture users carry user_type NULL; /po/raiseInvoice admits vendors only.
-  for (const id of [VENDOR, OTHER_VENDOR]) {
+  for (const id of [VENDOR, OTHER_VENDOR, LAPSED_VENDOR]) {
     stamped.set(id, await db.one(`SELECT user_type, status FROM tbl_users WHERE id = $1`, [id]));
     await db.none(`UPDATE tbl_users SET user_type = 3, status = 1 WHERE id = $1`, [id]);
   }
@@ -169,10 +177,67 @@ describe("invoices per delivery", () => {
 
     // The trail records each invoice with what was billed (the capture writes
     // after the response, so wait for it).
+    // Each is filed under the hotel it bills: its dispatch's, and, for the one
+    // naming no dispatch, the PO's own hotel (A1), not "no hotel".
     const events = await eventsOf(po.poId, 3);
-    expect(events).toHaveLength(3);
-    expect(events[1]).toMatchObject({ hospitality_company_id: CO });
+    expect(events.map((e) => [e.metadata.invoiceNumber, e.hospitality_company_id, e.hotel_id])).toEqual([
+      ["INV-1001", CO, A1],
+      ["INV-1002", CO, A2],
+      ["INV-1003", CO, A1],
+    ]);
     expect(events[1].metadata).toMatchObject({ invoiceNumber: "INV-1002", invoiceAmount: "4500.00", dispatchId: toA2.id });
+    expect(events[2].metadata).toMatchObject({ invoiceAmount: "99.90", dispatchId: null });
+  });
+
+  it("the buyer team's email names the invoice, its date, amount and dispatch", async () => {
+    const po = await makePo();
+    const sent = await makeDispatch(po.poId, { number: `DSP/A1/2026-27/${randomUUID().slice(0, 6)}` });
+    sendMail.mockClear();
+    const res = await raise(vendor, invoice(po.poId, {
+      invoice_number: "INV-<B&C>", invoice_date: "2026-04-03", invoice_amount: "70500", dispatch_id: sent.id,
+    }));
+    expect(res.status).toBe(200);
+
+    expect(sendMail).toHaveBeenCalledTimes(1);
+    const mail = sendMail.mock.calls[0][0];
+    expect(mail.subject).toContain("Invoice INV-<B&C> raised by");
+    expect(mail.html).toContain("Invoice Details");
+    expect(mail.html).toContain("INV-&lt;B&amp;C&gt;"); // the vendor's text, escaped
+    expect(mail.html).not.toContain("INV-<B&C>");
+    expect(mail.html).toContain("3 Apr 2026");
+    expect(mail.html).toContain("₹70,500.00");
+    expect(mail.html).toContain(sent.dispatchNumber);
+
+    // A file-only invoice has no details to list.
+    const legacyPo = await makePo();
+    sendMail.mockClear();
+    expect((await raise(vendor, { po_id: legacyPo.poId, invoice_url: OWN_URL("invoices/l.pdf") })).status).toBe(200);
+    expect(sendMail).toHaveBeenCalledTimes(1);
+    expect(sendMail.mock.calls[0][0].html).not.toContain("Invoice Details");
+  });
+
+  it("the PO's documents name each invoice, and the lifecycle dates the first", async () => {
+    const po = await makePo();
+    expect((await raise(vendor, { po_id: po.poId, invoice_url: OWN_URL("invoices/old.pdf") })).status).toBe(200);
+    expect((await raise(vendor, invoice(po.poId, { invoice_number: "INV-1", invoice_amount: "70500" }))).status).toBe(200);
+    expect((await raise(vendor, invoice(po.poId, { invoice_number: "INV-2", invoice_amount: "1234.5" }))).status).toBe(200);
+    // Spread the three in time so "first" is unambiguous.
+    const rows = await invoicesOf(po.poId);
+    for (const [i, row] of rows.entries()) {
+      await db.none(
+        `UPDATE tbl_purchase_order_document SET created_at = TIMESTAMP '2026-04-01 10:00' + ($2 || ' days')::interval WHERE id = $1`,
+        [row.id, i]
+      );
+    }
+
+    const detail = await getPODetailFull(po.poId, { vendorId: VENDOR });
+    const names = detail.docs.filter((d) => d.type === "invoice").map((d) => d.name).sort();
+    expect(names).toEqual(["Invoice INV-1 · ₹70,500", "Invoice INV-2 · ₹1,234.50", "Invoice document"]);
+
+    const first = await db.one(`SELECT created_at FROM tbl_purchase_order_document WHERE id = $1`, [rows[0].id]);
+    const step = detail.workflow.find((w) => w.title === "Invoice raised");
+    expect(step).toMatchObject({ status: "done" });
+    expect(new Date(step.when).toISOString()).toBe(new Date(first.created_at).toISOString());
   });
 
   it("a call-off PO is invoiced, and the trail files it under the MR's hotel", async () => {
@@ -333,5 +398,58 @@ describe("invoices per delivery", () => {
     // The edges that are fine: 64 characters, today, two decimals.
     const ok = await raise(vendor, invoice(po.poId, { invoice_number: "Y".repeat(64), invoice_amount: "0.01" }));
     expect(ok.status).toBe(200);
+  });
+});
+
+describe("vendor dispatch guards", () => {
+  const dispatchNote = (poLineId) => ({
+    challanNo: "DC-9", challanDate: TODAY, expectedDeliveryDate: TODAY, lines: [{ poLineId, qty: 1 }],
+  });
+  const dispatchesOf = (poId) => db.any(`SELECT id, status FROM tbl_po_dispatch WHERE po_id = $1 ORDER BY id`, [poId]);
+
+  it("a vendor whose subscription has lapsed cannot record or withdraw a dispatch, but still sees the plan", async () => {
+    const po = await makePo({ status: "approved", vendor: LAPSED_VENDOR });
+    const before = await db.one(`SELECT is_hospitality FROM tbl_company WHERE id = $1`, [IDS.companies.vendorGamma]);
+    // The gate restricts hospitality vendors only; Gamma is one for this test.
+    await db.none(`UPDATE tbl_company SET is_hospitality = 1 WHERE id = $1`, [IDS.companies.vendorGamma]);
+    try {
+      const lapsed = await httpClient(LAPSED_VENDOR);
+      const base = `/api/v1/inventory/vendor/po/${po.poId}`;
+      const post = await lapsed.post(`${base}/dispatches`).send(dispatchNote(po.lineIds[0]));
+      expect(post.status).toBe(403);
+      expect(post.body).toMatchObject({ status: 0, subscription_expired: true });
+      expect(await dispatchesOf(po.poId)).toEqual([]);
+
+      const onRoad = await makeDispatch(po.poId);
+      await db.none(`UPDATE tbl_po_dispatch SET vendor_id = $2 WHERE id = $1`, [onRoad.id, LAPSED_VENDOR]);
+      const cancel = await lapsed.post(`${base}/dispatches/${onRoad.id}/cancel`);
+      expect(cancel.status).toBe(403);
+      expect(await dispatchesOf(po.poId)).toEqual([{ id: onRoad.id, status: "in_transit" }]);
+
+      // Reading is not gated.
+      expect((await lapsed.get(`${base}/deliveries`)).status).toBe(200);
+    } finally {
+      await db.none(`UPDATE tbl_company SET is_hospitality = $2 WHERE id = $1`, [IDS.companies.vendorGamma, before.is_hospitality]);
+    }
+  });
+
+  it("a dispatch an invoice bills cannot be withdrawn", async () => {
+    const po = await makePo({ status: "approved" });
+    const billed = await makeDispatch(po.poId);
+    const unbilled = await makeDispatch(po.poId);
+    expect((await raise(vendor, invoice(po.poId, { invoice_number: "INV-55", dispatch_id: billed.id }))).status).toBe(200);
+
+    const base = `/api/v1/inventory/vendor/po/${po.poId}/dispatches`;
+    const refused = await vendor.post(`${base}/${billed.id}/cancel`);
+    expect(refused.status).toBe(409);
+    expect(refused.body).toMatchObject({ status: 0, code: "CONFLICT", details: { dispatchId: billed.id } });
+    expect(refused.body.message).toMatch(/INV-55/);
+
+    // A dispatch no invoice names is withdrawn as before.
+    expect((await vendor.post(`${base}/${unbilled.id}/cancel`)).status).toBe(200);
+    expect(await dispatchesOf(po.poId)).toEqual([
+      { id: billed.id, status: "in_transit" },
+      { id: unbilled.id, status: "cancelled" },
+    ]);
   });
 });

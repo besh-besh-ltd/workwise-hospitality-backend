@@ -275,6 +275,24 @@ export async function cancelDispatch(t, vendorUser, poId, dispatchId) {
     [did]
   );
   if (received) throw new InventoryError('CONFLICT', 'Goods have been received against this dispatch', { dispatchId: did });
+  // A billed dispatch stays: withdrawing it would leave its invoice billing a
+  // delivery that never went. (raiseInvoice takes the same PO lock.)
+  const billed = await t.oneOrNone(
+    `SELECT invoice_number FROM tbl_purchase_order_document
+      WHERE dispatch_id = $1 AND document_type = 'invoice'
+      ORDER BY id
+      LIMIT 1`,
+    [did]
+  );
+  if (billed) {
+    throw new InventoryError(
+      'CONFLICT',
+      billed.invoice_number
+        ? `Invoice ${billed.invoice_number} has been raised against this dispatch, so it can't be withdrawn`
+        : "An invoice has been raised against this dispatch, so it can't be withdrawn",
+      { dispatchId: did }
+    );
+  }
   await t.none(
     `UPDATE tbl_po_dispatch SET status = 'cancelled', updated_at = now(), updated_by = $2 WHERE id = $1`,
     [did, positiveInt(vendorUser?.id)]
