@@ -15,6 +15,8 @@ import { db, withTx, closeDb } from "../setup/db.js";
 import { IDS } from "../fixtures/ids.js";
 import { httpClient } from "../helpers/http.js";
 import { shortClose, reopenShortClose } from "../../app/services/inventory/shortCloseService.js";
+import { createRtv, dispatchRtv } from "../../app/services/inventory/rtvService.js";
+import { grantRoleScope } from "../helpers/roleScope.js";
 import { InventoryError } from "../../app/services/inventory/errors.js";
 import { drainReceivingNotices } from "../../app/services/inventory/notices/receivingNotices.js";
 import {
@@ -23,6 +25,7 @@ import {
 
 const OWNER = { id: IDS.users.companyA_admin, user_type: 2 }; // CEO: awarding.create company-wide
 const NON_INITIATOR = { id: IDS.users.a1_proc_buyer, user_type: 2 }; // sees A1 POs, cannot initiate
+const STORES = { id: IDS.users.a1_proc_buyer, user_type: 2 }; // given grn.* where a test needs it
 
 afterAll(async () => {
   await closeDb();
@@ -248,9 +251,32 @@ describe("short-close", () => {
     });
   });
 
-  it("is refused before the vendor accepts and on a cancelled PO", async () => {
+  it("short-close on a PO awaiting vendor acceptance is refused", async () => {
     await withTx(async (t) => {
-      for (const status of ["acceptance_pending", "cancelled", "rejected_by_vendor"]) {
+      // The vendor can still reject a PO in these states, and a rejection gives
+      // a call-off's full qty back, so closing part of it first would give
+      // that part back twice.
+      for (const status of ["sent", "acceptance_pending"]) {
+        const { poId } = await makeRfqPo(t, { status });
+        const err = await expectInvError(
+          shortClose(t, OWNER, poId, { target: { type: "po" }, reasonCode: "no_longer_needed" }),
+          "VALIDATION",
+          { status }
+        );
+        expect(err.message).toBe("Short-close is available once the vendor accepts the PO");
+        await expectInvError(
+          reopenShortClose(t, OWNER, poId, { deliveryLineIds: [1], remarks: "x" }),
+          "VALIDATION",
+          { status }
+        );
+        expect(await logOf(t, poId)).toEqual([]);
+      }
+    });
+  });
+
+  it("is refused on a PO that is no longer live", async () => {
+    await withTx(async (t) => {
+      for (const status of ["cancelled", "rejected_by_vendor"]) {
         const { poId } = await makeRfqPo(t, { status });
         await expectInvError(
           shortClose(t, OWNER, poId, { target: { type: "po" }, reasonCode: "no_longer_needed" }),
@@ -329,30 +355,35 @@ describe("reopen", () => {
     });
   });
 
-  it("does not reopen what a credit return closed", async () => {
+  it("credit RTV on a call-off gives back contract qty and reopen re-consumes it", async () => {
     await withTx(async (t) => {
-      const { poId, lineIds: [line] } = await makeRfqPo(t);
-      const grn = await postReceiptGrn(t, { poId, lines: [{ poLineId: line, accepted: 10 }] });
+      const role = await t.one(`SELECT id FROM tbl_roles WHERE title = 'Inventory Controller' AND created_by IS NULL`);
+      await grantRoleScope(t, { userId: STORES.id, roleId: role.id, companyId: CO, hotelId: A2 });
+      const po = await makeCallOffPo(t, { hotel: A2, qty: 6 });
+      const grn = await postReceiptGrn(t, { poId: po.poId, hotelId: A2, lines: [{ poLineId: po.lineId, accepted: 6 }] });
       const dlId = grn.lines[0].deliveryLineId;
-      // A dispatched CREDIT return of 3 and its short-close rows (as rtvService writes them).
-      const rtv = await t.one(
-        `INSERT INTO tbl_rtv (rtv_number, hospitality_company_id, po_id, grn_id, hotel_id, disposition, status)
-         VALUES ('RTV/10101/2026-27/00001', $1, $2, $3, $4, 'CREDIT', 'dispatched') RETURNING id`,
-        [CO, poId, grn.grnId, A1]
-      );
-      await t.none(
-        `INSERT INTO tbl_rtv_line (hospitality_company_id, rtv_id, grn_line_id, qty, reason) VALUES ($1, $2, $3, 3, 'damp')`,
-        [CO, rtv.id, grn.lines[0].grnLineId]
-      );
-      await t.none(
-        `INSERT INTO tbl_po_short_close (hospitality_company_id, po_id, delivery_line_id, qty, reason_code, remarks, action)
-         VALUES ($1, $2, $3, 3, 'other', 'RTV RTV/10101/2026-27/00001 credit', 'close')`,
-        [CO, poId, dlId]
-      );
-      await expectInvError(
-        reopenShortClose(t, OWNER, poId, { deliveryLineIds: [dlId], remarks: "undo" }),
-        "VALIDATION"
-      );
+      const before = await consumed(t, po.contractLineId);
+      expect(before).toEqual({ line: 6, hotels: { [A1]: 50, [A2]: 6 } });
+
+      // 2 go back against a credit note: the contract and the ordering hotel get 2 back.
+      const rtv = await createRtv(t, STORES, {
+        grnId: grn.grnId, disposition: "CREDIT",
+        lines: [{ grnLineId: grn.lines[0].grnLineId, qty: 2, reason: "Leaking" }],
+      });
+      await dispatchRtv(t, STORES, rtv.id, {});
+      expect(await t.any(
+        `SELECT delivery_line_id, qty::float AS qty, reason_code, action, rtv_id FROM tbl_po_short_close WHERE po_id = $1`,
+        [po.poId]
+      )).toEqual([{ delivery_line_id: dlId, qty: 2, reason_code: "other", action: "close", rtv_id: rtv.id }]);
+      expect(await consumed(t, po.contractLineId)).toEqual({ line: 4, hotels: { [A1]: 50, [A2]: 4 } });
+      expect(await receiptStatus(t, po.poId)).toBe("closed_short");
+
+      // The buyer asks for the 2 after all: reopening takes them from the contract again.
+      const out = await reopenShortClose(t, OWNER, po.poId, { deliveryLineIds: [dlId], remarks: "Vendor will resend" });
+      expect(out.reopened).toEqual([{ deliveryLineId: dlId, poLineId: po.lineId, qty: 2 }]);
+      expect(out.callOffReconsume).toEqual([{ arcContractLineId: po.contractLineId, hotelId: A2, qty: 2 }]);
+      expect(await consumed(t, po.contractLineId)).toEqual(before);
+      expect(out.receiptStatus).toBe("partial");
     });
   });
 });

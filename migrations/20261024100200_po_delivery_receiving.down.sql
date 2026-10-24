@@ -119,9 +119,9 @@ ALTER TABLE public.tbl_purchase_order_product
   DROP COLUMN IF EXISTS received_qty;
 
 -- Tables, children first (their audit triggers go with them).
+DROP TABLE IF EXISTS public.tbl_po_short_close;  -- before tbl_rtv: its rtv_id references it
 DROP TABLE IF EXISTS public.tbl_rtv_line;
 DROP TABLE IF EXISTS public.tbl_rtv;
-DROP TABLE IF EXISTS public.tbl_po_short_close;
 DROP TABLE IF EXISTS public.tbl_grn_attachment;
 DROP TABLE IF EXISTS public.tbl_grn_line_alloc;
 DROP TABLE IF EXISTS public.tbl_grn_line;

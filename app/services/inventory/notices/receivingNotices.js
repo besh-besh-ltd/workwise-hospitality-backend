@@ -3,7 +3,8 @@
 //   GRN posted / reversed → PO initiator (in-app → the GRN) and vendor (in-app
 //                           → the vendor PO's deliveries tab), each with an
 //                           email listing accepted / rejected per line
-//   GRN rejections        → vendor email only, the rejected lines and reasons
+//   GRN rejections        → vendor in-app only, the rejected lines and reasons
+//                           (the vendor's one email per GRN is the posted one)
 //   short-close / reopen  → vendor and PO initiator (not the initiator when
 //                           they did it themselves)
 //   RTV dispatched        → vendor (in-app + email)
@@ -199,8 +200,11 @@ export function notifyGrnPosted(t, args) {
 }
 
 /**
- * GRN rejections: the vendor gets an email listing only the rejected lines
- * with their reasons. Nothing when nothing was rejected (or for a reversal).
+ * GRN rejections: one in-app notice to the vendor naming the rejected lines
+ * and reasons. Never an email: the vendor's one email per GRN is
+ * notifyGrnPosted's, which already lists accepted / rejected per line with the
+ * reasons, so a caller that sends both still mails the vendor once. Nothing
+ * when nothing was rejected (or for a reversal).
  */
 export function notifyGrnRejections(t, args) {
   const [conn, { grnId } = {}] = normalize(t, args);
@@ -215,25 +219,17 @@ export function notifyGrnRejections(t, args) {
 
     const po = poLabel(doc.poNumber, doc.poId);
     const grnNo = doc.grnNumber ?? `GRN #${doc.grnId}`;
-    const rejected = doc.lines.filter((l) => (l.rejected || 0) > 0);
-    const heading = `${formatQty(doc.totals.rejected)} rejected on ${grnNo} (${po})`;
-    await mail(vendor, `${grnNo}: items rejected on ${po}`, mailHtml({
-      name: vendor.name,
-      heading,
-      paragraphs: [
-        `${doc.hotel.name ?? 'The hotel'} rejected part of the delivery against ${po}. The rejected lines and reasons are below.`,
-        doc.vendorChallanNo ? `Vendor challan: ${doc.vendorChallanNo}.` : null,
-      ],
-      table: mailTable(
-        ['Item', 'Unit', 'Received', 'Rejected', 'Reason', 'Remarks'],
-        rejected.map((l) => [
-          l.productName ?? '', l.unit ?? '', formatQty(l.received), formatQty(l.rejected), l.rejectionLabel ?? '', l.remarks ?? '',
-        ]),
-        { numeric: [2, 3] }
-      ),
-      url: toAbsoluteUrl(vendorPoDeliveries(doc.poId)),
-      cta: 'Open the deliveries',
-    }));
+    const lines = doc.lines
+      .filter((l) => (l.rejected || 0) > 0)
+      .map((l) => `${l.productName ?? 'Item'} ${formatQty(l.rejected)}${l.unit ? ` ${l.unit}` : ''}`
+        + `${l.rejectionLabel ? ` (${l.rejectionLabel})` : ''}`);
+    await notifyInApp(vendor.id, {
+      type: 'GRN_REJECTIONS',
+      title: `Items rejected on ${grnNo} (${po})`,
+      body: `${doc.hotel.name ?? 'The hotel'} rejected: ${lines.join('; ')}.`,
+      data: { po_id: doc.poId, grn_id: doc.grnId },
+      actionUrl: vendorPoDeliveries(doc.poId),
+    });
   });
 }
 

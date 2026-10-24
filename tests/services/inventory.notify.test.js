@@ -2,7 +2,8 @@
 //
 //   GRN posted    → PO initiator and vendor, in-app + email, accepted /
 //                   rejected per line
-//   rejections    → vendor email with the reasons
+//   rejections    → vendor in-app notice with the reasons (the one vendor
+//                   email per GRN comes from the GRN-posted notice)
 //   short-close   → vendor and initiator
 //   RTV dispatched → vendor
 //
@@ -107,19 +108,32 @@ describe("receiving notices", () => {
     });
   });
 
-  it("GRN rejections email the vendor with reasons, and stay quiet without rejections", async () => {
+  it("posting a GRN with rejections sends exactly one vendor email", async () => {
     await withTx(async (t) => {
-      const { grn } = await receivedPo(t);
+      const { poId, grn } = await receivedPo(t);
+      // B1 calls both after the post commits.
+      await notifyGrnPosted(t, { grnId: grn.grnId });
       await notifyGrnRejections(t, { grnId: grn.grnId });
-      expect(sentMails).toHaveLength(1);
-      const [mail] = sentMails;
-      expect(mail.to).toBe(await emailOf(t, VENDOR));
-      expect(mail.subject).toMatch(/rejected/i);
-      expect(mail.html).toContain("7 UP PEPSI 1.5 LTR");
-      expect(mail.html).toContain("Damaged");
-      expect(mail.html).not.toContain("PEPSI 600 ML"); // fully accepted line is not listed
 
-      sentMails.length = 0;
+      const vendorMails = mailTo(await emailOf(t, VENDOR));
+      expect(vendorMails).toHaveLength(1);
+      expect(vendorMails[0].html).toContain("Damaged");
+      expect(vendorMails[0].html).toMatch(/>8<\/td>\s*<td[^>]*>2<\/td>/);
+
+      // The rejections add one in-app notice for the vendor, naming only the rejected lines.
+      const rejections = dispatched.filter((d) => d.type === "GRN_REJECTIONS");
+      expect(rejections).toEqual([expect.objectContaining({
+        userIds: [VENDOR], category: "grn", actionUrl: vendorPoDeliveries(poId), data: { po_id: poId, grn_id: grn.grnId },
+      })]);
+      expect(rejections[0].title).toContain(grn.grnNumber);
+      expect(rejections[0].body).toContain("7 UP PEPSI 1.5 LTR");
+      expect(rejections[0].body).toContain("Damaged");
+      expect(rejections[0].body).not.toContain("PEPSI 600 ML");
+    });
+  });
+
+  it("GRN rejections stay quiet without rejections", async () => {
+    await withTx(async (t) => {
       const clean = await makeRfqPo(t);
       const ok = await postReceiptGrn(t, { poId: clean.poId, lines: [{ poLineId: clean.lineIds[0], accepted: 10 }] });
       await notifyGrnRejections(t, { grnId: ok.grnId });

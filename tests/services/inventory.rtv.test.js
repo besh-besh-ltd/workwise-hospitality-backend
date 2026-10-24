@@ -158,12 +158,15 @@ describe("return to vendor", () => {
       // The credit is spread latest-allocation-first (phase 2), and the
       // short-close rows land on that same delivery line.
       const log = await t.any(
-        `SELECT delivery_line_id, qty::float AS qty, reason_code, remarks, action
+        `SELECT delivery_line_id, qty::float AS qty, reason_code, remarks, action, rtv_id
            FROM tbl_po_short_close WHERE po_id = $1 ORDER BY id`,
         [poId]
       );
       expect(log).toEqual([
-        { delivery_line_id: p2.lines[line], qty: 3, reason_code: "other", remarks: `RTV ${sent.rtvNumber} credit`, action: "close" },
+        {
+          delivery_line_id: p2.lines[line], qty: 3, reason_code: "other", remarks: `RTV ${sent.rtvNumber} credit`,
+          action: "close", rtv_id: rtv.id,
+        },
       ]);
       const dls = await deliveryLinesOf(t, poId);
       expect(dls.map((d) => [d.id, d.returned_credit, d.short_closed, d.status])).toEqual([

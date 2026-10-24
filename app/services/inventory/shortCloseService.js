@@ -12,11 +12,17 @@
 // ordering hotel's Group-ARC ledger row); a reopen takes it again under the
 // release guard (reconsumeCallOffQty, CONFLICT when the contract is used up).
 //
+// A CREDIT return to vendor closes its returned qty through the same log
+// (closeForCreditReturn): rows carry rtv_id, and a call-off gives that qty
+// back to the contract too. Those rows reopen like any other close (the buyer
+// wants the goods after all), and the reopen re-consumes the contract.
+//
 // Who: the PO's owners, through the PO initiate gate (assertPoInitiateAccess:
 // PO read scope → 404, then PO_INITIATE_PERMISSIONS → 403). When: once the
-// vendor has accepted the PO. Before acceptance a call-off can still be
-// rejected by the vendor, and that path gives back the full released qty, so
-// a short-close then would hand the same qty back twice.
+// vendor has accepted the PO. While a PO is 'sent' or 'acceptance_pending'
+// the vendor can still reject it (rejectPO), and a rejected call-off gives
+// back its full released qty, so a short-close then would hand the same qty
+// back twice: VALIDATION until the vendor accepts.
 //
 // Lock order (planCore): PO row → delivery lines → contract ledger rows.
 
@@ -30,10 +36,13 @@ export const SHORT_CLOSE_REASONS = Object.freeze([
   'vendor_cannot_supply', 'no_longer_needed', 'substituted', 'price_dispute', 'other',
 ]);
 
-/** PO statuses that can be short-closed or reopened: issued and accepted by the vendor. */
+/** PO statuses that can be short-closed or reopened: accepted by the vendor. */
 export const SHORT_CLOSABLE_PO_STATUSES = Object.freeze([
-  'approved', 'sent', 'dispatched', 'GRN', 'invoice_raised', 'completed',
+  'approved', 'dispatched', 'GRN', 'invoice_raised', 'completed',
 ]);
+
+/** Issued but the vendor can still reject it (purchaseOrderController.rejectPO). */
+const AWAITING_VENDOR_STATUSES = Object.freeze(['sent', 'acceptance_pending']);
 
 const TARGET_TYPES = ['po', 'delivery', 'hotel', 'lines'];
 const REMARKS_MAX = 2000;
@@ -105,6 +114,11 @@ function parseTarget(target) {
 /** Lock the PO, check it can be short-closed, and return its context. */
 async function lockClosablePo(t, poId) {
   const ctx = await getPoContext(t, poId, { forUpdate: true });
+  if (AWAITING_VENDOR_STATUSES.includes(ctx.status)) {
+    throw invalid('Short-close is available once the vendor accepts the PO', {
+      poId: Number(ctx.po.id), status: ctx.status,
+    });
+  }
   if (!SHORT_CLOSABLE_PO_STATUSES.includes(ctx.status)) {
     throw new InventoryError(
       'CONFLICT',
@@ -188,14 +202,15 @@ function perContractLine(rows, hotelId) {
     .map(([arcContractLineId, q]) => ({ arcContractLineId, hotelId, qty: qNum(q) }));
 }
 
-async function writeLog(t, { companyId, poId, rows, reasonCode, remarks, action, userId }) {
+async function writeLog(t, { companyId, poId, rows, reasonCode, remarks, action, userId, rtvId = null }) {
   const inserted = await t.any(
-    `INSERT INTO tbl_po_short_close (hospitality_company_id, po_id, delivery_line_id, qty, reason_code, remarks, action, acted_by)
-     SELECT $1, $2, v.delivery_line_id, v.qty, $5, $6, $7, $8
+    `INSERT INTO tbl_po_short_close
+       (hospitality_company_id, po_id, delivery_line_id, qty, reason_code, remarks, action, acted_by, rtv_id)
+     SELECT $1, $2, v.delivery_line_id, v.qty, $5, $6, $7, $8, $9
        FROM unnest($3::int[], $4::numeric[]) WITH ORDINALITY AS v(delivery_line_id, qty, ord)
       ORDER BY v.ord
      RETURNING id`,
-    [companyId, poId, rows.map((r) => r.deliveryLineId), rows.map((r) => qStr(r.qty)), reasonCode, remarks, action, userId]
+    [companyId, poId, rows.map((r) => r.deliveryLineId), rows.map((r) => qStr(r.qty)), reasonCode, remarks, action, userId, rtvId]
   );
   return inserted.map((r) => Number(r.id));
 }
@@ -265,9 +280,8 @@ export async function shortClose(t, user, poId, { target, reasonCode, remarks } 
 
 /**
  * Reopen short-closed quantity on chosen delivery lines: each line gets a
- * 'reopen' row for its net manually-closed qty (Σ close − Σ reopen). Rows a
- * CREDIT return to vendor wrote ("RTV <number> credit") are not reopened
- * here: that qty was returned against a credit note.
+ * 'reopen' row for its net closed qty (Σ close − Σ reopen), including qty a
+ * CREDIT return closed (the buyer wants those goods delivered after all).
  *
  * @param {{deliveryLineIds:number[], remarks:string}} input remarks required
  * @returns {Promise<{poId, poNumber, companyId, hotelIds, shortCloseIds,
@@ -291,11 +305,7 @@ export async function reopenShortClose(t, user, poId, { deliveryLineIds, remarks
     `SELECT sc.delivery_line_id,
             SUM(CASE WHEN sc.action = 'close' THEN sc.qty ELSE -sc.qty END)::text AS qty
        FROM tbl_po_short_close sc
-      WHERE sc.po_id = $1
-        AND sc.delivery_line_id = ANY($2::int[])
-        AND NOT (sc.action = 'close' AND sc.reason_code = 'other' AND sc.remarks IN (
-              SELECT 'RTV ' || r.rtv_number || ' credit' FROM tbl_rtv r
-               WHERE r.po_id = $1 AND r.disposition = 'CREDIT' AND r.rtv_number IS NOT NULL))
+      WHERE sc.po_id = $1 AND sc.delivery_line_id = ANY($2::int[])
       GROUP BY sc.delivery_line_id`,
     [id, lines.map((l) => l.id)]
   );
@@ -330,18 +340,63 @@ export async function reopenShortClose(t, user, poId, { deliveryLineIds, remarks
 }
 
 /**
+ * Close the qty a CREDIT return to vendor sent back, on the delivery lines the
+ * roll-up booked the credit to: one 'close' row per line (reason 'other',
+ * remarks "RTV <number> credit", rtv_id set), and on a call-off the same qty
+ * goes back to the rate contract (line + the ordering hotel's Group-ARC row).
+ * Called by rtvService.dispatchRtv inside its transaction, with the PO locked.
+ *
+ * @param {object} t transaction
+ * @param {object} ctx getPoContext(t, poId) of the RTV's PO
+ * @param {{rtvId:number, rtvNumber:string, userId:number|null,
+ *          rows:Array<{deliveryLineId:number, qty:number}>}} args qty in PO units
+ * @returns {Promise<{shortCloseIds:number[], callOffGiveBack:Array<{arcContractLineId, hotelId, qty}>}>}
+ */
+export async function closeForCreditReturn(t, ctx, { rtvId, rtvNumber, userId = null, rows = [] } = {}) {
+  const wanted = rows
+    .map((r) => ({ deliveryLineId: positiveInt(r.deliveryLineId), qty: toQ(r.qty) }))
+    .filter((r) => r.deliveryLineId && r.qty > 0)
+    .sort((a, b) => a.deliveryLineId - b.deliveryLineId);
+  if (!wanted.length) return { shortCloseIds: [], callOffGiveBack: [] };
+  const poId = Number(ctx.po.id);
+  const shortCloseIds = await writeLog(t, {
+    companyId: ctx.companyId, poId, rows: wanted, reasonCode: 'other', remarks: `RTV ${rtvNumber} credit`,
+    action: 'close', userId, rtvId,
+  });
+
+  let callOffGiveBack = [];
+  if (ctx.isCallOff) {
+    const contractLines = await t.any(
+      `SELECT dl.id, pop.arc_contract_line_id
+         FROM tbl_po_delivery_line dl JOIN tbl_purchase_order_product pop ON pop.id = dl.po_line_id
+        WHERE dl.id = ANY($1::int[])`,
+      [wanted.map((r) => r.deliveryLineId)]
+    );
+    const byLine = new Map(contractLines.map((r) => [Number(r.id), positiveInt(r.arc_contract_line_id)]));
+    callOffGiveBack = perContractLine(
+      wanted.map((r) => ({ ...r, arcContractLineId: byLine.get(r.deliveryLineId) ?? null })),
+      await callOffHotelId(t, ctx)
+    );
+    await giveBackCallOffQty(t, { poId, lines: callOffGiveBack });
+  }
+  return { shortCloseIds, callOffGiveBack };
+}
+
+/**
  * A PO's short-close log, oldest first, for the deliveries payload and the
  * notices. Buyer-side shape (acting user's name included).
  *
  * @returns {Promise<Array<{id, deliveryLineId, deliveryId, poLineId, productName,
  *   unit, hotelId, hotelName, phaseNo, qty:number, reasonCode, remarks,
- *   action:'close'|'reopen', actedAt:string, actedBy:number|null, actedByName}>>}
+ *   action:'close'|'reopen', actedAt:string, actedBy:number|null, actedByName,
+ *   rtvId:number|null, rtvNumber:string|null}>>} rtvId/rtvNumber name the
+ *   CREDIT return that wrote the row (null for the buyer's own short-closes)
  */
 export async function listShortCloses(t, poId, { ids = null } = {}) {
   const rows = await t.any(
     `SELECT sc.id, sc.delivery_line_id, d.id AS delivery_id, dl.po_line_id, pv.name AS product_name, pop.unit,
             d.hotel_id, h.name AS hotel_name, d.phase_no, sc.qty::text AS qty, sc.reason_code, sc.remarks,
-            sc.action, sc.acted_at, sc.acted_by, u.name AS acted_by_name
+            sc.action, sc.acted_at, sc.acted_by, u.name AS acted_by_name, sc.rtv_id, rv.rtv_number
        FROM tbl_po_short_close sc
        JOIN tbl_po_delivery_line dl ON dl.id = sc.delivery_line_id
        JOIN tbl_po_delivery d ON d.id = dl.delivery_id
@@ -350,6 +405,7 @@ export async function listShortCloses(t, poId, { ids = null } = {}) {
        LEFT JOIN tbl_product_variant pv ON pv.id = COALESCE(pop.product_variant_id, rp.product_variant_id)
        LEFT JOIN tbl_hospitality_company_hotels h ON h.id = d.hotel_id
        LEFT JOIN tbl_users u ON u.id = sc.acted_by
+       LEFT JOIN tbl_rtv rv ON rv.id = sc.rtv_id
       WHERE sc.po_id = $1 AND ($2::int[] IS NULL OR sc.id = ANY($2::int[]))
       ORDER BY sc.id`,
     [poId, ids]
@@ -371,7 +427,11 @@ export async function listShortCloses(t, poId, { ids = null } = {}) {
     actedAt: new Date(r.acted_at).toISOString(),
     actedBy: r.acted_by == null ? null : Number(r.acted_by),
     actedByName: r.acted_by_name ?? null,
+    rtvId: r.rtv_id == null ? null : Number(r.rtv_id),
+    rtvNumber: r.rtv_number ?? null,
   }));
 }
 
-export default { shortClose, reopenShortClose, listShortCloses, SHORT_CLOSE_REASONS, SHORT_CLOSABLE_PO_STATUSES };
+export default {
+  shortClose, reopenShortClose, closeForCreditReturn, listShortCloses, SHORT_CLOSE_REASONS, SHORT_CLOSABLE_PO_STATUSES,
+};

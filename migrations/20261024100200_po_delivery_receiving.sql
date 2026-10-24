@@ -293,6 +293,14 @@ CREATE TABLE IF NOT EXISTS public.tbl_rtv_line (
 CREATE INDEX IF NOT EXISTS ix_rtv_line_rtv ON public.tbl_rtv_line (rtv_id);
 CREATE INDEX IF NOT EXISTS ix_rtv_line_grn_line ON public.tbl_rtv_line (grn_line_id);
 
+-- A short-close written by a CREDIT return to vendor names that return; the
+-- buyer's own short-closes leave it NULL. Added here, not in the CREATE above,
+-- because tbl_rtv is created after tbl_po_short_close.
+ALTER TABLE public.tbl_po_short_close
+  ADD COLUMN IF NOT EXISTS rtv_id INT REFERENCES public.tbl_rtv(id);
+CREATE INDEX IF NOT EXISTS ix_po_short_close_rtv
+  ON public.tbl_po_short_close (rtv_id) WHERE rtv_id IS NOT NULL;
+
 -- ---------------------------------------------------------------------------
 -- §5.4 PO-side roll-ups (caches of the delivery lines; recomputePoReceipt
 -- rebuilds them). The po_status enum is untouched.

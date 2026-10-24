@@ -12,10 +12,12 @@
 //             PO up. The roll-up counts dispatched/closed RTVs:
 //               REPLACE  returned_replace_qty → the qty is open again;
 //               CREDIT   returned_credit_qty, plus tbl_po_short_close rows
-//                        (reason 'other', remarks "RTV <number> credit") on the
-//                        same delivery lines the roll-up spread the credit over,
-//                        sized by each line's increase in returned_credit_qty,
-//                        so the qty does not come back as open.
+//                        (rtv_id set, reason 'other', remarks "RTV <number>
+//                        credit") on the same delivery lines the roll-up spread
+//                        the credit over, sized by each line's increase in
+//                        returned_credit_qty, so the qty does not come back as
+//                        open; a call-off gives that qty back to its rate
+//                        contract (shortCloseService.closeForCreditReturn).
 //   close     CREDIT: records the vendor's credit-note reference.
 //             REPLACE: only once every delivery line the returned goods were
 //             booked to is received again or short-closed.
@@ -31,6 +33,7 @@ import { getPoContext } from './planCore.js';
 import { recomputePoReceipt } from './receiptRollup.js';
 import { nextDocNumber } from './docNumber.js';
 import { postMovements } from './ledger.js';
+import { closeForCreditReturn } from './shortCloseService.js';
 
 export const RTV_DISPOSITIONS = Object.freeze(['REPLACE', 'CREDIT']);
 
@@ -257,13 +260,13 @@ export async function createRtv(t, user, { grnId, disposition, remarks, lines } 
   return rtvView(t, Number(rtv.id));
 }
 
-/** Load, gate, lock the PO and then the RTV, in that order. */
+/** Load, gate, lock the PO and then the RTV, in that order. Returns the locked RTV row and the PO context. */
 async function lockForAction(t, user, rtvId, action) {
   const first = await loadRtvRow(t, rtvId);
   const { companyId } = await gate(t, user, first.hotel_id, action);
   if (Number(first.hospitality_company_id) !== companyId) throw notFound();
-  await getPoContext(t, first.po_id, { forUpdate: true });
-  return loadRtvRow(t, first.id, { forUpdate: true });
+  const ctx = await getPoContext(t, first.po_id, { forUpdate: true });
+  return { rtv: await loadRtvRow(t, first.id, { forUpdate: true }), ctx };
 }
 
 const wrongStatus = (rtv, verb) =>
@@ -287,7 +290,7 @@ async function deliveryCredits(t, poId) {
  *   since the draft), NEGATIVE_STOCK (goods already marked out), and the gate's.
  */
 export async function dispatchRtv(t, user, rtvId, { challanNo } = {}) {
-  const rtv = await lockForAction(t, user, rtvId, 'approve');
+  const { rtv, ctx } = await lockForAction(t, user, rtvId, 'approve');
   if (rtv.status !== 'draft') throw wrongStatus(rtv, 'dispatched');
   const challan = cleanText(challanNo, 'challanNo', { max: REF_MAX, label: 'The challan number' });
   const rtvIdN = Number(rtv.id);
@@ -355,16 +358,9 @@ export async function dispatchRtv(t, user, rtvId, { challanNo } = {}) {
     const rows = [...after.entries()]
       .map(([deliveryLineId, q]) => ({ deliveryLineId, qty: q - (creditBefore.get(deliveryLineId) || 0) }))
       .filter((r) => r.qty > 0)
-      .sort((a, b) => a.deliveryLineId - b.deliveryLineId);
+      .map((r) => ({ deliveryLineId: r.deliveryLineId, qty: qNum(r.qty) }));
     if (rows.length) {
-      await t.none(
-        `INSERT INTO tbl_po_short_close (hospitality_company_id, po_id, delivery_line_id, qty, reason_code, remarks, action, acted_by)
-         SELECT $1, $2, v.delivery_line_id, v.qty, 'other', $5, 'close', $6
-           FROM unnest($3::int[], $4::numeric[]) WITH ORDINALITY AS v(delivery_line_id, qty, ord)
-          ORDER BY v.ord`,
-        [Number(rtv.hospitality_company_id), poId, rows.map((r) => r.deliveryLineId), rows.map((r) => qStr(r.qty)),
-          `RTV ${rtvNumber} credit`, positiveInt(user?.id)]
-      );
+      await closeForCreditReturn(t, ctx, { rtvId: rtvIdN, rtvNumber, userId: positiveInt(user?.id), rows });
       await recomputePoReceipt(t, poId);
     }
   }
@@ -378,7 +374,7 @@ export async function dispatchRtv(t, user, rtvId, { challanNo } = {}) {
  *   details.openLines), VALIDATION (creditNoteRef), and the gate's.
  */
 export async function closeRtv(t, user, rtvId, { creditNoteRef } = {}) {
-  const rtv = await lockForAction(t, user, rtvId, 'approve');
+  const { rtv } = await lockForAction(t, user, rtvId, 'approve');
   if (rtv.status !== 'dispatched') throw wrongStatus(rtv, 'closed');
   const rtvIdN = Number(rtv.id);
 
@@ -420,7 +416,7 @@ export async function closeRtv(t, user, rtvId, { creditNoteRef } = {}) {
 
 /** Cancel a draft RTV (it never moved stock). */
 export async function cancelRtv(t, user, rtvId) {
-  const rtv = await lockForAction(t, user, rtvId, 'approve');
+  const { rtv } = await lockForAction(t, user, rtvId, 'approve');
   if (rtv.status !== 'draft') throw wrongStatus(rtv, 'cancelled');
   await t.none(
     `UPDATE tbl_rtv SET status = 'cancelled', updated_at = now(), updated_by = $2 WHERE id = $1`,
