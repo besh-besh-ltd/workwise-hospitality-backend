@@ -2,7 +2,7 @@ import db from "../config/dbConn.js";
 import { sendApprovalNotification } from "../controllers/po/purchaseOrderEmails.js";
 import { consoleLogData, logError } from "../helper/common.js";
 import { scheduleGRNReminders } from "../helper/cronManager.js";
-import { sendDispatchedEmail, sendGRNUpdationEmail, sendInvoiceEmail } from "../helper/sendEmailFunctions/generalReminderEmails.js";
+import { sendDispatchedEmail, sendInvoiceEmail } from "../helper/sendEmailFunctions/generalReminderEmails.js";
 import { normalizeOwnS3Url } from "../helper/s3Urls.js";
 import { LIVE_TOKEN_SQL } from "../helper/receiveToken.js";
 import { InventoryError } from "../services/inventory/errors.js";
@@ -3310,90 +3310,74 @@ export const handleRaiseInvoice = async (po_id, invoice_url_input, vendor_id) =>
   })
 };
 
-export const handleMarkGRN = async (po_id, grn_document_url, user_id, remarks) => {
-  return await db.tx(async t => {
-    const po = await t.oneOrNone(
-      `SELECT * FROM tbl_rfq_purchase_order
-      WHERE id = $1`,
-      [po_id]
-    );
+/**
+ * Legacy POST /po/markGRN, now a shim over line-level receiving (inventory
+ * spec §6.11): it posts a GRN accepting every open quantity at the PO's single
+ * receiving hotel (grnService.postLegacyFullReceipt), so stock, the delivery
+ * plan, PO counters and po.status all move exactly as a Receive would.
+ *
+ * Refused with InventoryError 409 code USE_RECEIVE when a one-click receipt is
+ * not a safe guess: open quantity at more than one hotel (an unsplit
+ * multi-hotel PO), an unknown unit conversion, an expiry-tracked item. Nothing
+ * left to receive is a 409 CONFLICT.
+ *
+ * Kept from the old handler: grn_document_url is stored as before (a
+ * tbl_purchase_order_document 'grn' row, same shape) and also as an OTHER
+ * attachment on the new GRN; the PO approval-history 'grn' row (now written by
+ * the posting, for every first receipt); the return value (that document row,
+ * or null). The old GRN email is replaced by the
+ * inventory GRN notice (notifyGrnPosted), sent after COMMIT, so the vendor is
+ * not told twice.
+ *
+ * @param {number} po_id
+ * @param {string|null} grn_document_url
+ * @param {number} user_id req.user.id (-1 for a GRN-token site rep)
+ * @param {string|null} remarks
+ * @param {object|null} [user] req.user (buyer, or the token user from
+ *   auth.authUserOrGRNToken); defaults to {id: user_id}.
+ */
+export const handleMarkGRN = async (po_id, grn_document_url, user_id, remarks, user = null) => {
+  // Dynamic: the inventory services import resolvePoTenancy from this module.
+  const { postLegacyFullReceipt, attachmentKeyFromUrl } = await import('../services/inventory/grnService.js');
+  const actor = user ?? { id: user_id };
 
-    if(!po) throw new Error('PO does not exist with given id')
+  const { grn, document } = await db.tx(async t => {
+    const { grn } = await postLegacyFullReceipt(t, actor, { poId: po_id, remarks });
 
-    const existing = await t.oneOrNone(
-      `SELECT id FROM tbl_purchase_order_document WHERE purchase_order_id = $1 AND document_type = 'grn'`,
-      [po_id]
-    );
-
-    if(existing) {
-      throw new Error("GRN is already marked for this PO!")
-    }
-
-    let result = null;
-
-    if(grn_document_url) 
-      result = await t.one(
+    let document = null;
+    if (grn_document_url) {
+      const key = attachmentKeyFromUrl(grn_document_url);
+      await t.none(
+        `INSERT INTO tbl_grn_attachment (hospitality_company_id, grn_id, s3_key, file_name, kind, uploaded_by)
+         VALUES ($1, $2, $3, $4, 'OTHER', $5)`,
+        [grn.companyId, grn.id, key, String(key).split('/').pop().slice(0, 255) || null,
+          Number(user_id) > 0 && !actor?.is_token_user ? Number(user_id) : null]
+      );
+      document = await t.one(
         `INSERT INTO tbl_purchase_order_document
         (purchase_order_id, document_type, document_url, uploaded_by)
         VALUES($1, 'grn', $2, $3)
-        
+
         RETURNING *`,
         [po_id, grn_document_url, user_id]
       );
-
-    await t.none(
-      `UPDATE tbl_rfq_purchase_order
-      SET status = 'GRN'
-      WHERE id = $1`,
-      [po_id]
-    );
-
-    const formattedPOData = await t.one(
-      `SELECT PO.*,
-      TC.company_name AS finalized_vendor_name,
-      TU.email AS finalized_vendor_email
-
-      FROM tbl_rfq_purchase_order PO
-      JOIN tbl_users TU ON PO.finalized_vendor_id = TU.id
-      JOIN tbl_company TC ON TU.company_id = TC.id
-
-      WHERE PO.id = $1`,
-      [po_id]
-    );
-
-    const reminderUsers = await resolvePoNotificationRecipients(po, t);
-
-    // The GRN is the vendor's trigger to raise their invoice, so they join the
-    // recipients here; sendGRNUpdationEmail points them at the vendor PO page.
-    const grnRecipients = [...new Set(
-      [...reminderUsers, po.finalized_vendor_id].filter((id) => id != null).map(Number)
-    )];
-
-    const txn = await t.oneOrNone(
-      `SELECT id FROM tbl_approval_hierarchy_transactions
-      WHERE hierarchy_type = 'po'
-      AND target_entity_id = $1`,
-      [po_id]
-    );
-
-    if (txn) {
-      await t.none(
-        `INSERT INTO tbl_approval_hierarchy_history
-        (approval_transaction_id, approved_by, action, remarks)
-        VALUES ($1, $2, $3, $4)`,
-        [txn.id, user_id, 'grn', remarks]
-      );
     }
 
-    // A notification failure must never roll back a GRN that was recorded.
-    try {
-      await sendGRNUpdationEmail(formattedPOData, grn_document_url, grnRecipients);
-    } catch (err) {
-      logError(`[po ${po_id}] GRN notification failed`, err);
-    }
-
-    return result;
+    // The PO timeline 'grn' history row is written by the posting itself
+    // (grnService recordLegacyGrnTimeline), for this shim and Receive alike.
+    return { grn, document };
   });
+
+  // After COMMIT: a notification failure must never undo a recorded receipt.
+  // (A full receipt rejects nothing, so there is no rejection notice.)
+  const { notifyGrnPosted } = await import('../services/inventory/notifier.js');
+  try {
+    await notifyGrnPosted(db, { grnId: grn.id });
+  } catch (err) {
+    logError(`[po ${po_id}] GRN notification failed`, err);
+  }
+
+  return document;
 };
 
 

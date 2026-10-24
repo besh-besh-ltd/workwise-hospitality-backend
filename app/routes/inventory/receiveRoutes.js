@@ -12,7 +12,16 @@ import {
   reverseGrn,
   uploadGrnAttachment,
   deleteGrnAttachment,
+  guardGrnAttachmentUpload,
 } from '../../controllers/inventory/receiveController.js';
+import { validateBody } from '../../validations/paramValidation/userValidation.js';
+import {
+  createGrnSchema,
+  updateGrnSchema,
+  postGrnSchema,
+  reverseGrnSchema,
+  grnAttachmentUploadMiddleware,
+} from '../../validations/paramValidation/inventoryReceiveValidation.js';
 import {
   getGrnPdf,
 } from '../../controllers/inventory/documentController.js';
@@ -22,14 +31,15 @@ const router = express.Router();
 
 router.get('/receive/awaiting', ...buyerGuard, getAwaitingDeliveries);
 router.get('/receive/po/:poId', ...buyerGuard, getReceiveContext);
-router.post('/grn', ...buyerGuard, createGrn);
+router.post('/grn', ...buyerGuard, validateBody(createGrnSchema), createGrn);
 router.get('/grn', ...buyerGuard, listGrns);
 router.get('/grn/:id', ...buyerGuard, getGrn);
-router.put('/grn/:id', ...buyerGuard, updateGrn);
-router.post('/grn/:id/post', ...buyerGuard, postGrn);
+router.put('/grn/:id', ...buyerGuard, validateBody(updateGrnSchema), updateGrn);
+router.post('/grn/:id/post', ...buyerGuard, validateBody(postGrnSchema), postGrn);
 router.delete('/grn/:id', ...buyerGuard, discardGrn);
-router.post('/grn/:id/reverse', ...buyerGuard, reverseGrn);
-router.post('/grn/:id/attachments', ...buyerGuard, uploadGrnAttachment);
+router.post('/grn/:id/reverse', ...buyerGuard, validateBody(reverseGrnSchema), reverseGrn);
+// Authorise (grn.update on the GRN's hotel) BEFORE anything is uploaded.
+router.post('/grn/:id/attachments', ...buyerGuard, guardGrnAttachmentUpload, grnAttachmentUploadMiddleware, uploadGrnAttachment);
 router.delete('/grn/:id/attachments/:attId', ...buyerGuard, deleteGrnAttachment);
 router.get('/grn/:id/pdf', ...buyerGuard, getGrnPdf);
 
