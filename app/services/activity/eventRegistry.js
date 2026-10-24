@@ -24,6 +24,7 @@ export const CATEGORIES = {
   AWARDING: 'Awarding',
   ORDERS: 'Purchase Orders',
   RECEIPT: 'Goods Receipt',
+  INVENTORY: 'Inventory',
   CONTRACTS: 'Rate Contracts',
   REQUISITIONS: 'Material Requisitions',
   ORGANISATION: 'Organisation',
@@ -804,6 +805,255 @@ export const EVENTS = [
     summary: (c) =>
       `Workwise staff (${c.actor}) marked their work on RFQ ${c.entityLabel || c.entityId} as ${c.body?.status || 'updated'}`,
   }),
+  // ── Inventory & goods receipt (scaffolded in A4; one entry per mutating route) ──
+  // Scope comes from res.locals.activityDetail (set by the controller), then the
+  // actor: ENTITY_SCOPE_SQL cannot resolve call-off POs or inventory documents.
+  e({
+    method: 'PUT', path: '/inventory/po/:poId/deliveries', key: 'inventory_delivery_plan_saved',
+    category: CATEGORIES.RECEIPT, severity: 'notable',
+    entity: { type: 'PO', id: P('poId') }, scope: SCOPE.detail(),
+    summary: (c) => `${c.actor} saved the delivery plan for purchase order${c.entityLabel ? ` ${c.entityLabel}` : ''}`,
+  }),
+  e({
+    method: 'PATCH', path: '/inventory/po/:poId/deliveries/:deliveryId', key: 'inventory_delivery_date_changed',
+    category: CATEGORIES.RECEIPT, severity: 'routine',
+    entity: { type: 'PO', id: P('poId') }, scope: SCOPE.detail(),
+    summary: (c) => `${c.actor} changed a delivery date on purchase order${c.entityLabel ? ` ${c.entityLabel}` : ''}`,
+  }),
+  e({
+    method: 'POST', path: '/inventory/po/:poId/short-close', key: 'inventory_po_short_closed',
+    category: CATEGORIES.RECEIPT, severity: 'critical',
+    entity: { type: 'PO', id: P('poId') }, scope: SCOPE.detail(),
+    summary: (c) => `${c.actor} short-closed the undelivered quantity on purchase order${c.entityLabel ? ` ${c.entityLabel}` : ''}`,
+  }),
+  e({
+    method: 'POST', path: '/inventory/po/:poId/short-close/reopen', key: 'inventory_po_short_close_reopened',
+    category: CATEGORIES.RECEIPT, severity: 'critical',
+    entity: { type: 'PO', id: P('poId') }, scope: SCOPE.detail(),
+    summary: (c) => `${c.actor} reopened a short-closed delivery on purchase order${c.entityLabel ? ` ${c.entityLabel}` : ''}`,
+  }),
+  e({
+    method: 'POST', path: '/inventory/po/:poId/site-rep/revoke', key: 'inventory_site_rep_revoked',
+    category: CATEGORIES.RECEIPT, severity: 'notable',
+    entity: { type: 'PO', id: P('poId') }, scope: SCOPE.detail(),
+    summary: (c) => `${c.actor} revoked the site representative link for purchase order${c.entityLabel ? ` ${c.entityLabel}` : ''}`,
+  }),
+  e({
+    method: 'POST', path: '/inventory/grn', key: 'inventory_grn_created',
+    category: CATEGORIES.RECEIPT, severity: 'notable',
+    entity: { type: 'GRN', id: R() }, scope: SCOPE.detail(),
+    summary: (c) => `${c.actor} started a goods receipt note${c.entityLabel ? ` ${c.entityLabel}` : ''}`,
+  }),
+  e({
+    method: 'PUT', path: '/inventory/grn/:id', key: 'inventory_grn_updated',
+    category: CATEGORIES.RECEIPT, severity: 'routine',
+    entity: { type: 'GRN', id: P('id') }, scope: SCOPE.detail(),
+    summary: (c) => `${c.actor} edited a draft goods receipt note${c.entityLabel ? ` ${c.entityLabel}` : ''}`,
+  }),
+  e({
+    method: 'POST', path: '/inventory/grn/:id/post', key: 'inventory_grn_posted',
+    category: CATEGORIES.RECEIPT, severity: 'critical',
+    entity: { type: 'GRN', id: P('id') }, scope: SCOPE.detail(),
+    summary: (c) => `${c.actor} posted goods receipt note${c.entityLabel ? ` ${c.entityLabel}` : ''}`,
+  }),
+  e({
+    method: 'DELETE', path: '/inventory/grn/:id', key: 'inventory_grn_discarded',
+    category: CATEGORIES.RECEIPT, severity: 'routine',
+    entity: { type: 'GRN', id: P('id') }, scope: SCOPE.detail(),
+    summary: (c) => `${c.actor} discarded a draft goods receipt note${c.entityLabel ? ` ${c.entityLabel}` : ''}`,
+  }),
+  e({
+    method: 'POST', path: '/inventory/grn/:id/reverse', key: 'inventory_grn_reversed',
+    category: CATEGORIES.RECEIPT, severity: 'critical',
+    entity: { type: 'GRN', id: P('id') }, scope: SCOPE.detail(),
+    summary: (c) => `${c.actor} reversed goods receipt note${c.entityLabel ? ` ${c.entityLabel}` : ''}`,
+  }),
+  e({
+    method: 'POST', path: '/inventory/grn/:id/attachments', key: 'inventory_grn_attachment_added',
+    category: CATEGORIES.RECEIPT, severity: 'routine',
+    entity: { type: 'GRN', id: P('id') }, scope: SCOPE.detail(),
+    summary: (c) => `${c.actor} attached a document to goods receipt note${c.entityLabel ? ` ${c.entityLabel}` : ''}`,
+  }),
+  e({
+    method: 'DELETE', path: '/inventory/grn/:id/attachments/:attId', key: 'inventory_grn_attachment_removed',
+    category: CATEGORIES.RECEIPT, severity: 'routine',
+    entity: { type: 'GRN', id: P('id') }, scope: SCOPE.detail(),
+    summary: (c) => `${c.actor} removed an attachment from goods receipt note${c.entityLabel ? ` ${c.entityLabel}` : ''}`,
+  }),
+  e({
+    method: 'POST', path: '/inventory/rtv', key: 'inventory_rtv_created',
+    category: CATEGORIES.RECEIPT, severity: 'notable',
+    entity: { type: 'RTV', id: R() }, scope: SCOPE.detail(),
+    summary: (c) => `${c.actor} created a return to vendor${c.entityLabel ? ` ${c.entityLabel}` : ''}`,
+  }),
+  e({
+    method: 'POST', path: '/inventory/rtv/:id/dispatch', key: 'inventory_rtv_dispatched',
+    category: CATEGORIES.RECEIPT, severity: 'critical',
+    entity: { type: 'RTV', id: P('id') }, scope: SCOPE.detail(),
+    summary: (c) => `${c.actor} dispatched return to vendor${c.entityLabel ? ` ${c.entityLabel}` : ''}`,
+  }),
+  e({
+    method: 'POST', path: '/inventory/rtv/:id/close', key: 'inventory_rtv_closed',
+    category: CATEGORIES.RECEIPT, severity: 'notable',
+    entity: { type: 'RTV', id: P('id') }, scope: SCOPE.detail(),
+    summary: (c) => `${c.actor} closed return to vendor${c.entityLabel ? ` ${c.entityLabel}` : ''}`,
+  }),
+  e({
+    method: 'POST', path: '/inventory/rtv/:id/cancel', key: 'inventory_rtv_cancelled',
+    category: CATEGORIES.RECEIPT, severity: 'notable',
+    entity: { type: 'RTV', id: P('id') }, scope: SCOPE.detail(),
+    summary: (c) => `${c.actor} cancelled return to vendor${c.entityLabel ? ` ${c.entityLabel}` : ''}`,
+  }),
+  e({
+    method: 'POST', path: '/inventory/vendor/po/:poId/dispatches', key: 'inventory_dispatch_created',
+    category: CATEGORIES.RECEIPT, severity: 'notable',
+    entity: { type: 'PO', id: P('poId') }, scope: SCOPE.detail(),
+    summary: (c) => `${c.actor} dispatched goods against purchase order${c.entityLabel ? ` ${c.entityLabel}` : ''}`,
+  }),
+  e({
+    method: 'POST', path: '/inventory/vendor/po/:poId/dispatches/:id/cancel', key: 'inventory_dispatch_cancelled',
+    category: CATEGORIES.RECEIPT, severity: 'notable',
+    entity: { type: 'PO', id: P('poId') }, scope: SCOPE.detail(),
+    summary: (c) => `${c.actor} cancelled a dispatch on purchase order${c.entityLabel ? ` ${c.entityLabel}` : ''}`,
+  }),
+  e({
+    method: 'POST', path: '/inventory/token/grn', key: 'inventory_token_grn_created',
+    category: CATEGORIES.RECEIPT, severity: 'notable',
+    entity: { type: 'GRN', id: R() }, scope: SCOPE.detail(),
+    summary: (c) => `${c.actor} recorded a goods receipt through a site link${c.entityLabel ? ` ${c.entityLabel}` : ''}`,
+  }),
+  e({
+    method: 'POST', path: '/inventory/token/grn/:id/attachments', key: 'inventory_token_grn_attachment_added',
+    category: CATEGORIES.RECEIPT, severity: 'routine',
+    entity: { type: 'GRN', id: P('id') }, scope: SCOPE.detail(),
+    summary: (c) => `${c.actor} attached a document to a goods receipt through a site link${c.entityLabel ? ` ${c.entityLabel}` : ''}`,
+  }),
+  e({
+    method: 'POST', path: '/inventory/items', key: 'inventory_item_created',
+    category: CATEGORIES.INVENTORY, severity: 'notable',
+    entity: { type: 'INV_ITEM', id: R() }, scope: SCOPE.detail(),
+    summary: (c) => `${c.actor} created a stock item${c.entityLabel ? ` ${c.entityLabel}` : ''}`,
+  }),
+  e({
+    method: 'PUT', path: '/inventory/items/:id', key: 'inventory_item_updated',
+    category: CATEGORIES.INVENTORY, severity: 'routine',
+    entity: { type: 'INV_ITEM', id: P('id') }, scope: SCOPE.detail(),
+    summary: (c) => `${c.actor} edited a stock item${c.entityLabel ? ` ${c.entityLabel}` : ''}`,
+  }),
+  e({
+    method: 'POST', path: '/inventory/items/:id/variants', key: 'inventory_item_variant_mapped',
+    category: CATEGORIES.INVENTORY, severity: 'routine',
+    entity: { type: 'INV_ITEM', id: P('id') }, scope: SCOPE.detail(),
+    summary: (c) => `${c.actor} mapped a product variant to a stock item${c.entityLabel ? ` ${c.entityLabel}` : ''}`,
+  }),
+  e({
+    method: 'PUT', path: '/inventory/items/:id/uoms', key: 'inventory_item_uoms_saved',
+    category: CATEGORIES.INVENTORY, severity: 'routine',
+    entity: { type: 'INV_ITEM', id: P('id') }, scope: SCOPE.detail(),
+    summary: (c) => `${c.actor} saved unit conversions for a stock item${c.entityLabel ? ` ${c.entityLabel}` : ''}`,
+  }),
+  e({
+    method: 'POST', path: '/inventory/items/:id/barcodes', key: 'inventory_item_barcode_added',
+    category: CATEGORIES.INVENTORY, severity: 'routine',
+    entity: { type: 'INV_ITEM', id: P('id') }, scope: SCOPE.detail(),
+    summary: (c) => `${c.actor} added a barcode to a stock item${c.entityLabel ? ` ${c.entityLabel}` : ''}`,
+  }),
+  e({
+    method: 'DELETE', path: '/inventory/items/:id/barcodes/:barcodeId', key: 'inventory_item_barcode_removed',
+    category: CATEGORIES.INVENTORY, severity: 'routine',
+    entity: { type: 'INV_ITEM', id: P('id') }, scope: SCOPE.detail(),
+    summary: (c) => `${c.actor} removed a barcode from a stock item${c.entityLabel ? ` ${c.entityLabel}` : ''}`,
+  }),
+  e({
+    method: 'PUT', path: '/inventory/hotel-items/:hotelId/:invItemId', key: 'inventory_hotel_item_saved',
+    category: CATEGORIES.INVENTORY, severity: 'routine',
+    entity: { type: 'INV_ITEM', id: P('invItemId') }, scope: SCOPE.detail(),
+    summary: (c) => `${c.actor} set stock levels for an item${c.entityLabel ? ` ${c.entityLabel}` : ''}`,
+  }),
+  e({
+    method: 'PUT', path: '/inventory/settings/company', key: 'inventory_company_settings_saved',
+    category: CATEGORIES.INVENTORY, severity: 'critical',
+    entity: { type: 'COMPANY' }, scope: SCOPE.detail(),
+    summary: (c) => `${c.actor} changed company inventory settings${c.entityLabel ? ` ${c.entityLabel}` : ''}`,
+  }),
+  e({
+    method: 'PUT', path: '/inventory/settings/hotel/:hotelId', key: 'inventory_hotel_settings_saved',
+    category: CATEGORIES.INVENTORY, severity: 'notable',
+    entity: { type: 'HOTEL', id: P('hotelId') }, scope: SCOPE.detail(),
+    summary: (c) => `${c.actor} changed hotel inventory settings${c.entityLabel ? ` ${c.entityLabel}` : ''}`,
+  }),
+  e({
+    method: 'PUT', path: '/inventory/category-defaults', key: 'inventory_category_defaults_saved',
+    category: CATEGORIES.INVENTORY, severity: 'notable',
+    entity: { type: 'COMPANY' }, scope: SCOPE.detail(),
+    summary: (c) => `${c.actor} changed inventory category defaults${c.entityLabel ? ` ${c.entityLabel}` : ''}`,
+  }),
+  e({
+    method: 'POST', path: '/inventory/opening/:hotelId/post', key: 'inventory_opening_stock_posted',
+    category: CATEGORIES.INVENTORY, severity: 'critical',
+    entity: { type: 'HOTEL', id: P('hotelId') }, scope: SCOPE.detail(),
+    summary: (c) => `${c.actor} posted opening stock${c.entityLabel ? ` ${c.entityLabel}` : ''}`,
+  }),
+  e({
+    method: 'POST', path: '/inventory/out', key: 'inventory_stock_marked_out',
+    category: CATEGORIES.INVENTORY, severity: 'notable',
+    entity: { type: 'INV_OUT', id: R() }, scope: SCOPE.detail(),
+    summary: (c) => `${c.actor} marked stock out${c.entityLabel ? ` ${c.entityLabel}` : ''}`,
+  }),
+  e({
+    method: 'POST', path: '/inventory/adjustments', key: 'inventory_adjustment_created',
+    category: CATEGORIES.INVENTORY, severity: 'notable',
+    entity: { type: 'INV_ADJUSTMENT', id: R() }, scope: SCOPE.detail(),
+    summary: (c) => `${c.actor} recorded a stock adjustment${c.entityLabel ? ` ${c.entityLabel}` : ''}`,
+  }),
+  e({
+    method: 'POST', path: '/inventory/adjustments/:id/approve', key: 'inventory_adjustment_approved',
+    category: CATEGORIES.INVENTORY, severity: 'critical',
+    entity: { type: 'INV_ADJUSTMENT', id: P('id') }, scope: SCOPE.detail(),
+    summary: (c) => `${c.actor} approved a stock adjustment${c.entityLabel ? ` ${c.entityLabel}` : ''}`,
+  }),
+  e({
+    method: 'POST', path: '/inventory/adjustments/:id/reject', key: 'inventory_adjustment_rejected',
+    category: CATEGORIES.INVENTORY, severity: 'critical',
+    entity: { type: 'INV_ADJUSTMENT', id: P('id') }, scope: SCOPE.detail(),
+    summary: (c) => `${c.actor} rejected a stock adjustment${c.entityLabel ? ` ${c.entityLabel}` : ''}`,
+  }),
+  e({
+    method: 'POST', path: '/inventory/counts', key: 'inventory_count_started',
+    category: CATEGORIES.INVENTORY, severity: 'notable',
+    entity: { type: 'INV_COUNT', id: R() }, scope: SCOPE.detail(),
+    summary: (c) => `${c.actor} started a stock count${c.entityLabel ? ` ${c.entityLabel}` : ''}`,
+  }),
+  e({
+    method: 'PUT', path: '/inventory/counts/:id/lines', key: 'inventory_count_lines_saved',
+    category: CATEGORIES.INVENTORY, severity: 'routine',
+    entity: { type: 'INV_COUNT', id: P('id') }, scope: SCOPE.detail(),
+    summary: (c) => `${c.actor} saved counted quantities${c.entityLabel ? ` ${c.entityLabel}` : ''}`,
+  }),
+  e({
+    method: 'POST', path: '/inventory/counts/:id/submit', key: 'inventory_count_submitted',
+    category: CATEGORIES.INVENTORY, severity: 'notable',
+    entity: { type: 'INV_COUNT', id: P('id') }, scope: SCOPE.detail(),
+    summary: (c) => `${c.actor} submitted a stock count${c.entityLabel ? ` ${c.entityLabel}` : ''}`,
+  }),
+  e({
+    method: 'POST', path: '/inventory/counts/:id/approve', key: 'inventory_count_approved',
+    category: CATEGORIES.INVENTORY, severity: 'critical',
+    entity: { type: 'INV_COUNT', id: P('id') }, scope: SCOPE.detail(),
+    summary: (c) => `${c.actor} approved a stock count${c.entityLabel ? ` ${c.entityLabel}` : ''}`,
+  }),
+  e({
+    method: 'POST', path: '/inventory/counts/:id/cancel', key: 'inventory_count_cancelled',
+    category: CATEGORIES.INVENTORY, severity: 'notable',
+    entity: { type: 'INV_COUNT', id: P('id') }, scope: SCOPE.detail(),
+    summary: (c) => `${c.actor} cancelled a stock count${c.entityLabel ? ` ${c.entityLabel}` : ''}`,
+  }),
+  e({
+    method: 'POST', path: '/inventory/reorder/mr-draft', key: 'inventory_reorder_mr_drafted',
+    category: CATEGORIES.INVENTORY, severity: 'notable',
+    entity: { type: 'MR', id: R('data.mrId') }, scope: SCOPE.detail(),
+    summary: (c) => `${c.actor} drafted a material requisition from reorder suggestions${c.entityLabel ? ` ${c.entityLabel}` : ''}`,
+  }),
 ];
 
 const norm = (m, p) => `${m.toUpperCase()} ${p}`;
@@ -825,6 +1075,10 @@ export const NOT_AN_EVENT = [
   'POST /rbac/me/permissions/bulk',
   'POST /users/get-dashboard-data',
   'POST /users/dashboard-search-vendor',
+  // Inventory: file generation and previews (nothing is changed).
+  'POST /inventory/labels/items',
+  'POST /inventory/labels/grn/:grnId',
+  'POST /inventory/opening/:hotelId/preview',
 
   // Signing in, registering and recovering an account. Sign-ins are already in
   // the trail from tbl_login_log; the rest happen before there is an account

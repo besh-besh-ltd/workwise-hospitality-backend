@@ -24,6 +24,7 @@ import UnitsRoutes from './units/unitsRoutes.js';
 import ReportsRoutes from './reports/reportsRoutes.js';
 import ActivityRoutes from './activity/activityRoutes.js';
 import VendorNetworkRoutes from './vendorNetwork/vendorNetworkRoutes.js';
+import InventoryRoutes from './inventory/index.js';
 
 const v1 = Router();
 
@@ -50,5 +51,6 @@ v1.use('/units', UnitsRoutes);
 v1.use('/reports', ReportsRoutes);
 v1.use('/activity', ActivityRoutes);
 v1.use('/vendor-network', VendorNetworkRoutes);
+v1.use('/inventory', InventoryRoutes);
 
 export default v1;
