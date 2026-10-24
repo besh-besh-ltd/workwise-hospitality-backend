@@ -65,7 +65,7 @@ import { deleteSchedule } from '../../helper/createSchedule.js';
 import { scheduleRfqPublish } from '../../helper/cronManager.js';
 import { notifyDraftCreated } from '../../services/po/poInitiateNotifier.js';
 import { draftPO, buildAuthoritativePOPayload } from '../po/purchaseOrderController.js';
-import { autoInitiateRFQPOs, assertRfqPoListingAccess, PoAccessError } from '../../models/purchaseOrderModel.js';
+import { autoInitiateRFQPOs, assertRfqPoListingAccess, PoAccessError, assertDraftMergeTarget } from '../../models/purchaseOrderModel.js';
 import { sendApprovalNotification } from '../po/purchaseOrderEmails.js';
 import UsersController from '../users/usersController.js';
 import { summaries } from '../../util/constants.js';
@@ -11883,6 +11883,18 @@ const rfqController = {
     const selectedRoute = route_type || 'PO';
 
     try {
+      // Tenant gate, before anything is read or written: the caller must be
+      // able to read this RFQ. Without it, any buyer could award (and draft a
+      // PO on) another company's RFQ by its id. The same gate as
+      // getQuoteComparison; a vendor never reaches this route (acl).
+      if (Number(req.user.user_type) !== 3) {
+        try { await assertCanReadParentRfq(req.user.id, rfq_id); }
+        catch (e) {
+          if (e instanceof AuthorizationError) return sendScopeError(res, e);
+          throw e;
+        }
+      }
+
       // Check for active negotiation round blocking finalization.
       //
       // COVERAGE must come from coversProductSql, never the rfq_product_id
@@ -11931,6 +11943,22 @@ const rfqController = {
             message: 'An active negotiation round is ongoing for this product. Vendor finalization is restricted until the round ends.'
           });
         }
+      }
+
+      // A PO the client chose to merge this line into must be this RFQ's
+      // draft for the awarded vendor (the vendor the PO line is written for).
+      // Refused here (400 PO_MERGE_TARGET_INVALID, via the PoDecisionError
+      // branch below), before anything is awarded or parked in an approval;
+      // draftPurchaseOrder re-checks it under lock. The award payload carries
+      // the checked int from here on, never the raw body value.
+      let awardBody = req.body;
+      if (req.body.existing_po_id) {
+        const mergeTargetId = await assertDraftMergeTarget(db, {
+          poId: req.body.existing_po_id,
+          rfqId: rfq_id,
+          vendorId: req.body.product_info?.finalized_vendor_id ?? vendor_id,
+        });
+        awardBody = { ...req.body, existing_po_id: mergeTargetId };
       }
 
       // ---------------------------------------------------------------------
@@ -12224,7 +12252,7 @@ const rfqController = {
                         quote_id,
                         quote_item_id,
                         finalization_comment: trimmedComment || null,
-                        po_payload: { ...req.body, quote_id: quote_item_id },
+                        po_payload: { ...awardBody, quote_id: quote_item_id },
                         po_user: { id: req.user.id, company_id: req.user.company_id }
                       },
                       txContext: t
@@ -12252,7 +12280,7 @@ const rfqController = {
                       });
                     } else if (approvalResult && approvalResult.autoApproved) {
                       // Auto-approved (no approvers or creator-only) - create PO immediately
-                      const authPayload = await buildAuthoritativePOPayload({...req.body, quote_id: quote_item_id}, t);
+                      const authPayload = await buildAuthoritativePOPayload({...awardBody, quote_id: quote_item_id}, t);
                       result = await draftPO(authPayload, req.user, t);
                       approvalTriggered = true;
                     }
@@ -12273,7 +12301,7 @@ const rfqController = {
 
             // Fallback: if no approval was triggered, create PO directly
             if (!approvalTriggered) {
-              const authPayload = await buildAuthoritativePOPayload({...req.body, quote_id: quote_item_id}, t);
+              const authPayload = await buildAuthoritativePOPayload({...awardBody, quote_id: quote_item_id}, t);
               result = await draftPO(authPayload, req.user, t);
             }
           }

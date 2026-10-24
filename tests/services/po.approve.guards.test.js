@@ -31,6 +31,8 @@ jest.unstable_mockModule("nodemailer", () => {
 const { db, closeDb } = await import("../setup/db.js");
 const { makePoRejectWorld, W } = await import("../helpers/poRejectWorld.js");
 const { drainPoRejectedNotifications } = await import("../../app/services/po/poRejectionNotifier.js");
+// Accepting dates the PO's delivery plan and rewrites its document after the response (inventory B2).
+const { planFollowUpsSettled } = await import("../../app/services/inventory/planService.js");
 
 const world = makePoRejectWorld(db);
 const SENTINEL_PDF = "https://bucket.s3.ap-south-1.amazonaws.com/purchase-order/po-SENTINEL-1.pdf";
@@ -38,6 +40,7 @@ const SENTINEL_PDF = "https://bucket.s3.ap-south-1.amazonaws.com/purchase-order/
 beforeAll(() => world.setup());
 afterEach(async () => {
   await drainPoRejectedNotifications();
+  await planFollowUpsSettled();
   await world.cleanup();
   sent.length = 0;
 });
@@ -151,6 +154,8 @@ describe("an approval on an APPROVED approval", () => {
     const accepted = await (await world.client(W.VENDOR_A)).post(`/api/v1/po/accept/${a.poId}`).send({});
     expect(accepted.status).toBe(200);
     expect((await po(a.poId)).status).toBe("approved");
+    // The accept's own document rewrite (its delivery plan just got dated) lands first.
+    await planFollowUpsSettled();
     await db.none(`UPDATE tbl_rfq_purchase_order SET po_pdf_url = $1 WHERE id = $2`, [SENTINEL_PDF, a.poId]);
     await settle();
     const { po_number } = await po(a.poId);

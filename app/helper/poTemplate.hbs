@@ -159,6 +159,18 @@
       max-width: 100%;
       height: auto;
     }
+    .po-qr {
+      text-align: right;
+      margin-top: 4px;
+    }
+    .po-qr svg {
+      width: 80px;
+      height: 80px;
+    }
+    .delivery-plan td,
+    .delivery-plan th {
+      border: 1px solid #000;
+    }
   </style>
 </head>
 
@@ -231,6 +243,12 @@
             <td>{{created_at}}</td>
           </tr>
         </table>
+        {{#if poQrSvg}}
+        <div class="po-qr">
+          {{{poQrSvg}}}
+          <div class="small">Scan to receive this PO</div>
+        </div>
+        {{/if}}
       </td>
     </tr>
   </table>
@@ -411,6 +429,39 @@
   </table>
 
   <br/>
+
+  <!-- DELIVERY PLAN: where and when each quantity is to be delivered (hotel × phase) -->
+  {{#if deliveryPlan.length}}
+  <div class="section-title">DELIVERY PLAN</div>
+  <table class="delivery-plan">
+    <thead>
+      <tr class="bold">
+        <th class="left" style="width: 26%;">Hotel</th>
+        <th class="center" style="width: 8%;">Phase</th>
+        <th class="left" style="width: 14%;">Due</th>
+        <th class="left" style="width: 34%;">Item</th>
+        <th class="right" style="width: 18%;">Quantity</th>
+      </tr>
+    </thead>
+    <tbody>
+      {{#each deliveryPlan}}
+        {{#each lines}}
+        <tr>
+          {{#if @first}}
+          <td rowspan="{{../lineCount}}">{{../hotelName}}{{#if ../remarks}}<br/><span class="small">{{../remarks}}</span>{{/if}}</td>
+          <td class="center" rowspan="{{../lineCount}}">{{../phaseNo}}</td>
+          <td rowspan="{{../lineCount}}">{{../dueDateDisplay}}</td>
+          {{/if}}
+          <td>{{productName}}</td>
+          <td class="right">{{plannedQty}} {{unit}}</td>
+        </tr>
+        {{/each}}
+      {{/each}}
+    </tbody>
+  </table>
+
+  <br/>
+  {{/if}}
 
   <!-- PAYMENT TERMS - Dedicated Section Before Terms & Conditions -->
   {{#if paymentTermsList.length}}

@@ -51,8 +51,11 @@ export const handleNegotiationQuotePostApproval = async (approval_instance_id, a
       // Path A: PO payload stored by rfqController.finalize
       let txResult = null;
       await db.tx(async (t) => {
+        // The approval is already recorded and must still get its PO: a merge
+        // target parked at finalize that has since left draft is set aside
+        // under the PO lock (staleTargetFallback), not refused.
         const authPayload = await buildAuthoritativePOPayload(metadata.po_payload, t);
-        txResult = await draftPO(authPayload, metadata.po_user, t);
+        txResult = await draftPO(authPayload, metadata.po_user, t, { staleTargetFallback: true });
 
         const entityType = metadata.is_tender === 1 ? 'TENDER' : 'RFQ';
         await recordLifecycleEvent({

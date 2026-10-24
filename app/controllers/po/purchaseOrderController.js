@@ -26,6 +26,7 @@ import { poFieldsFor } from "../../services/po/buyerOnlyPoFields.js";
 import { normalizeOwnS3Url } from "../../helper/s3Urls.js";
 import { InventoryError, sendInventoryError } from "../../services/inventory/errors.js";
 import { redactForReceiveToken } from "../../helper/receiveTokenView.js";
+import { fillDefaultDueDates, acceptanceDatesFollowUp, queuePlanChangeFollowUp } from "../../services/inventory/planService.js";
 
 // Tiny tagged-error class for controllers that need to map a thrown
 // failure mode to a specific HTTP status code (instead of the historic
@@ -364,7 +365,11 @@ export const buildAuthoritativePOPayload = async (poInfo, txn) => {
   }
 };
 
-export const draftPO = async (poInfo, user, txn) => {
+/**
+ * @param {object} [opts] passed to draftPurchaseOrder; `staleTargetFallback`
+ *   for an award whose approval has already committed.
+ */
+export const draftPO = async (poInfo, user, txn, opts = {}) => {
   try {
     const { rfq_id, project_id, product_info, quote_item_id, existing_po_id, selected_hierarchy } = poInfo;
     const { id: initiated_by, company_id } = user;
@@ -427,7 +432,8 @@ export const draftPO = async (poInfo, user, txn) => {
       selected_hierarchy,
       txn,
       globalCharges,
-      line_total
+      line_total,
+      opts
     );
 
     return result;
@@ -1307,6 +1313,7 @@ export const acceptPO = async (req, res) => {
     const { po_id } = req.params;
     const vendorUserId = req.user.id;
 
+    let planDated = 0;
     const result = await db.tx(async t => {
       // F-PO-IDEM-001: split the lookup into its three failure modes so the
       // caller can distinguish (404 not-found / 403 wrong-vendor / 409
@@ -1336,6 +1343,15 @@ export const acceptPO = async (req, res) => {
         SET status = 'approved', vendor_action_at = NOW(), updated_at = NOW()
         WHERE id = $1
       `, [po_id]);
+
+      // Delivery plan (inventory): an untouched default plan gets its due
+      // date now that the delivery period runs from today. In a savepoint, so
+      // a plan problem can never cost the vendor their acceptance.
+      try {
+        planDated = await t.tx((sp) => fillDefaultDueDates(sp, po.id));
+      } catch (planErr) {
+        logError(`[po ${po.id}] delivery plan dates at acceptance failed`, planErr);
+      }
 
       await recordLifecycleEvent({
         entity_type: 'PO',
@@ -1367,6 +1383,10 @@ export const acceptPO = async (req, res) => {
     sendPOAcceptedNotificationToTeam(result, rfqDetails).catch(err => {
       logError('Failed to send PO accepted notification to team', err);
     });
+
+    // The plan just got its dates: the PO document prints them. Rewritten in
+    // the background (never rejects); no plan notice, the vendor just accepted.
+    if (planDated > 0) queuePlanChangeFollowUp(acceptanceDatesFollowUp(result, vendorUserId));
 
     return res.json({
       status: 1,
@@ -1620,6 +1640,8 @@ export const markDispatched = async (req, res) => {
       data: result
     });
   } catch (error) {
+    // Refusals from the dispatch service (PO not accepted, closed, received in full).
+    if (error?.name === 'InventoryError') return sendInventoryError(res, error);
     logError('markDispatched failed', error);
     return res.status(500).json({
       status: 0,

@@ -7,6 +7,7 @@ import {
   RecoveryError, getVendorUndoState, withdrawRejectionByVendor, getReinstateState, reinstateByBuyer,
 } from '../../services/po/poRejectionRecovery.js';
 import { notifyRejectionWithdrawn, notifyPoSentBackToVendor } from '../../services/po/poRejectionRecoveryNotifier.js';
+import { acceptanceDatesFollowUp, queuePlanChangeFollowUp } from '../../services/inventory/planService.js';
 
 function sendError(res, err) {
   if (err instanceof RecoveryError) {
@@ -27,9 +28,12 @@ export const getRejectionUndoState = async (req, res) => {
 
 export const withdrawRejection = async (req, res) => {
   try {
-    const { po, callOff } = await withdrawRejectionByVendor(req.params.po_id, req.user.id);
+    const { po, callOff, planDated } = await withdrawRejectionByVendor(req.params.po_id, req.user.id);
     // Post-commit, never throws.
     await notifyRejectionWithdrawn({ po, vendorUserId: req.user.id, callOff });
+    // The delivery plan just got its dates: rewrite the PO document in the
+    // background (never rejects), as a normal accept does.
+    if (planDated > 0) queuePlanChangeFollowUp(acceptanceDatesFollowUp(po, req.user.id));
     return res.json({ status: 1, message: 'Rejection withdrawn. The purchase order is accepted.' });
   } catch (err) {
     return sendError(res, err);
