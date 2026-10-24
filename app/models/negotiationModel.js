@@ -3703,9 +3703,14 @@ const negotiationModel = {
   },
 
   /**
-   * Get quotes by IDs with vendor details
+   * Negotiation-round quotes by id, with vendor details, limited to the rounds
+   * of THIS RFQ and the quotes for THIS rfq_product. The ids come from the
+   * request body (submit-for-approval) and the rows become the award (vendor,
+   * price), so an id from another RFQ, another company's negotiation or
+   * another product is simply not returned: the caller compares the count and
+   * refuses. (Until this was scoped, any round quote id was accepted.)
    */
-  getQuotesByIds: async (quoteIds) => {
+  getQuotesByIds: async (quoteIds, rfqId, rfqProductId) => {
     if (!quoteIds || quoteIds.length === 0) {
       return [];
     }
@@ -3723,8 +3728,11 @@ const negotiationModel = {
        JOIN tbl_negotiation_rounds nr ON nr.id = nrq.negotiation_round_id
        LEFT JOIN tbl_users u ON u.id = nrq.vendor_id
        LEFT JOIN tbl_company c ON c.id = u.company_id
-       WHERE nrq.id = ANY($1)`,
-      [quoteIds]
+       WHERE nrq.id = ANY($1)
+         AND nr.source_type = 'RFQ'
+         AND nr.rfq_id = $2
+         AND nrq.rfq_product_id = $3`,
+      [quoteIds, rfqId, rfqProductId]
     );
   },
 

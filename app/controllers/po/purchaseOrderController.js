@@ -27,6 +27,7 @@ import { normalizeOwnS3Url } from "../../helper/s3Urls.js";
 import { InventoryError, sendInventoryError } from "../../services/inventory/errors.js";
 import { redactForReceiveToken } from "../../helper/receiveTokenView.js";
 import { fillDefaultDueDates, acceptanceDatesFollowUp, queuePlanChangeFollowUp } from "../../services/inventory/planService.js";
+import { bindPoPayload } from "../../services/po/awardQuoteBinding.js";
 
 // Tiny tagged-error class for controllers that need to map a thrown
 // failure mode to a specific HTTP status code (instead of the historic
@@ -287,6 +288,11 @@ export const updatePO = async (req, res) => {
 /**
  * Replaces product_info.charges_meta with authoritative values from tbl_quote_items.
  * Prevents frontend normalization or stale data from corrupting PO charges.
+ *
+ * The quote line is bound to the payload's RFQ, product and vendor first
+ * (bindPoPayload) and a refusal propagates: the read below copies that line's
+ * pricing into the PO, so it must never run for another RFQ's or another
+ * vendor's line.
  */
 export const buildAuthoritativePOPayload = async (poInfo, txn) => {
   const dbCtx = txn || db;
@@ -295,6 +301,8 @@ export const buildAuthoritativePOPayload = async (poInfo, txn) => {
   if (!quoteItemId || !poInfo.product_info) {
     return poInfo;
   }
+
+  await bindPoPayload(dbCtx, poInfo);
 
   try {
     const dbRow = await dbCtx.oneOrNone(
@@ -377,6 +385,12 @@ export const draftPO = async (poInfo, user, txn, opts = {}) => {
     if (!rfq_id || !product_info || !product_info.rfq_product_id) {
       throw new Error('Missing required PO fields.');
     }
+
+    // Every PO line is drafted from a quote line bound to this RFQ, product and
+    // vendor, whoever the caller is (finalize, an approval replaying a parked
+    // payload, the negotiation award). The global charges read below and the
+    // line written by draftPurchaseOrder both key on it.
+    await bindPoPayload(txn || db, poInfo);
 
     // Server-authoritative recompute: ignore the client's total_value and
     // derive it from the engine using the charges_meta that will actually

@@ -100,6 +100,7 @@ import { NetworkHttpError } from '../../services/vendorNetwork/guards.js';
 import { poFieldsFor, isVendorOrTokenViewer } from '../../services/po/buyerOnlyPoFields.js';
 import { closeOpenHoldTx, assertProductNotOnHeldPo } from '../../services/po/poHold.js';
 import { PoDecisionError } from '../../services/po/poDecisionError.js';
+import { bindFinalizeAward } from '../../services/po/awardQuoteBinding.js';
 import { quoteInSentence } from '../../helper/quoteInSentence.js';
 
 /** A Vendor Networks quote-gate refusal as its HTTP answer body. */
@@ -11944,6 +11945,17 @@ const rfqController = {
           });
         }
       }
+
+      // The ids the award prices from must be THIS RFQ's, before anything is
+      // written: the quote line (and its quote) on this RFQ, submitted by the
+      // awarded vendor, for the product being awarded; product_info naming
+      // that product and vendor. The gate above covers rfq_id only, and the
+      // PO line copies the quote line's pricing, so an unbound id would read
+      // another tenant's prices onto this PO. 404 AWARD_QUOTE_NOT_FOUND for an
+      // id that is not this RFQ's, 400 AWARD_QUOTE_MISMATCH otherwise, via the
+      // PoDecisionError branch below. buildAuthoritativePOPayload and draftPO
+      // bind again on every path that drafts a PO.
+      await bindFinalizeAward(db, { body: req.body, rfqProductId: rfqProductForNego?.id ?? null });
 
       // A PO the client chose to merge this line into must be this RFQ's
       // draft for the awarded vendor (the vendor the PO line is written for).

@@ -144,7 +144,7 @@ async function quotedProduct(rfq, vendor = VENDOR, { variant = 0 } = {}) {
      VALUES ($1, $2, $3, $4, 100, 300, 0, 18, 0, $5, 'q', '7', '3', 'percentage', '[]') RETURNING id`,
     [rfq.rfqId, rfq.rfqNo, q.id, VARIANT, variant]
   );
-  return { rfqProductId: Number(rp.id), quoteItemId: Number(qi.id), vendor };
+  return { rfqProductId: Number(rp.id), quoteId: Number(q.id), quoteItemId: Number(qi.id), vendor };
 }
 
 /**
@@ -192,7 +192,7 @@ const award = (rfq, line, existingPoId, opts) => db.tx((t) => draftPurchaseOrder
 /** The finalize request body for `line` of `rfq`. */
 const finalizeBody = (rfq, line, extra = {}) => ({
   rfq_id: rfq.rfqId, rfq_no: rfq.rfqNo, product_variant_id: VARIANT, variant: 0,
-  vendor_id: VENDOR, quote_id: line.quoteItemId, quote_item_id: line.quoteItemId,
+  vendor_id: VENDOR, quote_id: line.quoteId, quote_item_id: line.quoteItemId,
   route_type: "PO", comment: "awarding after evaluation", project_id: null,
   product_info: productInfo(line), ...extra,
 });

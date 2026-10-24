@@ -6,6 +6,8 @@ import {
 import { logError } from '../helper/common.js';
 import { dispatch as dispatchNotification } from './notificationService.js';
 import { approvalActionUrl, entityLabel, buyerHome } from './notificationLinks.js';
+import db from '../config/dbConn.js';
+import { bindParkedAward } from './po/awardQuoteBinding.js';
 
 /**
  * Approval Action Service
@@ -149,6 +151,16 @@ export async function executeApprovalAction(args) {
     const action = String(args.action || '').toUpperCase();
     if (action === 'APPROVE') return executePoApproval(args, instance);
     if (action === 'REJECT') return executePoRejection(args, instance);
+  }
+
+  // 0. A NEGOTIATION_QUOTE approve that carries a parked finalize payload: the
+  // payload's quote line must bind to its RFQ, vendor and this instance's
+  // product before the approval is recorded. negotiationQuotePostApproval turns
+  // it into a PO line after the commit, and a refusal there would leave the
+  // instance APPROVED with no PO. Throws PoDecisionError (404/400), which the
+  // action route answers with its own status and code.
+  if (instance?.entity_type === 'NEGOTIATION_QUOTE' && String(args.action || '').toUpperCase() === 'APPROVE') {
+    await bindParkedAward(db, instance);
   }
 
   // 1. Run the underlying transactional model action (status updates only).

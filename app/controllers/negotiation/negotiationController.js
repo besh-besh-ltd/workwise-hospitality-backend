@@ -47,6 +47,7 @@ const formatRoundDeadlineIst = (endDate) => {
 import { draftPO, buildAuthoritativePOPayload } from '../po/purchaseOrderController.js';
 import { notifyDraftCreated } from '../../services/po/poInitiateNotifier.js';
 import { PoDecisionError } from '../../services/po/poDecisionError.js';
+import { bindParkedAward } from '../../services/po/awardQuoteBinding.js';
 import { buildDraftedPos } from '../../models/po/poInitiateGuide.js';
 import { initiatePurchaseOrder, assertDraftMergeTarget } from '../../models/purchaseOrderModel.js';
 import {
@@ -136,12 +137,18 @@ const formatErrorResponse = (res, error) => {
 const NOT_AN_APPROVER_MESSAGE = 'User is not an approver for this step';
 
 /**
- * Is `userId` an approver on the CURRENT step of this PENDING instance, still
- * to act or retrying the approve they already gave? The membership test
+ * Is `userId` an approver on the CURRENT step of this PENDING instance, either
+ * still to act or having already approved it? The membership test
  * submitApprovalAction makes under its lock (and getApprovalInstanceDetails'
  * can_user_approve), read-only, so a handler can refuse a non-approver before
  * it answers anything about the instance's RFQ or its POs. A REMOVED or
  * otherwise inactive approver row does not count.
+ *
+ * An approver who already approved is let through as a member of the
+ * instance, but a second approve is NOT a silent success:
+ * submitApprovalAction's idempotency branch compares the stored row status
+ * ('APPROVED') with the action ('APPROVE'), never matches, and throws "User
+ * has already acted on this step with status: APPROVED".
  */
 const isApproverOnCurrentStep = async (instanceId, userId) => {
   const row = await db.oneOrNone(
@@ -2746,7 +2753,9 @@ const NegotiationController = {
         }
       } else {
         // 5b. For negotiation round quotes (from tbl_negotiation_round_quotes)
-        quotes = await negotiationModel.getQuotesByIds(quote_ids);
+        // Scoped to this RFQ's rounds and this product: a round quote from
+        // anywhere else is not returned and the count check below refuses it.
+        quotes = await negotiationModel.getQuotesByIds(quote_ids, rfq_id, rfq_product_id);
 
         if (quotes.length !== quote_ids.length) {
           return res.status(400).json({
@@ -3132,6 +3141,14 @@ const NegotiationController = {
           }
         }
       }
+
+      // 1b'. A parked finalize payload must still bind to its RFQ: the quote
+      // line on that RFQ, by the vendor the PO is for, for this instance's
+      // product. finalize binds it before parking, but a payload parked before
+      // that check existed was never bound, and Path A turns it into a PO line
+      // priced from that quote line. Refused here, before the approval is
+      // recorded (draftPO binds again, but only after it has committed).
+      await bindParkedAward(db, { entity_id: rfq_product_id, metadata: guardMeta });
 
       // 1c. A PO the approver chose to merge the award into must be this RFQ's
       // draft for the awarded vendor. Checked BEFORE the approval action, for
