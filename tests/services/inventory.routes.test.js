@@ -1,7 +1,8 @@
 /**
- * Inventory scaffolding: every API-contract route is mounted, authenticated and
- * (until its owning track lands) answers 501. Owners of later tasks replace the
- * stub handlers; the auth shape asserted here must survive that.
+ * Inventory route shape: every API-contract route is mounted, authenticated and
+ * guarded by user type. Handlers answer whatever their domain says for id 1
+ * (404, 400, 403 ...) but never a crash; an unimplemented stub answers 501
+ * 'not implemented' until its owning track lands.
  */
 import { httpClient } from '../helpers/http.js';
 import { IDS } from '../fixtures/ids.js';
@@ -122,6 +123,19 @@ afterAll(async () => {
 
 const call = (client, [method, path]) => client[method](`${BASE}${path}`);
 
+// Express's own 404 for an unmounted path is HTML; every inventory handler
+// answers JSON, including its own 404s.
+const isUnmounted = (res) => res.status === 404 && !/json/.test(res.type);
+const isStub = (res) => res.status === 501 && res.body?.message === 'not implemented';
+
+const outcome = (route, res) => ({
+  route: route.join(' '),
+  mounted: !isUnmounted(res),
+  authed: res.status !== 401,
+  noCrash: res.status < 500 || isStub(res),
+});
+const reached = (route) => ({ route: route.join(' '), mounted: true, authed: true, noCrash: true });
+
 describe('inventory route scaffolding', () => {
   it('every contract route is mounted and authenticated', async () => {
     const anon = await httpClient(null);
@@ -133,8 +147,7 @@ describe('inventory route scaffolding', () => {
     }
     for (const route of BUYER_ROUTES) {
       const res = await call(buyer, route);
-      expect([route.join(' '), res.status]).toEqual([route.join(' '), 501]);
-      expect(res.body).toEqual({ status: 0, message: 'not implemented' });
+      expect(outcome(route, res)).toEqual(reached(route));
     }
   });
 
@@ -146,11 +159,12 @@ describe('inventory route scaffolding', () => {
     }
   });
 
-  it('vendor routes reach the stub for a vendor, and buyer routes reject vendors', async () => {
+  it('vendor routes reach their handler for a vendor, and buyer routes reject vendors', async () => {
     const vendor = await httpClient(VENDOR);
     for (const route of VENDOR_ROUTES) {
       const res = await call(vendor, route);
-      expect([route.join(' '), res.status]).toEqual([route.join(' '), 501]);
+      expect(outcome(route, res)).toEqual(reached(route));
+      expect([route.join(' '), res.status]).not.toEqual([route.join(' '), 403]);
     }
     for (const route of [BUYER_ROUTES[0], ['get', '/stock'], ['post', '/grn']]) {
       const res = await call(vendor, route);
@@ -158,14 +172,17 @@ describe('inventory route scaffolding', () => {
     }
   });
 
-  it('token routes get 401 without X-Receive-Token and 501 with it', async () => {
+  it('token routes get 401 without X-Receive-Token; a bogus token never reaches a handler', async () => {
     const anon = await httpClient(null);
     for (const route of TOKEN_ROUTES) {
       const res = await call(anon, route);
       expect([route.join(' '), res.status]).toEqual([route.join(' '), 401]);
       expect(res.body).toEqual({ status: 0, message: 'Invalid or expired link' });
       const withHeader = await call(anon, route).set('X-Receive-Token', 'abc');
-      expect([route.join(' '), withHeader.status]).toEqual([route.join(' '), 501]);
+      expect([route.join(' '), [401, 501].includes(withHeader.status)]).toEqual([
+        route.join(' '),
+        true,
+      ]);
     }
   });
 
