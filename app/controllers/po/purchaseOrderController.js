@@ -23,6 +23,7 @@ import { deriveScope } from "./poDashboardController.js";
 import { handleCallOffRejection, notifyCallOffRejected } from "../../services/callOffPoService.js";
 import { deferJson, isDeferred, sendDeferred } from "../../helper/deferredResponse.js";
 import { poFieldsFor } from "../../services/po/buyerOnlyPoFields.js";
+import { sendInventoryError } from "../../services/inventory/errors.js";
 
 // Tiny tagged-error class for controllers that need to map a thrown
 // failure mode to a specific HTTP status code (instead of the historic
@@ -1569,13 +1570,15 @@ export const markGRN = async (req, res) => {
     // is bound to exactly this po_id).
     if (!(await guardPo(req, res, po_id))) return;
 
-    const result = await handleMarkGRN(po_id, grn_document_url, id, remarks);
+    const result = await handleMarkGRN(po_id, grn_document_url, id, remarks, req.user);
     return res.json({
       status: 1,
       message: 'GRN has been marked for this PO.',
       data: result
     });
   } catch (error) {
+    // The shim's refusals (409 USE_RECEIVE, nothing open, no grn.create, …).
+    if (error?.name === 'InventoryError') return sendInventoryError(res, error);
     logError('markGRN failed', error);
     return res.status(500).json({
       status: 0,
