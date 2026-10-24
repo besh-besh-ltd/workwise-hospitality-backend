@@ -110,7 +110,7 @@ async function makeCallOffPo(t, { hotel = A2, qty = 6, committed = 1000, hotelSh
   );
   return {
     poId: Number(po.id), lineId: Number(pop.id), contractLineId: Number(line.id),
-    hotelRowId: Number(hotelRow.id), mrId: Number(mr.id),
+    hotelRowId: Number(hotelRow.id), mrId: Number(mr.id), arcId: Number(arc.id),
   };
 }
 
@@ -304,7 +304,7 @@ describe("short-close", () => {
 });
 
 describe("reopen", () => {
-  it("reopen re-consumes contract; blocked when contract exhausted", async () => {
+  it("reopen re-consumes contract; contract line is a hard cap, the hotel share is soft (as at release)", async () => {
     await withTx(async (t) => {
       const po = await makeCallOffPo(t, { hotel: A2, qty: 6, committed: 100, hotelShare: 40 });
       await postReceiptGrn(t, { poId: po.poId, hotelId: A2, lines: [{ poLineId: po.lineId, accepted: 4 }] });
@@ -344,14 +344,45 @@ describe("reopen", () => {
       expect(await logOf(t, po.poId)).toEqual(before);
       expect(await consumed(t, po.contractLineId)).toEqual({ line: 100, hotels: { [A1]: 50, [A2]: 4 } });
 
-      // Room on the contract but the ordering hotel's share is used up: also refused.
+      // Room on the contract but the ordering hotel's share is used up: allowed,
+      // exactly as at release: the hotel goes past its share and head office
+      // gets the over-share event.
       await t.none(`UPDATE tbl_arc_contract_line SET consumed_qty = 4 WHERE id = $1`, [po.contractLineId]);
       await t.none(`UPDATE tbl_arc_contract_line_hotel SET consumed_qty = committed_qty WHERE id = $1`, [po.hotelRowId]);
-      await expectInvError(
-        t.tx((sp) => reopenShortClose(sp, OWNER, po.poId, { deliveryLineIds: [dlId], remarks: "retry" })),
-        "CONFLICT",
-        { hotelId: A2 }
+      const over = await reopenShortClose(t, OWNER, po.poId, { deliveryLineIds: [dlId], remarks: "retry" });
+      expect(over.reopened).toEqual([{ deliveryLineId: dlId, poLineId: po.lineId, qty: 2 }]);
+      expect(await consumed(t, po.contractLineId)).toEqual({ line: 6, hotels: { [A1]: 50, [A2]: 42 } });
+      const shareEntry = {
+        arc_contract_line_id: po.contractLineId, hotel_id: A2, committed_qty: 40, consumed_qty: 42,
+        mr_id: po.mrId, po_id: po.poId,
+      };
+      expect(over.callOffOverShare).toEqual([{ arcId: po.arcId, payload: expect.objectContaining(shareEntry) }]);
+      const events = await t.any(
+        `SELECT arc_id::int AS arc_id, payload FROM tbl_arc_event_log WHERE event_type = 'call_off_over_hotel_share' AND arc_id = $1`,
+        [po.arcId]
       );
+      expect(events).toEqual([{ arc_id: po.arcId, payload: expect.objectContaining(shareEntry) }]);
+    });
+  });
+
+  it("contract deltas are rounded to 2 dp once, so a fractional close and reopen nets to zero", async () => {
+    await withTx(async (t) => {
+      const po = await makeCallOffPo(t, { hotel: A2, qty: 6 });
+      await postReceiptGrn(t, { poId: po.poId, hotelId: A2, lines: [{ poLineId: po.lineId, accepted: 4.125 }] });
+      const start = await consumed(t, po.contractLineId);
+      expect(start).toEqual({ line: 6, hotels: { [A1]: 50, [A2]: 6 } });
+
+      const closed = await shortClose(t, OWNER, po.poId, { target: { type: "po" }, reasonCode: "no_longer_needed" });
+      expect(closed.closed).toEqual([expect.objectContaining({ qty: 1.875 })]);
+      // The contract columns hold 2 dp: 1.875 is given back as 1.88 (half-up), once.
+      expect(closed.callOffGiveBack).toEqual([{ arcContractLineId: po.contractLineId, hotelId: A2, qty: 1.88 }]);
+      expect(await consumed(t, po.contractLineId)).toEqual({ line: 4.12, hotels: { [A1]: 50, [A2]: 4.12 } });
+
+      const reopened = await reopenShortClose(t, OWNER, po.poId, {
+        deliveryLineIds: [closed.closed[0].deliveryLineId], remarks: "Back on",
+      });
+      expect(reopened.callOffReconsume).toEqual([{ arcContractLineId: po.contractLineId, hotelId: A2, qty: 1.88 }]);
+      expect(await consumed(t, po.contractLineId)).toEqual(start);
     });
   });
 

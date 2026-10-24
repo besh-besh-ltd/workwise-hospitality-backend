@@ -9,8 +9,13 @@
 //
 // Call-off POs give the closed qty back to the rate contract in the same
 // transaction (callOffPoService.giveBackCallOffQty: contract line + the
-// ordering hotel's Group-ARC ledger row); a reopen takes it again under the
-// release guard (reconsumeCallOffQty, CONFLICT when the contract is used up).
+// ordering hotel's Group-ARC ledger row); a reopen takes it again by the
+// release's rules (reconsumeCallOffQty): the contract line is a hard cap
+// (CONFLICT when it is used up), the hotel's share is soft (an over-share is
+// logged and returned as callOffOverShare for head office, as at release).
+// Contract columns are NUMERIC(15,2): each delivery line's delta is rounded to
+// 2 dp half-up once (contractCents), and that same value is given back,
+// re-consumed and reported, so a close and its reopen net to zero.
 //
 // A CREDIT return to vendor closes its returned qty through the same log
 // (closeForCreditReturn): rows carry rtv_id, and a call-off gives that qty
@@ -191,16 +196,25 @@ async function callOffHotelId(t, ctx) {
   return positiveInt(row?.hotel_id) ?? ctx.hotelIds[0] ?? null;
 }
 
-/** Σ qty per contract line, for the give-back / re-consume helpers. */
+/** A delivery line's qty (1/10000 units, ≥ 0) in contract cents: 2 dp, half-up. */
+const contractCents = (q) => Math.floor((q + 50) / 100);
+
+/**
+ * Σ per contract line, for the give-back / re-consume helpers. Each row is
+ * rounded to cents once (r.cents when the caller already knows it, else
+ * contractCents(r.qty)); lines that round to nothing are left out.
+ */
 function perContractLine(rows, hotelId) {
   const sums = new Map();
   for (const r of rows) {
     if (!r.arcContractLineId) continue;
-    sums.set(r.arcContractLineId, (sums.get(r.arcContractLineId) || 0) + r.qty);
+    const cents = r.cents ?? contractCents(r.qty);
+    sums.set(r.arcContractLineId, (sums.get(r.arcContractLineId) || 0) + cents);
   }
   return [...sums.entries()]
+    .filter(([, cents]) => cents > 0)
     .sort(([a], [b]) => a - b)
-    .map(([arcContractLineId, q]) => ({ arcContractLineId, hotelId, qty: qNum(q) }));
+    .map(([arcContractLineId, cents]) => ({ arcContractLineId, hotelId, qty: cents / 100 }));
 }
 
 async function writeLog(t, { companyId, poId, rows, reasonCode, remarks, action, userId, rtvId = null }) {
@@ -289,9 +303,12 @@ export async function shortClose(t, user, poId, { target, reasonCode, remarks } 
  * @param {{deliveryLineIds:number[], remarks:string}} input remarks required
  * @returns {Promise<{poId, poNumber, companyId, hotelIds, shortCloseIds,
  *   reopened:Array<{deliveryLineId, poLineId, qty}>,
- *   callOffReconsume:Array<{arcContractLineId, hotelId, qty}>, receiptStatus, poLines}>}
+ *   callOffReconsume:Array<{arcContractLineId, hotelId, qty}>,
+ *   callOffOverShare:Array<{arcId, payload}>, receiptStatus, poLines}>}
+ *   callOffOverShare: the ordering hotel went past its Group-ARC share (allowed,
+ *   as at release; event-logged here, the caller tells head office after commit).
  * @throws as shortClose; plus CONFLICT from reconsumeCallOffQty when the
- *   contract (or the ordering hotel's share) has too little left.
+ *   contract line has too little left.
  */
 export async function reopenShortClose(t, user, poId, { deliveryLineIds, remarks } = {}) {
   await assertPoOwner(t, user, poId);
@@ -304,17 +321,30 @@ export async function reopenShortClose(t, user, poId, { deliveryLineIds, remarks
   const id = Number(ctx.po.id);
   const lines = pickLines(await lockDeliveryLines(t, id), ids);
 
-  const net = await t.any(
-    `SELECT sc.delivery_line_id,
-            SUM(CASE WHEN sc.action = 'close' THEN sc.qty ELSE -sc.qty END)::text AS qty
+  // A reopen always takes a line's whole net, so what is closed now is the
+  // close rows since the line's last reopen. Their sum is the reopen qty; the
+  // sum of their cents (each rounded as it was given back) is what the
+  // contract takes again.
+  const logRows = await t.any(
+    `SELECT sc.delivery_line_id, sc.action, sc.qty::text AS qty
        FROM tbl_po_short_close sc
       WHERE sc.po_id = $1 AND sc.delivery_line_id = ANY($2::int[]) AND sc.rtv_id IS NULL
-      GROUP BY sc.delivery_line_id`,
+      ORDER BY sc.id`,
     [id, lines.map((l) => l.id)]
   );
-  const netById = new Map(net.map((r) => [Number(r.delivery_line_id), toQ(r.qty)]));
+  const openClose = new Map();
+  for (const r of logRows) {
+    const lineId = Number(r.delivery_line_id);
+    if (r.action !== 'close') { openClose.delete(lineId); continue; }
+    const q = toQ(r.qty);
+    const acc = openClose.get(lineId) || { qty: 0, cents: 0 };
+    openClose.set(lineId, { qty: acc.qty + q, cents: acc.cents + contractCents(q) });
+  }
   const rows = lines
-    .map((l) => ({ deliveryLineId: l.id, poLineId: l.poLineId, arcContractLineId: l.arcContractLineId, qty: netById.get(l.id) || 0 }))
+    .map((l) => ({
+      deliveryLineId: l.id, poLineId: l.poLineId, arcContractLineId: l.arcContractLineId,
+      qty: openClose.get(l.id)?.qty || 0, cents: openClose.get(l.id)?.cents || 0,
+    }))
     .filter((r) => r.qty > 0);
   if (!rows.length) {
     const credited = await t.any(
@@ -336,9 +366,10 @@ export async function reopenShortClose(t, user, poId, { deliveryLineIds, remarks
   });
 
   let callOffReconsume = [];
+  let callOffOverShare = [];
   if (ctx.isCallOff) {
     callOffReconsume = perContractLine(rows, await callOffHotelId(t, ctx));
-    await reconsumeCallOffQty(t, { poId: id, lines: callOffReconsume });
+    ({ overShare: callOffOverShare } = await reconsumeCallOffQty(t, { poId: id, lines: callOffReconsume }));
   }
 
   const roll = await recomputePoReceipt(t, id);
@@ -350,6 +381,7 @@ export async function reopenShortClose(t, user, poId, { deliveryLineIds, remarks
     shortCloseIds,
     reopened: publicRows(rows),
     callOffReconsume,
+    callOffOverShare,
     receiptStatus: roll.receiptStatus,
     poLines: roll.lines,
   };

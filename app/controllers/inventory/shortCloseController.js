@@ -10,6 +10,8 @@ import {
   listShortCloses,
 } from '../../services/inventory/shortCloseService.js';
 import { notifyShortClose } from '../../services/inventory/notices/receivingNotices.js';
+import { notifyArcEvent } from '../../services/arcNotificationService.js';
+import { ARC_EVENT_TYPES } from '../../services/arcEventLogService.js';
 
 /**
  * Same keys as the GET deliveries payload carries for these facts.
@@ -71,7 +73,15 @@ export const reopenShortClose = async (req, res) => {
     short_close_ids: out.shortCloseIds,
     reopened: out.reopened,
     call_off_reconsume: out.callOffReconsume,
+    call_off_over_share: out.callOffOverShare,
   });
   notifyShortClose(db, { poId: out.poId, shortCloseIds: out.shortCloseIds });
+  // Group rate contract: tell head office when the reopen took a hotel past
+  // its share, as the call-off release does (mrController, after commit).
+  for (const { arcId, payload: entry } of out.callOffOverShare || []) {
+    notifyArcEvent({
+      arcId, eventType: ARC_EVENT_TYPES.CALL_OFF_OVER_HOTEL_SHARE, actorId: req.user?.id ?? null, payload: entry,
+    }).catch(() => {});
+  }
   return res.status(200).json({ status: 1, message: 'Reopened', data: payload(out, shortCloses) });
 };

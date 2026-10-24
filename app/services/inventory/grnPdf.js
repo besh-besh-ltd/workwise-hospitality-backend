@@ -16,6 +16,7 @@
 // runs Chromium and uploads to S3, and is meant to run OUTSIDE any
 // transaction so a render never holds a database connection.
 
+import crypto from 'crypto';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
@@ -282,7 +283,7 @@ export async function assertGrnDocumentAccess(t, user, grnId) {
 
 /** Render HTML to a PDF and upload it; returns the S3 URL. Outside any transaction. */
 async function renderAndUpload(html, key) {
-  const tmpPath = path.join(os.tmpdir(), `${slug(key)}-${process.pid}-${Date.now()}.pdf`);
+  const tmpPath = path.join(os.tmpdir(), `${slug(key)}-${process.pid}-${Date.now()}-${crypto.randomUUID()}.pdf`);
   try {
     await pdfRenderer.renderToFile(html, tmpPath);
     const up = await uploadToS3(tmpPath, key);
@@ -317,6 +318,8 @@ export async function loadRtvDocument(t, rtvId) {
   const r = await t.oneOrNone(
     `SELECT r.id, r.rtv_number, r.disposition, r.status, r.challan_no, r.credit_note_ref, r.remarks,
             r.hospitality_company_id, r.hotel_id, r.po_id, r.grn_id, r.created_at, r.updated_at,
+            (SELECT MIN(m.posted_at) FROM tbl_inv_movement m
+              WHERE m.source_type = 'RTV' AND m.source_id = r.id) AS dispatched_at,
             g.grn_number, g.received_at::text AS grn_received_at,
             po.po_number, po.finalized_vendor_id, COALESCE(po.initiated_by, mr.raised_by) AS initiator_id
        FROM tbl_rtv r
@@ -384,7 +387,8 @@ export async function loadRtvDocument(t, rtvId) {
     challanNo: r.challan_no ?? null,
     creditNoteRef: r.credit_note_ref ?? null,
     remarks: r.remarks ?? null,
-    dispatchedAt: r.status === 'draft' ? null : formatDateTimeIst(r.updated_at),
+    // When the stock left: the RTV_OUT posting, not the RTV's last edit.
+    dispatchedAt: r.dispatched_at ? formatDateTimeIst(r.dispatched_at) : null,
     companyId,
     hotelId,
     poId: Number(r.po_id),

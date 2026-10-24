@@ -481,19 +481,26 @@ export async function giveBackCallOffQty(runner, { poId = null, lines = [] } = {
 }
 
 /**
- * Take quantity from the rate contract again (a reopened short-close), with
- * the release's guard: the contract line may not go past committed_qty. The
- * ordering hotel's Group-ARC share is checked the same way when the hotel has
- * a ledger row on the line. Run inside the caller's transaction; a refusal
- * throws, so the caller's rollback undoes any line already taken.
+ * Take quantity from the rate contract again (a reopened short-close), by the
+ * release's rules (recordCallOffAndUpdateConsumption): the contract line is the
+ * hard cap (consumed + qty <= committed, else CONFLICT); the ordering hotel's
+ * Group-ARC share is soft: a hotel may go past it, which is logged as the
+ * same CALL_OFF_OVER_HOTEL_SHARE arc event and returned so the caller can
+ * tell head office after commit. Run inside the caller's transaction; a
+ * refusal throws, so the caller's rollback undoes any line already taken.
  *
- * @throws InventoryError CONFLICT details {poId, arcContractLineId, hotelId?,
- *   requested, remaining} when the contract (or the hotel's share) is short.
+ * @returns {Promise<{lines:Array<{arcContractLineId, hotelId, qty}>,
+ *   overShare:Array<{arcId:number, payload:object}>}>} payload is release's
+ *   over-share entry {arc_contract_line_id, hotel_id, hotel_name,
+ *   committed_qty, consumed_qty, mr_id, po_id}
+ * @throws InventoryError CONFLICT details {poId, arcContractLineId, requested,
+ *   remaining} when the contract line has too little left.
  */
 export async function reconsumeCallOffQty(runner, { poId = null, lines = [] } = {}) {
   const items = consumptionLines(lines);
-  if (!items.length) return [];
+  if (!items.length) return { lines: [], overShare: [] };
   await lockConsumptionRows(runner, items);
+  const overShare = [];
   for (const l of items) {
     const taken = await runner.result(
       `UPDATE tbl_arc_contract_line
@@ -513,29 +520,43 @@ export async function reconsumeCallOffQty(runner, { poId = null, lines = [] } = 
       );
     }
     if (l.hotelId == null) continue;
-    const hotel = await runner.oneOrNone(
-      `SELECT id, GREATEST(committed_qty - consumed_qty, 0)::float AS remaining
-         FROM tbl_arc_contract_line_hotel
-        WHERE arc_contract_line_id = $1 AND hotel_id = $2`,
-      [l.arcContractLineId, l.hotelId]
-    );
-    if (!hotel) continue; // not a Group ARC line for this hotel
-    const hotelTaken = await runner.result(
+    const hotelRow = await runner.oneOrNone(
       `UPDATE tbl_arc_contract_line_hotel
           SET consumed_qty = consumed_qty + $1, updated_at = NOW()
-        WHERE id = $2 AND consumed_qty + $1 <= committed_qty`,
-      [l.qty, hotel.id]
+        WHERE arc_contract_line_id = $2 AND hotel_id = $3
+       RETURNING hotel_id, committed_qty, consumed_qty`,
+      [l.qty, l.arcContractLineId, l.hotelId]
     );
-    if (hotelTaken.rowCount === 0) {
-      throw new InventoryError(
-        'CONFLICT',
-        `This hotel has only ${hotel.remaining} left of its share of the rate contract, so ${Number(l.qty)} cannot be reopened`,
-        { poId, arcContractLineId: l.arcContractLineId, hotelId: l.hotelId, requested: Number(l.qty), remaining: hotel.remaining }
-      );
-    }
+    if (!hotelRow || Number(hotelRow.consumed_qty) <= Number(hotelRow.committed_qty)) continue;
+    const ctx = await runner.one(
+      `SELECT ac.arc_id, h.name AS hotel_name, po.source_mr_id
+         FROM tbl_arc_contract_line cl
+         JOIN tbl_arc_contract ac ON ac.id = cl.arc_contract_id
+         LEFT JOIN tbl_hospitality_company_hotels h ON h.id = $2
+         LEFT JOIN tbl_rfq_purchase_order po ON po.id = $3
+        WHERE cl.id = $1`,
+      [l.arcContractLineId, hotelRow.hotel_id, poId]
+    );
+    const payload = {
+      arc_contract_line_id: Number(l.arcContractLineId),
+      hotel_id: Number(hotelRow.hotel_id),
+      hotel_name: ctx.hotel_name || null,
+      committed_qty: Number(hotelRow.committed_qty),
+      consumed_qty: Number(hotelRow.consumed_qty),
+      mr_id: ctx.source_mr_id == null ? null : Number(ctx.source_mr_id),
+      po_id: poId == null ? null : Number(poId),
+    };
+    await logArcEvent({
+      arcId: ctx.arc_id,
+      eventType: ARC_EVENT_TYPES.CALL_OFF_OVER_HOTEL_SHARE,
+      actorId: null,
+      payload,
+      txContext: runner,
+    });
+    overShare.push({ arcId: Number(ctx.arc_id), payload });
   }
-  logger.info({ poId, lines: items }, '[callOffPo] contract quantity taken again');
-  return items;
+  logger.info({ poId, lines: items, overShare: overShare.length }, '[callOffPo] contract quantity taken again');
+  return { lines: items, overShare };
 }
 
 /**

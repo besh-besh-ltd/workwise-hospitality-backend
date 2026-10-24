@@ -6,10 +6,15 @@
 //                another RTV that is not cancelled (drafts hold their qty).
 //
 // Lifecycle: draft → dispatched → closed, or draft → cancelled.
+//   create    each line's GRN line must carry its stock item and unit
+//             conversion (VALIDATION naming the product), so a draft can
+//             always be dispatched.
 //   dispatch  numbers the RTV (RTV/{doc_code}/{FY}/{seq}), posts RTV_OUT at
 //             the GRN line's unit cost (NEGATIVE_STOCK when the goods are no
-//             longer there; the ledger guards RTV_OUT always), then rolls the
-//             PO up. The roll-up counts dispatched/closed RTVs:
+//             longer there; the ledger guards RTV_OUT always; the stock qty is
+//             qty × factor in SQL numeric, rounded to 4 dp, sent as a decimal
+//             string), then rolls the PO up. The roll-up counts dispatched/
+//             closed RTVs, spread in rtv line id order:
 //               REPLACE  returned_replace_qty → the qty is open again;
 //               CREDIT   returned_credit_qty, plus tbl_po_short_close rows
 //                        (rtv_id set, reason 'other', remarks "RTV <number>
@@ -18,6 +23,12 @@
 //                        returned_credit_qty, so the qty does not come back as
 //                        open; a call-off gives that qty back to its rate
 //                        contract (shortCloseService.closeForCreditReturn).
+//             Because of that order, an older draft dispatched after newer
+//             returns on the same receipt line would re-spread their credit
+//             (moving it off the lines already short-closed for it). After the
+//             roll-up, no line's credit may fall and the credit added must be
+//             exactly this RTV's CREDIT qty (0 for REPLACE); otherwise CONFLICT
+//             and the whole dispatch rolls back. Cancel and raise it again.
 //   close     CREDIT: records the vendor's credit-note reference.
 //             REPLACE: only once every delivery line the returned goods were
 //             booked to is received again or short-closed.
@@ -122,6 +133,43 @@ async function returnableByLine(t, grnId, { excludeRtvId = null } = {}) {
   ]));
 }
 
+/**
+ * The product name the documents use (grnPdf): the catalogue variant, else the
+ * stock item's display name. PRODUCT_JOINS expects the GRN line as `gl`.
+ */
+const PRODUCT_JOINS = `
+       JOIN tbl_purchase_order_product pop ON pop.id = gl.po_line_id
+       LEFT JOIN tbl_rfq_products rp ON rp.id = pop.rfq_product_id
+       LEFT JOIN tbl_product_variant pv
+              ON pv.id = COALESCE(gl.product_variant_id, pop.product_variant_id, rp.product_variant_id)
+       LEFT JOIN tbl_inv_item ii ON ii.id = gl.inv_item_id`;
+const PRODUCT_NAME = 'COALESCE(pv.name, ii.display_name)';
+
+/** The GRN line's PO-unit → stock-unit factor (SQL; NULL when it has none). Never a silent 1. */
+const STOCK_FACTOR = `CASE WHEN gl.uom_factor > 0 THEN gl.uom_factor
+                           WHEN gl.stock_qty > 0 AND gl.accepted_qty > 0 THEN gl.stock_qty / gl.accepted_qty
+                      END`;
+
+/** Every line returned must say which stock item it moves and how to convert its qty. */
+async function assertStockable(t, lines) {
+  const rows = await t.any(
+    `SELECT gl.id, gl.inv_item_id, (${STOCK_FACTOR}) IS NOT NULL AS has_factor, ${PRODUCT_NAME} AS product_name
+       FROM tbl_grn_line gl
+       ${PRODUCT_JOINS}
+      WHERE gl.id = ANY($1::int[])`,
+    [lines.map((l) => l.grnLineId)]
+  );
+  const byId = new Map(rows.map((r) => [Number(r.id), r]));
+  lines.forEach((l, i) => {
+    const r = byId.get(l.grnLineId);
+    if (r && r.inv_item_id != null && r.has_factor) return;
+    const name = r?.product_name || 'This product';
+    throw invalid(`${name} has no stock item or unit conversion on this receipt, so it can't be returned`, {
+      field: `lines[${i}].grnLineId`, grnLineId: l.grnLineId,
+    });
+  });
+}
+
 function assertReturnable(lines, returnable) {
   const missing = lines.filter((l) => !returnable.has(l.grnLineId)).map((l) => l.grnLineId);
   if (missing.length) {
@@ -155,14 +203,11 @@ export async function rtvView(t, rtvId) {
   );
   if (!rtv) throw notFound();
   const lines = await t.any(
-    `SELECT rl.id, rl.grn_line_id, gl.po_line_id, pv.name AS product_name, gl.po_uom AS unit,
+    `SELECT rl.id, rl.grn_line_id, gl.po_line_id, ${PRODUCT_NAME} AS product_name, gl.po_uom AS unit,
             rl.qty::text AS qty, rl.reason
        FROM tbl_rtv_line rl
        JOIN tbl_grn_line gl ON gl.id = rl.grn_line_id
-       JOIN tbl_purchase_order_product pop ON pop.id = gl.po_line_id
-       LEFT JOIN tbl_rfq_products rp ON rp.id = pop.rfq_product_id
-       LEFT JOIN tbl_product_variant pv
-              ON pv.id = COALESCE(gl.product_variant_id, pop.product_variant_id, rp.product_variant_id)
+       ${PRODUCT_JOINS}
       WHERE rl.rtv_id = $1
       ORDER BY rl.id`,
     [rtvId]
@@ -203,8 +248,9 @@ export async function rtvView(t, rtvId) {
  *          lines:Array<{grnLineId:number, qty:number, reason:string}>}} input
  * @returns {Promise<Rtv>}
  * @throws InventoryError NOT_FOUND (GRN / line / out of company), FORBIDDEN
- *   (no grn.approve at the hotel), VALIDATION (shape, qty above returnable),
- *   CONFLICT (not a posted receipt).
+ *   (no grn.approve at the hotel), VALIDATION (shape, qty above returnable, a
+ *   line with no stock item or unit conversion, named), CONFLICT (not a posted
+ *   receipt).
  */
 export async function createRtv(t, user, { grnId, disposition, remarks, lines } = {}) {
   const gid = positiveInt(grnId);
@@ -243,6 +289,7 @@ export async function createRtv(t, user, { grnId, disposition, remarks, lines } 
 
   await getPoContext(t, grn.po_id, { forUpdate: true }); // serialise with receipts, reversals and other returns
   assertReturnable(parsed, await returnableByLine(t, gid));
+  await assertStockable(t, parsed);
 
   const userId = positiveInt(user?.id);
   const rtv = await t.one(
@@ -286,8 +333,9 @@ async function deliveryCredits(t, poId) {
  * Send the goods back: number the RTV, post RTV_OUT, roll the PO up.
  * @param {{challanNo?:string}} input the hotel's own gate pass / challan number
  * @returns {Promise<Rtv>}
- * @throws InventoryError CONFLICT (not a draft), VALIDATION (returnable shrank
- *   since the draft), NEGATIVE_STOCK (goods already marked out), and the gate's.
+ * @throws InventoryError CONFLICT (not a draft; later returns on the same
+ *   receipt were dispatched first, nothing written), VALIDATION (returnable
+ *   shrank since the draft), NEGATIVE_STOCK (goods already marked out), and the gate's.
  */
 export async function dispatchRtv(t, user, rtvId, { challanNo } = {}) {
   const { rtv, ctx } = await lockForAction(t, user, rtvId, 'approve');
@@ -296,9 +344,10 @@ export async function dispatchRtv(t, user, rtvId, { challanNo } = {}) {
   const rtvIdN = Number(rtv.id);
   const poId = Number(rtv.po_id);
 
+  // Stock qty = qty × factor in numeric, 4 dp half-up (the ledger's scale).
   const lines = await t.any(
     `SELECT rl.id, rl.grn_line_id, rl.qty::text AS qty, gl.inv_item_id, gl.product_variant_id,
-            gl.uom_factor::text AS uom_factor, gl.stock_qty::text AS stock_qty, gl.accepted_qty::text AS accepted_qty,
+            ROUND(rl.qty * (${STOCK_FACTOR}), 4)::text AS stock_out,
             gl.unit_cost::text AS unit_cost, gl.batch_no, gl.expiry_date::text AS expiry_date
        FROM tbl_rtv_line rl JOIN tbl_grn_line gl ON gl.id = rl.grn_line_id
       WHERE rl.rtv_id = $1
@@ -310,18 +359,14 @@ export async function dispatchRtv(t, user, rtvId, { challanNo } = {}) {
     await returnableByLine(t, Number(rtv.grn_id), { excludeRtvId: rtvIdN })
   );
 
-  // CREDIT: the delivery lines' credit before this return, from fresh source rows.
-  const creditBefore = rtv.disposition === 'CREDIT'
-    ? (await recomputePoReceipt(t, poId), await deliveryCredits(t, poId))
-    : null;
+  // The delivery lines' credit before this return, from fresh source rows.
+  await recomputePoReceipt(t, poId);
+  const creditBefore = await deliveryCredits(t, poId);
 
   const rtvNumber = await nextDocNumber(t, { hotelId: Number(rtv.hotel_id), docType: 'RTV' });
   const movements = lines.map((l) => {
-    // The GRN line's own conversion; never a silent factor of 1.
-    const factor = Number(l.uom_factor) > 0
-      ? Number(l.uom_factor)
-      : (Number(l.stock_qty) > 0 && Number(l.accepted_qty) > 0 ? Number(l.stock_qty) / Number(l.accepted_qty) : null);
-    if (!factor || l.inv_item_id == null) {
+    // createRtv refuses such lines; a draft from before that check still stops here.
+    if (l.stock_out == null || l.inv_item_id == null) {
       throw new InventoryError('CONFLICT', 'This receipt line has no stock item or unit conversion to return against', {
         grnLineId: Number(l.grn_line_id),
       });
@@ -332,7 +377,7 @@ export async function dispatchRtv(t, user, rtvId, { challanNo } = {}) {
       invItemId: Number(l.inv_item_id),
       productVariantId: l.product_variant_id == null ? null : Number(l.product_variant_id),
       type: 'RTV_OUT',
-      qty: -(Number(l.qty) * factor),
+      qty: `-${l.stock_out}`,
       unitCost: l.unit_cost == null ? undefined : Number(l.unit_cost),
       batchNo: l.batch_no ?? null,
       expiryDate: l.expiry_date ?? null,
@@ -351,12 +396,26 @@ export async function dispatchRtv(t, user, rtvId, { challanNo } = {}) {
   );
   await recomputePoReceipt(t, poId);
 
-  if (creditBefore) {
-    // The roll-up spread the credit over the returned receipt line's delivery
-    // lines (latest allocation first); short-close exactly those increases.
-    const after = await deliveryCredits(t, poId);
-    const rows = [...after.entries()]
-      .map(([deliveryLineId, q]) => ({ deliveryLineId, qty: q - (creditBefore.get(deliveryLineId) || 0) }))
+  // The roll-up spread the credit over the returned receipt line's delivery
+  // lines (latest allocation first, RTV lines in id order). Only this RTV may
+  // add credit, and exactly its own CREDIT qty: an older draft dispatched after
+  // newer returns re-spreads theirs, which would over-close (and over-give-back).
+  const after = await deliveryCredits(t, poId);
+  const deltas = [...new Set([...creditBefore.keys(), ...after.keys()])]
+    .map((deliveryLineId) => ({ deliveryLineId, qty: (after.get(deliveryLineId) || 0) - (creditBefore.get(deliveryLineId) || 0) }));
+  const added = deltas.reduce((sum, d) => sum + Math.max(d.qty, 0), 0);
+  const expected = rtv.disposition === 'CREDIT' ? lines.reduce((sum, l) => sum + toQ(l.qty), 0) : 0;
+  if (deltas.some((d) => d.qty < 0) || added !== expected) {
+    throw new InventoryError(
+      'CONFLICT',
+      'Later returns on this receipt were dispatched first. Cancel this draft and raise it again to dispatch it.',
+      { rtvId: rtvIdN, grnId: Number(rtv.grn_id) }
+    );
+  }
+
+  if (rtv.disposition === 'CREDIT') {
+    // Short-close exactly those increases.
+    const rows = deltas
       .filter((r) => r.qty > 0)
       .map((r) => ({ deliveryLineId: r.deliveryLineId, qty: qNum(r.qty) }));
     if (rows.length) {
@@ -391,20 +450,30 @@ export async function closeRtv(t, user, rtvId, { creditNoteRef } = {}) {
   // received again or short-closed.
   await recomputePoReceipt(t, Number(rtv.po_id));
   const open = await t.any(
-    `SELECT DISTINCT dl.id, dl.po_line_id, dl.status,
+    `SELECT DISTINCT dl.id, dl.po_line_id, d.phase_no, d.hotel_id, h.name AS hotel_name,
             GREATEST(dl.planned_qty - (dl.accepted_qty - dl.returned_replace_qty - dl.returned_credit_qty)
                      - dl.short_closed_qty, 0)::float AS open_qty
        FROM tbl_rtv_line rl
        JOIN tbl_grn_line_alloc a ON a.grn_line_id = rl.grn_line_id AND a.accepted_qty > 0
        JOIN tbl_po_delivery_line dl ON dl.id = a.delivery_line_id
+       JOIN tbl_po_delivery d ON d.id = dl.delivery_id
+       LEFT JOIN tbl_hospitality_company_hotels h ON h.id = d.hotel_id
       WHERE rl.rtv_id = $1 AND dl.status NOT IN ('received', 'short_closed')
-      ORDER BY dl.id`,
+      ORDER BY d.phase_no, dl.id`,
     [rtvIdN]
   );
   if (open.length) {
-    throw new InventoryError('CONFLICT', 'The replacement has not been received yet', {
+    const where = [...new Set(open.map((r) => (r.hotel_name ? `Phase ${r.phase_no} at ${r.hotel_name}` : `Phase ${r.phase_no}`)))];
+    throw new InventoryError('CONFLICT', `Receive or short-close the remaining qty on ${where.join(', ')} before closing this return`, {
       rtvId: rtvIdN,
-      openLines: open.map((r) => ({ deliveryLineId: Number(r.id), poLineId: Number(r.po_line_id), openQty: r.open_qty })),
+      openLines: open.map((r) => ({
+        deliveryLineId: Number(r.id),
+        poLineId: Number(r.po_line_id),
+        phaseNo: Number(r.phase_no),
+        hotelId: r.hotel_id == null ? null : Number(r.hotel_id),
+        hotelName: r.hotel_name ?? null,
+        openQty: r.open_qty,
+      })),
     });
   }
   await t.none(

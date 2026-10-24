@@ -20,9 +20,10 @@ import {
   createRtv, dispatchRtv, closeRtv, cancelRtv, getRtv,
 } from "../../app/services/inventory/rtvService.js";
 import { shortClose } from "../../app/services/inventory/shortCloseService.js";
-import { loadRtvDocument, buildRtvHtml } from "../../app/services/inventory/grnPdf.js";
+import { loadRtvDocument, buildRtvHtml, formatDateTimeIst } from "../../app/services/inventory/grnPdf.js";
 import { shortUrl } from "../../app/services/inventory/shortUrl.js";
 import { InventoryError } from "../../app/services/inventory/errors.js";
+import { resolveItemForVariant } from "../../app/services/inventory/items.js";
 import {
   CO, A1, makeRfqPo, setPlan, postReceiptGrn, deliveryLinesOf, markOut, balanceOf,
 } from "../helpers/invReceiptFixtures.js";
@@ -104,8 +105,12 @@ describe("return to vendor", () => {
         lines: [{ accepted: 10, rr: 3, rc: 0, sc: 0, receipt_status: "partial" }],
       });
 
-      // Not replaced yet: the RTV stays open.
-      await expectInvError(closeRtv(t, STORES, draft.id, {}), "CONFLICT");
+      // Not replaced yet: the RTV stays open, and the refusal says where.
+      const hotelName = (await t.one(`SELECT name FROM tbl_hospitality_company_hotels WHERE id = $1`, [A1])).name;
+      const notYet = await expectInvError(closeRtv(t, STORES, draft.id, {}), "CONFLICT", {
+        openLines: [expect.objectContaining({ phaseNo: 1, hotelId: A1, hotelName, openQty: 3 })],
+      });
+      expect(notYet.message).toBe(`Receive or short-close the remaining qty on Phase 1 at ${hotelName} before closing this return`);
       await expectInvError(dispatchRtv(t, STORES, draft.id, {}), "CONFLICT", { status: "dispatched" });
 
       // The replacement arrives; now it closes.
@@ -297,6 +302,133 @@ describe("return to vendor", () => {
     });
   });
 
+  it("an older draft dispatched after newer returns on the same receipt line is refused, writing nothing", async () => {
+    await withTx(async (t) => {
+      await grantStores(t);
+      // One receipt line spread A/B/C = 2 each; returns are spread latest allocation (C) first.
+      const setup = async () => {
+        const { poId, lineIds: [line] } = await makeRfqPo(t, { lines: [{ qty: 6, unit: "kg" }] });
+        const [a, b, c] = await setPlan(t, poId, [
+          { hotelId: A1, phaseNo: 1, dueDate: "2026-10-20", lines: { [line]: 2 } },
+          { hotelId: A1, phaseNo: 2, dueDate: "2026-11-20", lines: { [line]: 2 } },
+          { hotelId: A1, phaseNo: 3, dueDate: "2026-12-20", lines: { [line]: 2 } },
+        ]);
+        const grn = await postReceiptGrn(t, {
+          poId,
+          lines: [{
+            poLineId: line, accepted: 6,
+            allocations: [a, b, c].map((d) => ({ deliveryLineId: d.lines[line], accepted: 2 })),
+          }],
+        });
+        const ret = (disposition) => createRtv(t, STORES, {
+          grnId: grn.grnId, disposition, lines: [{ grnLineId: grn.lines[0].grnLineId, qty: 2, reason: "Bad lot" }],
+        });
+        return { poId, line, A: a.lines[line], B: b.lines[line], C: c.lines[line], grn, ret };
+      };
+      const snapshot = async (poId, rtvId, invItemId) => ({
+        log: await t.any(`SELECT id, delivery_line_id, qty::float AS qty, rtv_id FROM tbl_po_short_close WHERE po_id = $1 ORDER BY id`, [poId]),
+        dls: await deliveryLinesOf(t, poId),
+        moves: await rtvMovements(t, rtvId),
+        balance: await balanceOf(t, A1, invItemId),
+        rtv: await t.one(`SELECT status, rtv_number FROM tbl_rtv WHERE id = $1`, [rtvId]),
+      });
+
+      // CREDIT drafted first (rl1), then REPLACE (rl2) and CREDIT (rl3) dispatched.
+      const one = await setup();
+      const rl1 = await one.ret("CREDIT");
+      await dispatchRtv(t, STORES, (await one.ret("REPLACE")).id, {});
+      const rl3 = await one.ret("CREDIT");
+      await dispatchRtv(t, STORES, rl3.id, {});
+      // rl3's credit landed on B (C carries rl2's replacement).
+      expect((await t.any(`SELECT delivery_line_id FROM tbl_po_short_close WHERE po_id = $1`, [one.poId]))
+        .map((r) => r.delivery_line_id)).toEqual([one.B]);
+      const before = await snapshot(one.poId, rl1.id, one.grn.lines[0].invItemId);
+      // Dispatching rl1 now would re-spread: C=2, A=2, B=0, i.e. 4 credited for a return of 2.
+      const err = await expectInvError(t.tx((sp) => dispatchRtv(sp, STORES, rl1.id, {})), "CONFLICT", { rtvId: rl1.id });
+      expect(err.message).toBe("Later returns on this receipt were dispatched first. Cancel this draft and raise it again to dispatch it.");
+      expect(await snapshot(one.poId, rl1.id, one.grn.lines[0].invItemId)).toEqual(before);
+      expect(before.rtv).toEqual({ status: "draft", rtv_number: null });
+      // Raised again, it dispatches and closes exactly its own 2 (on A).
+      await cancelRtv(t, STORES, rl1.id);
+      await dispatchRtv(t, STORES, (await one.ret("CREDIT")).id, {});
+      expect((await t.any(
+        `SELECT delivery_line_id, qty::float AS qty FROM tbl_po_short_close WHERE po_id = $1 ORDER BY id`, [one.poId]
+      ))).toEqual([{ delivery_line_id: one.B, qty: 2 }, { delivery_line_id: one.A, qty: 2 }]);
+
+      // A REPLACE drafted before a dispatched CREDIT would move that credit off its line: refused too.
+      const two = await setup();
+      const replace = await two.ret("REPLACE");
+      await dispatchRtv(t, STORES, (await two.ret("CREDIT")).id, {});
+      const before2 = await snapshot(two.poId, replace.id, two.grn.lines[0].invItemId);
+      await expectInvError(t.tx((sp) => dispatchRtv(sp, STORES, replace.id, {})), "CONFLICT", { rtvId: replace.id });
+      expect(await snapshot(two.poId, replace.id, two.grn.lines[0].invItemId)).toEqual(before2);
+    });
+  });
+
+  it("RTV_OUT stock qty is exact: 3.3333 at 0.5 is 1.6667, 1.0003 at 1.5 is 1.5005", async () => {
+    await withTx(async (t) => {
+      await grantStores(t);
+      const { poId, lineIds: [l1, l2] } = await makeRfqPo(t, {
+        lines: [{ qty: 10, unit: "box", variantId: 1 }, { qty: 10, unit: "case", variantId: 3 }],
+      });
+      const grn = await postReceiptGrn(t, {
+        poId, lines: [{ poLineId: l1, accepted: 4, uomFactor: 0.5 }, { poLineId: l2, accepted: 2, uomFactor: 1.5 }],
+      });
+      const [g1, g2] = grn.lines;
+      const rtv = await createRtv(t, STORES, {
+        grnId: grn.grnId, disposition: "REPLACE",
+        lines: [
+          { grnLineId: g1.grnLineId, qty: 3.3333, reason: "Crushed" },
+          // In floating point 1.0003 × 1.5 is 1.50044999…, which would post 1.5004.
+          { grnLineId: g2.grnLineId, qty: 1.0003, reason: "Crushed" },
+        ],
+      });
+      await dispatchRtv(t, STORES, rtv.id, {});
+      expect((await rtvMovements(t, rtv.id)).map((m) => m.qty)).toEqual([-1.6667, -1.5005]);
+      expect(await balanceOf(t, A1, g1.invItemId)).toBe(0.3333);
+      expect(await balanceOf(t, A1, g2.invItemId)).toBe(1.4995);
+    });
+  });
+
+  it("a receipt line with no stock item or unit conversion is refused at create", async () => {
+    await withTx(async (t) => {
+      await grantStores(t);
+      const { poId, lineIds: [l1, l2] } = await makeRfqPo(t, {
+        lines: [{ qty: 10, unit: "kg", variantId: 1 }, { qty: 5, unit: "nos", variantId: 3 }],
+      });
+      const grn = await postReceiptGrn(t, {
+        poId, lines: [{ poLineId: l1, accepted: 10 }, { poLineId: l2, accepted: 5 }],
+      });
+      const [g1, g2] = grn.lines;
+      await t.none(`UPDATE tbl_grn_line SET inv_item_id = NULL WHERE id = $1`, [g1.grnLineId]);
+      await t.none(`UPDATE tbl_grn_line SET uom_factor = NULL, stock_qty = NULL WHERE id = $1`, [g2.grnLineId]);
+      for (const [g, name] of [[g1, "7 UP PEPSI 1.5 LTR"], [g2, "PEPSI 600 ML"]]) {
+        const err = await expectInvError(
+          createRtv(t, STORES, { grnId: grn.grnId, disposition: "CREDIT", lines: [{ grnLineId: g.grnLineId, qty: 1, reason: "x" }] }),
+          "VALIDATION",
+          { grnLineId: g.grnLineId }
+        );
+        expect(err.message).toContain(name);
+      }
+      expect(await t.any(`SELECT 1 FROM tbl_rtv WHERE po_id = $1`, [poId])).toEqual([]);
+    });
+  });
+
+  it("names the product from the stock item when the line has no catalogue variant", async () => {
+    await withTx(async (t) => {
+      await grantStores(t);
+      const { poId, lineIds: [line] } = await makeRfqPo(t);
+      const grn = await postReceiptGrn(t, { poId, lines: [{ poLineId: line, accepted: 10 }] });
+      const rtv = await createRtv(t, STORES, {
+        grnId: grn.grnId, disposition: "CREDIT", lines: [{ grnLineId: grn.lines[0].grnLineId, qty: 1, reason: "x" }],
+      });
+      await t.none(`UPDATE tbl_inv_item SET display_name = 'Stores name for Pepsi' WHERE id = $1`, [grn.lines[0].invItemId]);
+      await t.none(`UPDATE tbl_grn_line SET product_variant_id = NULL WHERE id = $1`, [grn.lines[0].grnLineId]);
+      await t.none(`UPDATE tbl_purchase_order_product SET product_variant_id = NULL, rfq_product_id = NULL WHERE id = $1`, [line]);
+      expect((await getRtv(t, STORES, rtv.id)).lines[0].productName).toBe("Stores name for Pepsi");
+    });
+  });
+
   it("RTV challan HTML carries both parties, the lines, values and a QR", async () => {
     await withTx(async (t) => {
       await grantStores(t);
@@ -307,7 +439,13 @@ describe("return to vendor", () => {
         lines: [{ grnLineId: grn.lines[0].grnLineId, qty: 4, reason: "Mould on <b>top</b> layer" }],
       });
       const sent = await dispatchRtv(t, STORES, rtv.id, { challanNo: "GP-9" });
+      // "Dispatched" is when the stock left (the RTV_OUT posting), not the RTV's last edit.
+      await t.none(`UPDATE tbl_rtv SET updated_at = '2026-01-01T00:00:00Z' WHERE id = $1`, [rtv.id]);
+      const { at } = await t.one(
+        `SELECT MIN(posted_at) AS at FROM tbl_inv_movement WHERE source_type = 'RTV' AND source_id = $1`, [rtv.id]
+      );
       const ctx = await loadRtvDocument(t, rtv.id);
+      expect(ctx.dispatchedAt).toBe(formatDateTimeIst(at));
       const html = buildRtvHtml(ctx);
       expect(html).toContain("Delivery challan");
       expect(html).toContain(sent.rtvNumber);
@@ -335,8 +473,10 @@ describe("RTV and GRN document over HTTP", () => {
   const prevTypes = [];
   const scopeIds = [];
   const httpUsers = [STORES.id, OTHER_COMPANY.id];
+  let stockItem; // variant 1's stock item at CO (a return needs one); removed after if made here
 
   beforeAll(async () => {
+    stockItem = await resolveItemForVariant(db, { companyId: CO, productVariantId: 1, createIfMissing: true, defaultUom: "kg" });
     prevTypes.push(...(await db.any(`SELECT id, user_type FROM tbl_users WHERE id = ANY($1::int[])`, [httpUsers])));
     await db.none(`UPDATE tbl_users SET user_type = 2 WHERE id = ANY($1::int[])`, [httpUsers]);
     const role = await db.one(`SELECT id FROM tbl_roles WHERE title = 'Inventory Controller' AND created_by IS NULL`);
@@ -370,6 +510,10 @@ describe("RTV and GRN document over HTTP", () => {
   });
 
   afterAll(async () => {
+    if (stockItem?.created) {
+      await db.none(`DELETE FROM tbl_inv_item_variant WHERE inv_item_id = $1`, [stockItem.id]);
+      await db.none(`DELETE FROM tbl_inv_item WHERE id = $1`, [stockItem.id]);
+    }
     await revokeRoleScopes(db, scopeIds);
     for (const r of prevTypes) {
       await db.none(`UPDATE tbl_users SET user_type = $2 WHERE id = $1`, [r.id, r.user_type]);
@@ -387,10 +531,10 @@ describe("RTV and GRN document over HTTP", () => {
       [status === "draft" ? null : `GRN-HTTP-${po.poId}`, CO, A1, po.poId, status, STORES.id]
     );
     const line = await db.one(
-      `INSERT INTO tbl_grn_line (hospitality_company_id, grn_id, po_line_id, product_variant_id, po_uom,
+      `INSERT INTO tbl_grn_line (hospitality_company_id, grn_id, po_line_id, product_variant_id, inv_item_id, po_uom,
                                  received_qty, accepted_qty, uom_factor, stock_qty, unit_cost)
-       VALUES ($1, $2, $3, 1, 'kg', 10, 10, 1, 10, 100) RETURNING id`,
-      [CO, grn.id, po.lineIds[0]]
+       VALUES ($1, $2, $3, 1, $4, 'kg', 10, 10, 1, 10, 100) RETURNING id`,
+      [CO, grn.id, po.lineIds[0], stockItem.id]
     );
     return { ...po, grnId: Number(grn.id), grnLineId: Number(line.id) };
   }
