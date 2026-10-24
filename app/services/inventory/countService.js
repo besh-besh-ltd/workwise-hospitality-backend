@@ -37,6 +37,7 @@
 import { hotelIdsWithPermission } from './scope.js';
 import { nextDocNumber } from './docNumber.js';
 import { postMovements } from './ledger.js';
+import { getEffectiveSettings } from './settings.js';
 import {
   MAX_LINES, PAGE_SIZE, positiveInt, invalid, notFound, conflict, num, money, iso, pageOf, requireUuid, toQty,
   flag, assertDocAccess, holds, loadCompanyItems, lockBalances, hasNoCost,
@@ -71,7 +72,7 @@ async function loadCount(t, countId, { canCount, canApprove }) {
     `SELECT l.id, l.inv_item_id, i.display_name, i.item_code, i.stock_uom, hi.bin_label,
             l.counted_qty::text AS counted_qty, l.system_qty_at_count::text AS system_qty,
             l.variance_qty::text AS variance_qty, l.variance_value::text AS variance_value,
-            b.avg_cost::text AS avg_cost, l.reason, l.counted_at, cb.name AS counted_by_name
+            b.avg_cost::text AS avg_cost, b.qty::text AS bal_qty, l.reason, l.counted_at, cb.name AS counted_by_name
        FROM tbl_inv_count_line l
        JOIN tbl_inv_item i ON i.id = l.inv_item_id
        LEFT JOIN tbl_inv_hotel_item hi ON hi.hotel_id = $2 AND hi.inv_item_id = l.inv_item_id
@@ -82,6 +83,20 @@ async function loadCount(t, countId, { canCount, canApprove }) {
     [countId, c.hotel_id]
   );
   const hide = c.is_blind === true && !canApprove;
+  // Approvers of a submitted count: which gains will need a unitCost (an
+  // unlocked hint for the UI; approval decides under the locks).
+  let needsCost = new Set();
+  if (canApprove && c.status === 'submitted') {
+    const candidates = rows.filter((r) => {
+      const delta = num(r.counted_qty) - num(r.system_qty);
+      const balance = r.bal_qty == null ? null : { qty: Number(r.bal_qty), avgCost: Number(r.avg_cost) };
+      return r.counted_qty != null && delta > 0 && hasNoCost(balance);
+    });
+    if (candidates.length) {
+      const costs = await latestCompanyCosts(t, Number(c.hospitality_company_id), candidates.map((r) => Number(r.inv_item_id)));
+      needsCost = new Set(candidates.filter((r) => !costs.has(Number(r.inv_item_id))).map((r) => Number(r.id)));
+    }
+  }
   const lines = rows.map((r) => {
     const counted = num(r.counted_qty);
     const system = num(r.system_qty);
@@ -106,9 +121,13 @@ async function loadCount(t, countId, { canCount, canApprove }) {
       varianceQty: hide ? null : varianceQty,
       varianceValue: hide ? null : money(varianceValue),
       reason: r.reason ?? null,
+      needsUnitCost: needsCost.has(Number(r.id)),
     };
   });
   const counted = lines.filter((l) => l.countedQty != null);
+  const { countFreeze } = await getEffectiveSettings(t, {
+    companyId: Number(c.hospitality_company_id), hotelId: Number(c.hotel_id),
+  });
   return {
     id: Number(c.id),
     countNumber: c.count_number ?? null,
@@ -118,6 +137,7 @@ async function loadCount(t, countId, { canCount, canApprove }) {
     scope: c.scope,
     status: c.status,
     isBlind: c.is_blind === true,
+    countFreeze: countFreeze === true,
     startedAt: iso(c.started_at),
     submittedAt: iso(c.submitted_at),
     approvedAt: iso(c.approved_at),
@@ -165,8 +185,8 @@ export async function listCounts(t, user, { hotelId, status, page } = {}) {
   if (!hotels.length) return { rows: [], total: 0 };
   const p = pageOf(page);
   const rows = await t.any(
-    `SELECT c.id, c.count_number, c.hotel_id, h.name AS hotel_name, c.scope, c.status, c.is_blind,
-            c.started_at, c.submitted_at, c.approved_at, cu.name AS created_by_name,
+    `SELECT c.id, c.count_number, c.hospitality_company_id, c.hotel_id, h.name AS hotel_name, c.scope, c.status,
+            c.is_blind, c.started_at, c.submitted_at, c.approved_at, cu.name AS created_by_name,
             (SELECT count(*) FROM tbl_inv_count_line l WHERE l.count_id = c.id) AS line_count,
             (SELECT count(*) FROM tbl_inv_count_line l WHERE l.count_id = c.id AND l.counted_qty IS NOT NULL) AS counted_count,
             count(*) OVER () AS total
@@ -178,6 +198,15 @@ export async function listCounts(t, user, { hotelId, status, page } = {}) {
       LIMIT $3 OFFSET $4`,
     [hotels, status || null, PAGE_SIZE, (p - 1) * PAGE_SIZE]
   );
+  // The hotel's effective count_freeze, once per hotel on the page.
+  const freeze = new Map();
+  for (const r of rows) {
+    const h = Number(r.hotel_id);
+    if (!freeze.has(h)) {
+      const { countFreeze } = await getEffectiveSettings(t, { companyId: Number(r.hospitality_company_id), hotelId: h });
+      freeze.set(h, countFreeze === true);
+    }
+  }
   return {
     rows: rows.map((r) => ({
       id: Number(r.id),
@@ -187,6 +216,7 @@ export async function listCounts(t, user, { hotelId, status, page } = {}) {
       scope: r.scope,
       status: r.status,
       isBlind: r.is_blind === true,
+      countFreeze: freeze.get(Number(r.hotel_id)),
       startedAt: iso(r.started_at),
       submittedAt: iso(r.submitted_at),
       approvedAt: iso(r.approved_at),
@@ -308,14 +338,17 @@ async function lockCount(t, user, countId, action, statuses) {
 /**
  * PUT /counts/:id/lines {lines:[{invItemId, countedQty, clientEventId}]}.
  * @returns {Promise<{count:object, replayed:boolean}>} replayed: every line
- *   was a repeat of an earlier save of this count (nothing changed)
+ *   was a repeat of an earlier save of this count (nothing changed). Such a
+ *   save answers as a replay in any status: a retry that arrives after the
+ *   count was submitted is not an error.
  * @throws {InventoryError} VALIDATION (details {field:'lines', index}: bad
  *   qty, an item or a clientEventId twice in one save, a key already used for
- *   another item) | NOT_FOUND | FORBIDDEN | CONFLICT (count not open; an added
- *   item is in another active count)
+ *   another item) | NOT_FOUND | FORBIDDEN | CONFLICT {status} (count not open
+ *   and the save has new lines; an added item is in another active count)
  */
 export async function saveCountLines(t, user, countId, lines) {
-  const count = await lockCount(t, user, countId, 'create', ['open']);
+  // Any status here: the applied keys are checked before the status.
+  const count = await lockCount(t, user, countId, 'create', COUNT_STATUSES);
   if (!Array.isArray(lines) || !lines.length) throw invalid('Nothing to save', { field: 'lines' });
   if (lines.length > MAX_LINES) throw invalid(`At most ${MAX_LINES} lines at once`, { field: 'lines' });
   const seenItems = new Set();
@@ -360,6 +393,7 @@ export async function saveCountLines(t, user, countId, lines) {
     // else: a replay of a save already applied (possibly superseded since)
   }
   if (!toSave.length) return { count: await payloadFor(t, user, count.id, count.hotelId), replayed: true };
+  if (count.status !== 'open') throw conflict(`This count is ${count.status}`, { status: count.status });
 
   const existing = new Set(
     (await t.any(`SELECT inv_item_id FROM tbl_inv_count_line WHERE count_id = $1`, [count.id])).map((e) => Number(e.inv_item_id))
@@ -415,30 +449,28 @@ const UNCOUNTED_LIST_MAX = 50;
  */
 export async function submitCount(t, user, countId) {
   const count = await lockCount(t, user, countId, 'create', ['open']);
-  const uncounted = await t.any(
-    `SELECT l.id, l.inv_item_id, i.display_name
-       FROM tbl_inv_count_line l
-       JOIN tbl_inv_item i ON i.id = l.inv_item_id
-       LEFT JOIN tbl_inv_hotel_item hi ON hi.hotel_id = $2 AND hi.inv_item_id = l.inv_item_id
-      WHERE l.count_id = $1 AND l.counted_qty IS NULL
-      ORDER BY hi.bin_label NULLS LAST, i.display_name, l.id`,
-    [count.id, count.hotelId]
-  );
-  const { n } = await t.one(
-    `SELECT count(*)::int AS n FROM tbl_inv_count_line WHERE count_id = $1 AND counted_qty IS NOT NULL`,
+  const { n, uncountedTotal } = await t.one(
+    `SELECT count(*) FILTER (WHERE counted_qty IS NOT NULL)::int AS n,
+            count(*) FILTER (WHERE counted_qty IS NULL)::int AS "uncountedTotal"
+       FROM tbl_inv_count_line WHERE count_id = $1`,
     [count.id]
   );
-  if (count.scope === 'FULL' && uncounted.length) {
-    throw invalid(
-      `Count every item before submitting a full count: ${uncounted.length} not counted yet`,
-      {
-        field: 'lines',
-        uncounted: uncounted.slice(0, UNCOUNTED_LIST_MAX).map((r) => ({
-          lineId: Number(r.id), invItemId: Number(r.inv_item_id), displayName: r.display_name,
-        })),
-        uncountedTotal: uncounted.length,
-      }
+  if (count.scope === 'FULL' && uncountedTotal) {
+    const uncounted = await t.any(
+      `SELECT l.id, l.inv_item_id, i.display_name
+         FROM tbl_inv_count_line l
+         JOIN tbl_inv_item i ON i.id = l.inv_item_id
+         LEFT JOIN tbl_inv_hotel_item hi ON hi.hotel_id = $2 AND hi.inv_item_id = l.inv_item_id
+        WHERE l.count_id = $1 AND l.counted_qty IS NULL
+        ORDER BY hi.bin_label NULLS LAST, i.display_name, l.id
+        LIMIT $3`,
+      [count.id, count.hotelId, UNCOUNTED_LIST_MAX]
     );
+    throw invalid(`Count every item before submitting a full count: ${uncountedTotal} not counted yet`, {
+      field: 'lines',
+      uncounted: uncounted.map((r) => ({ lineId: Number(r.id), invItemId: Number(r.inv_item_id), displayName: r.display_name })),
+      uncountedTotal,
+    });
   }
   if (!n) throw invalid('Count at least one item before submitting', { field: 'lines' });
   await t.none(
@@ -459,8 +491,32 @@ export async function submitCount(t, user, countId) {
 
 /** Inbound movement types whose unit cost may value a gain elsewhere in the company. */
 const COST_SOURCES = ['GRN_IN', 'OPENING', 'ADJUST_IN', 'COUNT_IN'];
+/** Upper bound for an approver-supplied unit cost. */
+const MAX_UNIT_COST = 1e9;
 
-/** {[lineId]: number > 0} → Map(lineId → cost); VALIDATION {field:'unitCosts', lineId} otherwise. */
+/**
+ * The latest inbound unit cost (> 0) of each item at any hotel of the company:
+ * GRN_IN, OPENING, ADJUST_IN or COUNT_IN, leaving out receipts whose GRN line
+ * was later reversed (a reversed receipt's price is not one to trust).
+ * @returns {Promise<Map<number, number>>} invItemId → cost
+ */
+async function latestCompanyCosts(t, companyId, invItemIds) {
+  if (!invItemIds.length) return new Map();
+  const rows = await t.any(
+    `SELECT DISTINCT ON (m.inv_item_id) m.inv_item_id, m.unit_cost::text AS unit_cost
+       FROM tbl_inv_movement m
+      WHERE m.hospitality_company_id = $1 AND m.inv_item_id = ANY($2::int[])
+        AND m.movement_type = ANY($3::text[]) AND m.unit_cost > 0
+        AND NOT (m.movement_type = 'GRN_IN' AND EXISTS (
+              SELECT 1 FROM tbl_grn_line rl JOIN tbl_grn rg ON rg.id = rl.grn_id
+               WHERE rl.reverses_grn_line_id = m.source_line_id AND rg.status <> 'draft'))
+      ORDER BY m.inv_item_id, m.posted_at DESC, m.id DESC`,
+    [companyId, [...new Set(invItemIds)], COST_SOURCES]
+  );
+  return new Map(rows.map((r) => [Number(r.inv_item_id), Number(r.unit_cost)]));
+}
+
+/** {[lineId]: number in (0, 1e9]} → Map(lineId → cost); VALIDATION {field:'unitCosts', lineId} otherwise. */
 function parseUnitCosts(unitCosts) {
   const out = new Map();
   if (unitCosts == null) return out;
@@ -470,12 +526,28 @@ function parseUnitCosts(unitCosts) {
   for (const [key, raw] of Object.entries(unitCosts)) {
     if (raw == null || raw === '') continue;
     const cost = toQty(raw);
-    if (cost == null || cost <= 0) {
-      throw invalid('Each unit cost must be a number above 0', { field: 'unitCosts', lineId: key });
+    if (cost == null || cost <= 0 || cost > MAX_UNIT_COST) {
+      throw invalid(`Each unit cost must be a number above 0 and at most ${MAX_UNIT_COST}`, { field: 'unitCosts', lineId: key });
     }
     out.set(Number(key), cost);
   }
   return out;
+}
+
+/** {[lineId]: text} → Map(lineId → trimmed text); VALIDATION {field:'reasons', lineId} otherwise. */
+function parseReasons(reasons) {
+  if (reasons != null && (typeof reasons !== 'object' || Array.isArray(reasons))) {
+    throw invalid('reasons must map line ids to text', { field: 'reasons' });
+  }
+  const given = new Map();
+  for (const [key, text] of Object.entries(reasons ?? {})) {
+    if (text == null) continue;
+    if (typeof text !== 'string') throw invalid('Each reason must be text', { field: 'reasons', lineId: key });
+    const s = text.trim();
+    if (s.length > 1000) throw invalid('A reason is too long (at most 1000 characters)', { field: 'reasons', lineId: key });
+    if (s) given.set(Number(key), s);
+  }
+  return given;
 }
 
 /**
@@ -483,21 +555,22 @@ function parseUnitCosts(unitCosts) {
  * posts the deltas.
  *
  * A gain on an item with no cost at the hotel (no balance, or an average of
- * 0, read under the balance locks) is valued at unitCosts[lineId] (> 0), else
- * at the latest inbound unit cost of the item at any hotel of the company,
- * else the approval is refused. unitCosts for other lines are ignored.
+ * 0 with nothing on hand: the ledger's own test, read under the balance
+ * locks) is valued at unitCosts[lineId], else at the latest inbound unit cost
+ * of the item at any hotel of the company, else the approval is refused.
+ * unitCosts for other lines are ignored. Stock on hand at an average of 0
+ * takes gains at 0.
  *
  * @throws {InventoryError} NOT_FOUND | FORBIDDEN | CONFLICT (not submitted) |
- *   VALIDATION {field:'reasons', lines:[{lineId, invItemId, displayName}]}
- *   (missing reasons, checked first) | VALIDATION {field:'unitCosts',
- *   lines:[{lineId, invItemId, displayName}]} (gains with no cost to use) |
- *   VALIDATION {field:'unitCosts', lineId} (a bad cost) | NEGATIVE_STOCK
+ *   VALIDATION, once for both lists: {field: 'reasons' when any reason is
+ *   missing else 'unitCosts', lines: that field's list, reasons:[{lineId,
+ *   invItemId, displayName}], unitCosts:[{lineId, invItemId, displayName}]} |
+ *   VALIDATION {field:'reasons'|'unitCosts', lineId} (a malformed entry) |
+ *   NEGATIVE_STOCK
  */
 export async function approveCount(t, user, countId, reasons = {}, unitCosts = null) {
   const count = await lockCount(t, user, countId, 'approve', ['submitted']);
-  if (reasons != null && (typeof reasons !== 'object' || Array.isArray(reasons))) {
-    throw invalid('reasons must map line ids to text', { field: 'reasons' });
-  }
+  const given = parseReasons(reasons);
   const costsGiven = parseUnitCosts(unitCosts);
   const lines = await t.any(
     `SELECT l.id, l.inv_item_id, i.display_name, l.counted_qty::text AS counted_qty,
@@ -509,15 +582,6 @@ export async function approveCount(t, user, countId, reasons = {}, unitCosts = n
     [count.id]
   );
 
-  const given = new Map();
-  for (const [key, text] of Object.entries(reasons ?? {})) {
-    if (text == null) continue;
-    if (typeof text !== 'string') throw invalid('Each reason must be text', { field: 'reasons', lineId: key });
-    const s = text.trim();
-    if (s.length > 1000) throw invalid('A reason is too long (at most 1000 characters)', { field: 'reasons', lineId: key });
-    if (s) given.set(Number(key), s);
-  }
-
   const missing = [];
   const work = lines.map((l) => {
     const delta = Math.round((Number(l.counted_qty) - Number(l.system_qty)) * 10000) / 10000;
@@ -527,13 +591,10 @@ export async function approveCount(t, user, countId, reasons = {}, unitCosts = n
     }
     return { lineId: Number(l.id), invItemId: Number(l.inv_item_id), displayName: l.display_name, delta, reason };
   });
-  if (missing.length) {
-    throw invalid('Give a reason for every line with a difference', { field: 'reasons', lines: missing });
-  }
 
   // The cost decisions are made under the balance locks (rows created when
-  // missing: every moving line posts), so a concurrent first receipt either
-  // commits before them (its average is used) or waits for this posting.
+  // missing, in ledger order: every moving line posts), so a concurrent first
+  // receipt either commits before them (its average is used) or waits.
   const moving = work.filter((w) => w.delta !== 0);
   const balances = await lockBalances(t, {
     companyId: count.companyId, hotelId: count.hotelId, invItemIds: moving.map((w) => w.invItemId), create: true,
@@ -545,29 +606,25 @@ export async function approveCount(t, user, countId, reasons = {}, unitCosts = n
     if (costsGiven.has(w.lineId)) costOf.set(w.lineId, costsGiven.get(w.lineId));
     else needFallback.push(w);
   }
+  const uncosted = [];
   if (needFallback.length) {
-    const latest = new Map(
-      (
-        await t.any(
-          `SELECT DISTINCT ON (inv_item_id) inv_item_id, unit_cost::text AS unit_cost
-             FROM tbl_inv_movement
-            WHERE hospitality_company_id = $1 AND inv_item_id = ANY($2::int[])
-              AND movement_type = ANY($3::text[]) AND unit_cost > 0
-            ORDER BY inv_item_id, posted_at DESC, id DESC`,
-          [count.companyId, needFallback.map((w) => w.invItemId), COST_SOURCES]
-        )
-      ).map((r) => [Number(r.inv_item_id), Number(r.unit_cost)])
-    );
-    const uncosted = [];
+    const latest = await latestCompanyCosts(t, count.companyId, needFallback.map((w) => w.invItemId));
     for (const w of needFallback) {
       if (latest.has(w.invItemId)) costOf.set(w.lineId, latest.get(w.invItemId));
       else uncosted.push({ lineId: w.lineId, invItemId: w.invItemId, displayName: w.displayName });
     }
-    if (uncosted.length) {
-      throw invalid('Give a unit cost for items that have no cost anywhere in the company yet', {
-        field: 'unitCosts', lines: uncosted,
-      });
-    }
+  }
+  if (missing.length || uncosted.length) {
+    const parts = [
+      missing.length ? 'a reason for every line with a difference' : null,
+      uncosted.length ? 'a unit cost for items with no cost anywhere in the company yet' : null,
+    ].filter(Boolean);
+    throw invalid(`Give ${parts.join(' and ')}`, {
+      field: missing.length ? 'reasons' : 'unitCosts',
+      lines: missing.length ? missing : uncosted,
+      reasons: missing,
+      unitCosts: uncosted,
+    });
   }
 
   const userId = positiveInt(user.id);

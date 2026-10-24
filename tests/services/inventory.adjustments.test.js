@@ -162,21 +162,35 @@ describe("freeze and cost guards", () => {
     });
   });
 
-  it("a gain never comes in at no cost", async () => {
+  it("a gain needs a cost here, and stock on hand at an average of 0 takes it at 0", async () => {
     await withTx(async (t) => {
       await grantCast(t);
       await setCompanySettings(t, { autoApproveLimit: 100000 });
       const never = await makeItem(t, { name: "Never stocked" });
-      const free = await makeItem(t, { name: "Zero cost" });
-      await move(t, { invItemId: free, type: "COUNT_IN", qty: 5, unitCost: 0 });
-      expect(await balanceOf(t, A1, free)).toEqual({ qty: 5, avgCost: 0, value: 0 });
+      const used = await makeItem(t, { name: "Used up at 0" });
+      await move(t, { invItemId: used, type: "COUNT_IN", qty: 2, unitCost: 0 });
+      await move(t, { invItemId: used, type: "ADJUST_OUT", qty: -2 });
+      expect(await balanceOf(t, A1, used)).toEqual({ qty: 0, avgCost: 0, value: 0 });
 
-      for (const [invItemId, reasonCode] of [[never, "FOUND"], [free, "CORRECTION"]]) {
+      for (const [invItemId, reasonCode] of [[never, "FOUND"], [used, "FOUND"]]) {
         const err = await thrownBy(t, (sp) => createAdjustment(sp, STORE, adj({ reasonCode, lines: [{ invItemId, qty: 1 }] })));
         expect(err.code).toBe("VALIDATION");
         expect(err.details).toEqual({ field: "lines", index: 0, invItemId });
         expect(err.message).toMatch(/has no cost at this hotel yet/);
       }
+
+      // Zero-cost stock on hand (samples, a 0-cost opening) is a real cost of 0.
+      const free = await makeItem(t, { name: "Zero cost" });
+      await move(t, { invItemId: free, type: "COUNT_IN", qty: 5, unitCost: 0 });
+      const { adjustment, needsApproval } = await createAdjustment(t, STORE, adj({
+        reasonCode: "CORRECTION", lines: [{ invItemId: free, qty: 1 }],
+      }));
+      expect(needsApproval).toBe(false);
+      expect(adjustment.status).toBe("posted");
+      expect(await movementsOf(t, { sourceType: "ADJ", sourceId: adjustment.id })).toEqual([
+        expect.objectContaining({ type: "ADJUST_IN", inv_item_id: free, qty: 1, unit_cost: 0, value: 0 }),
+      ]);
+      expect(await balanceOf(t, A1, free)).toEqual({ qty: 6, avgCost: 0, value: 0 });
     });
   });
 });

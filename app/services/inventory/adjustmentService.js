@@ -17,8 +17,9 @@
 // correction goes either way.
 //
 // Lock order: client-event advisory lock → doc sequence (nextDocNumber) →
-// balance rows (lockBalances, ledger order; the cost and value decisions are
-// read under them) → postMovements. Approval: adjustment row → balance rows →
+// balance rows (lockBalances, ledger order; created first when the adjustment
+// may post now; the cost and value decisions are read under them) →
+// postMovements. Approval: adjustment row → balance rows (created, in order) →
 // postMovements.
 //
 // submit:false sends the adjustment for approval even when its value is under
@@ -318,8 +319,9 @@ async function post(t, ctx, lines, items) {
 
 /**
  * Stock coming in is valued at the hotel's average: a gain on an item with no
- * cost here (no balance row, or an average of 0) is refused rather than
- * posted at 0. Pass balances read under lockBalances.
+ * cost here (no balance row, or an average of 0 with nothing on hand: the
+ * ledger's test) is refused. Stock on hand at an average of 0 takes the gain
+ * at 0. Pass balances read under lockBalances.
  */
 function assertGainsHaveCost(lines, balances, items) {
   for (const l of lines) {
@@ -367,14 +369,20 @@ export async function createAdjustment(t, user, input = {}) {
 
   const adjustmentNumber = await nextDocNumber(t, { hotelId, docType: 'ADJ' });
 
+  // submit:false always goes for approval, whatever the value.
+  const { adjustmentAutoApproveLimit: limit } = await getEffectiveSettings(t, { companyId, hotelId });
+  const mayAutoPost = input.submit === true && limit > 0;
+
   // Cost and value are read under the balance locks (ledger order), so the
-  // decisions below hold until postMovements.
-  const balances = await lockBalances(t, { companyId, hotelId, invItemIds: lines.map((l) => l.invItemId) });
+  // decisions below hold until postMovements. When this may post now, missing
+  // rows are created first, in order, as the ledger would (so postMovements
+  // never inserts while holding other rows' locks).
+  const balances = await lockBalances(t, {
+    companyId, hotelId, invItemIds: lines.map((l) => l.invItemId), create: mayAutoPost,
+  });
   assertGainsHaveCost(lines, balances, items);
   const value = lines.reduce((s, l) => s + Math.abs(l.qty * (balances.get(l.invItemId)?.avgCost ?? 0)), 0);
-  const { adjustmentAutoApproveLimit: limit } = await getEffectiveSettings(t, { companyId, hotelId });
-  // submit:false always goes for approval, whatever the value.
-  const autoPost = input.submit === true && limit > 0 && Math.round(value * 10000) / 10000 <= limit;
+  const autoPost = mayAutoPost && Math.round(value * 10000) / 10000 <= limit;
 
   const userId = positiveInt(user.id);
   const header = await t.one(
@@ -460,7 +468,9 @@ export async function approveAdjustment(t, user, adjustmentId) {
     )
   ).map((l, index) => ({ index, lineId: Number(l.id), invItemId: Number(l.inv_item_id), qty: Number(l.qty) }));
   const items = await loadCompanyItems(t, adj.companyId, lines.map((l) => l.invItemId));
-  const balances = await lockBalances(t, { companyId: adj.companyId, hotelId: adj.hotelId, invItemIds: lines.map((l) => l.invItemId) });
+  const balances = await lockBalances(t, {
+    companyId: adj.companyId, hotelId: adj.hotelId, invItemIds: lines.map((l) => l.invItemId), create: true,
+  });
   assertGainsHaveCost(lines, balances, items);
   const userId = positiveInt(user.id);
   await post(t, { companyId: adj.companyId, hotelId: adj.hotelId, adjustmentId: adj.id, reasonCode: adj.reasonCode, userId }, lines, items);

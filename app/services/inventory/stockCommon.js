@@ -184,8 +184,12 @@ export async function lockBalances(t, { companyId, hotelId, invItemIds, create =
   return new Map(rows.map((r) => [Number(r.inv_item_id), { qty: Number(r.qty), avgCost: Number(r.avg_cost) }]));
 }
 
-/** No usable cost at the hotel: no balance row, or an average of 0. */
-export const hasNoCost = (balance) => !balance || !(balance.avgCost > 0);
+/**
+ * No cost at the hotel to value stock coming in at: no balance row, or an
+ * average of 0 with nothing on hand (the ledger's own test). Stock on hand at
+ * an average of 0 (a zero-priced receipt or opening line) is a real cost of 0.
+ */
+export const hasNoCost = (balance) => !balance || (!(balance.avgCost > 0) && balance.qty <= 0);
 
 /**
  * Active buyer-side users holding inventory.approve at the hotel (a role scope

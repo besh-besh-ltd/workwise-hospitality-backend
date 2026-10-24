@@ -9,9 +9,10 @@ import { db, withTx, closeDb, truncateDynamic } from "../setup/db.js";
 import { httpClient } from "../helpers/http.js";
 import { revokeRoleScopes } from "../helpers/roleScope.js";
 import {
-  CO_B, A1, A2, A3, HB1, FB, STORE, STORE_ID, CTRL, CTRL_ID, grantCast, makeItem, setLevels, stockIn, balanceOf,
-  movementsOf, thrownBy,
+  CO_B, A1, A2, A3, HB1, FB, STORE, STORE_ID, CTRL, CTRL_ID, grantCast, makeItem, setLevels, stockIn, move, balanceOf,
+  movementsOf, setCompanySettings, thrownBy,
 } from "../helpers/invStockFixtures.js";
+import { makeRfqPo, postReceiptGrn } from "../helpers/invReceiptFixtures.js";
 import {
   startCount, saveCountLines, submitCount, approveCount, cancelCount, getCount, listCounts,
 } from "../../app/services/inventory/countService.js";
@@ -128,6 +129,11 @@ describe("counts", () => {
       expect(cancelled.status).toBe("cancelled");
       const closed = await thrownBy(t, (sp) => saveCountLines(sp, STORE, count.id, [line(item, 1)]));
       expect(closed.code).toBe("CONFLICT");
+      expect(closed.details).toEqual({ status: "cancelled" });
+      // an answer lost before the cancel: its retry is still a replay
+      const afterCancel = await saveCountLines(t, STORE, count.id, [line(item, 9, key)]);
+      expect(afterCancel.replayed).toBe(true);
+      expect(afterCancel.count.status).toBe("cancelled");
       expect(await movementsOf(t, { sourceType: "CNT", sourceId: count.id })).toEqual([]);
       await startCount(t, STORE, { hotelId: A1, scope: "SELECTED", invItemIds: [found] });
     });
@@ -158,7 +164,14 @@ describe("counts", () => {
       expect(asApprover.can).toEqual({ count: true, approve: true });
 
       const list = await listCounts(t, STORE, { hotelId: A1 });
-      expect(list.rows.find((r) => r.id === count.id)).toMatchObject({ status: "submitted", isBlind: true, lineCount: 1, countedCount: 1 });
+      expect(list.rows.find((r) => r.id === count.id)).toMatchObject({
+        status: "submitted", isBlind: true, lineCount: 1, countedCount: 1, countFreeze: false,
+      });
+      // the hotel's effective freeze setting rides on the count
+      expect(asApprover.countFreeze).toBe(false);
+      await setCompanySettings(t, { countFreeze: true });
+      expect((await getCount(t, STORE, count.id)).countFreeze).toBe(true);
+      expect((await listCounts(t, STORE, { hotelId: A1 })).rows.find((r) => r.id === count.id).countFreeze).toBe(true);
     });
   });
 
@@ -274,12 +287,26 @@ describe("counts", () => {
       const lineId = lineOf(submitted, legacy).id;
       const reasons = { [lineId]: "Opening stock on the shelf" };
 
+      const legacyLine = { lineId, invItemId: legacy, displayName: "Legacy rice" };
+      // the approver is told up front which lines need a cost; nobody else is
+      expect(lineOf(await getCount(t, CTRL, count.id), legacy).needsUnitCost).toBe(true);
+      expect(lineOf(await getCount(t, STORE, count.id), legacy).needsUnitCost).toBe(false);
+
+      // a missing reason and a missing cost come back together, in one error
+      const both = await thrownBy(t, (sp) => approveCount(sp, CTRL, count.id, {}));
+      expect(both.code).toBe("VALIDATION");
+      expect(both.details).toEqual({ field: "reasons", lines: [legacyLine], reasons: [legacyLine], unitCosts: [legacyLine] });
+      expect(both.message).toMatch(/reason.+ and .+unit cost/);
+
       // no cost at the hotel, nor anywhere in the company: refused, never posted at 0
       const noCost = await thrownBy(t, (sp) => approveCount(sp, CTRL, count.id, reasons));
       expect(noCost.code).toBe("VALIDATION");
-      expect(noCost.details).toEqual({ field: "unitCosts", lines: [{ lineId, invItemId: legacy, displayName: "Legacy rice" }] });
+      expect(noCost.details).toEqual({ field: "unitCosts", lines: [legacyLine], reasons: [], unitCosts: [legacyLine] });
       const zero = await thrownBy(t, (sp) => approveCount(sp, CTRL, count.id, reasons, { [lineId]: 0 }));
       expect(zero.details).toMatchObject({ field: "unitCosts", lineId: String(lineId) });
+      const huge = await thrownBy(t, (sp) => approveCount(sp, CTRL, count.id, reasons, { [lineId]: 1e9 + 1 }));
+      expect(huge.code).toBe("VALIDATION");
+      expect(huge.details).toMatchObject({ field: "unitCosts", lineId: String(lineId) });
 
       const approved = await approveCount(t, CTRL, count.id, reasons, { [lineId]: 40 });
       expect(approved.status).toBe("approved");
@@ -312,8 +339,11 @@ describe("counts", () => {
       const id = (item) => lineOf(submitted, item).id;
       const reasons = { [id(towel)]: "found", [id(soap)]: "found", [id(mat)]: "found" };
 
+      const matLine = { lineId: id(mat), invItemId: mat, displayName: "Bath mat" };
       const err = await thrownBy(t, (sp) => approveCount(sp, CTRL, count.id, reasons));
-      expect(err.details).toEqual({ field: "unitCosts", lines: [{ lineId: id(mat), invItemId: mat, displayName: "Bath mat" }] });
+      expect(err.details).toEqual({ field: "unitCosts", lines: [matLine], reasons: [], unitCosts: [matLine] });
+      const hint = await getCount(t, CTRL, count.id);
+      expect([towel, soap, mat].map((i) => lineOf(hint, i).needsUnitCost)).toEqual([false, false, true]);
 
       // the approver's cost comes first; otherwise the company's latest inbound cost
       await approveCount(t, CTRL, count.id, reasons, { [id(soap)]: 22, [id(mat)]: 12 });
@@ -325,6 +355,64 @@ describe("counts", () => {
         [soap]: ["COUNT_IN", 2, 22],
         [mat]: ["COUNT_IN", 1, 12],
       });
+    });
+  });
+
+  it("a gain on stock held at an average of 0 posts at 0, with no unit cost asked", async () => {
+    await withTx(async (t) => {
+      await grantCast(t);
+      const sample = await makeItem(t, { name: "Free sample" });
+      await move(t, { hotelId: A2, invItemId: sample, type: "COUNT_IN", qty: 5, unitCost: 0 });
+      const count = await startCount(t, STORE, { hotelId: A2, scope: "SELECTED", invItemIds: [sample] });
+      await saveCountLines(t, STORE, count.id, [line(sample, 7)]);
+      const submitted = await submitCount(t, STORE, count.id);
+      expect(lineOf(await getCount(t, CTRL, count.id), sample).needsUnitCost).toBe(false);
+
+      await approveCount(t, CTRL, count.id, { [lineOf(submitted, sample).id]: "Found" });
+      expect(await movementsOf(t, { sourceType: "CNT", sourceId: count.id })).toEqual([
+        expect.objectContaining({ type: "COUNT_IN", inv_item_id: sample, qty: 2, unit_cost: 0, value: 0 }),
+      ]);
+      expect(await balanceOf(t, A2, sample)).toEqual({ qty: 7, avgCost: 0, value: 0 });
+    });
+  });
+
+  it("a reversed receipt's cost is not borrowed for a count gain", async () => {
+    await withTx(async (t) => {
+      await grantCast(t);
+      const { poId, lineIds } = await makeRfqPo(t, { hotel: A1, lines: [{ qty: 10, unit: "kg", variantId: 1 }] });
+      const grn = await postReceiptGrn(t, { poId, hotelId: A1, lines: [{ poLineId: lineIds[0], accepted: 4, unitCost: 500 }] });
+      const [{ grnLineId, invItemId: item }] = grn.lines;
+
+      const count = await startCount(t, STORE, { hotelId: A2, scope: "SELECTED", invItemIds: [item] });
+      await saveCountLines(t, STORE, count.id, [line(item, 3)]);
+      const submitted = await submitCount(t, STORE, count.id);
+      const lineId = lineOf(submitted, item).id;
+      // the posted receipt's cost would value the gain
+      expect(lineOf(await getCount(t, CTRL, count.id), item).needsUnitCost).toBe(false);
+
+      // the receipt is reversed in full (a posted REVERSAL naming its line)
+      const rev = await t.one(
+        `INSERT INTO tbl_grn (grn_number, hospitality_company_id, hotel_id, po_id, doc_type, reverses_grn_id, status,
+                              received_at, received_by, posted_at, posted_by)
+         SELECT grn_number || '-R', hospitality_company_id, hotel_id, po_id, 'REVERSAL', id, 'posted',
+                received_at, received_by, now(), posted_by FROM tbl_grn WHERE id = $1 RETURNING id`,
+        [grn.grnId]
+      );
+      await t.none(
+        `INSERT INTO tbl_grn_line (hospitality_company_id, grn_id, po_line_id, product_variant_id, inv_item_id, po_uom,
+                                   received_qty, accepted_qty, rejected_qty, uom_factor, stock_qty, unit_cost,
+                                   reverses_grn_line_id)
+         SELECT hospitality_company_id, $1, po_line_id, product_variant_id, inv_item_id, po_uom,
+                received_qty, accepted_qty, rejected_qty, uom_factor, stock_qty, unit_cost, id
+           FROM tbl_grn_line WHERE id = $2`,
+        [rev.id, grnLineId]
+      );
+      await t.none(`UPDATE tbl_grn SET status = 'reversed' WHERE id = $1`, [grn.grnId]);
+
+      expect(lineOf(await getCount(t, CTRL, count.id), item).needsUnitCost).toBe(true);
+      const err = await thrownBy(t, (sp) => approveCount(sp, CTRL, count.id, { [lineId]: "Found" }));
+      expect(err.code).toBe("VALIDATION");
+      expect(err.details).toMatchObject({ field: "unitCosts", unitCosts: [expect.objectContaining({ lineId, invItemId: item })] });
     });
   });
 
@@ -440,5 +528,26 @@ describe("committed: count approval racing a first receipt, and late retries ove
     const dup = await put([line(item, 5, twin), line(other, 1, twin)]);
     expect(dup.status).toBe(400);
     expect(dup.body).toMatchObject({ code: "VALIDATION", details: { field: "lines", index: 1 } });
+
+    // once submitted: a retry of an applied save is still a replay; a new save is refused
+    expect((await store.post(`/api/v1/inventory/counts/${count.id}/submit`).send({})).status).toBe(200);
+    const afterSubmit = await put([line(item, 9, e1)]);
+    expect(afterSubmit.status).toBe(200);
+    expect(afterSubmit.body.data).toMatchObject({ status: "submitted", replayed: true, no_op: true });
+    const fresh = await put([line(item, 4)]);
+    expect(fresh.status).toBe(409);
+    expect(fresh.body).toMatchObject({ code: "CONFLICT", details: { status: "submitted" } });
+  });
+
+  it("the approve endpoint passes the approver's unit costs through", async () => {
+    const { item, countId, lineId } = await submittedCount("Http unit cost");
+    const ctrl = await httpClient(CTRL_ID);
+    const res = await ctrl.post(`/api/v1/inventory/counts/${countId}/approve`)
+      .send({ reasons: { [lineId]: "Found in store" }, unitCosts: { [lineId]: 70 } });
+    expect(res.status).toBe(200);
+    expect(res.body.data.status).toBe("approved");
+    expect(await movementsOf(db, { sourceType: "CNT", sourceId: countId })).toEqual([
+      expect.objectContaining({ type: "COUNT_IN", inv_item_id: item, qty: 5, unit_cost: 70 }),
+    ]);
   });
 });
