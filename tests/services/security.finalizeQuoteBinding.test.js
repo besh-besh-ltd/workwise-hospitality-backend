@@ -28,14 +28,17 @@
 //     department (403), and no scope refusal echoes the refused record's ids.
 //   - an approval instance can not be forged: the generic submit route refuses
 //     every server-owned entity type, and an instance that exists anyway is
-//     refused by the binders unless its company owns the RFQ it awards.
+//     answered as an unknown instance by the engine (its target is another
+//     company's; security.forgedTargetDispatch covers every type), and refused
+//     by the binders on their own unless its company owns the RFQ it awards.
 //   - a selected_quotes award is priced from the vendor's quote line, never
 //     from the price parked in metadata.
 //   - replaying APPROVE on a concluded approval runs nothing, and a caller from
 //     another company is told only what a missing instance would tell them.
 //   - a forged instance that does exist (opened before the submit route was
-//     closed) changes nothing of the other company's on REJECT either: no
-//     finalization reset, no timeline row; a forged legacy NEGOTIATION
+//     closed) changes nothing of the other company's on REJECT either: the
+//     engine refuses it, and its handlers reached without the engine refuse it
+//     too: no finalization reset, no timeline row; a forged legacy NEGOTIATION
 //     instance neither activates nor cancels the other company's round.
 //   - a parked po_user must be the instance's initiator.
 //   - a PO refused after approveQuotes committed the approval (a hold opened
@@ -51,6 +54,12 @@ import { IDS } from "../fixtures/ids.js";
 import { httpClient } from "../helpers/http.js";
 import { createApprovalInstance } from "../../app/models/generalModel.js";
 import { handleAutoCompletedInstances } from "../../app/services/approvalPropagationService.js";
+import { bindParkedAward } from "../../app/services/po/awardQuoteBinding.js";
+import { handleNegotiationQuoteRejection } from "../../app/controllers/general/negotiationQuotePostApproval.js";
+import {
+  handleNegotiationPostApproval,
+  handleNegotiationRejection,
+} from "../../app/controllers/negotiation/negotiationController.js";
 import { buildAuthoritativePOPayload } from "../../app/controllers/po/purchaseOrderController.js";
 import { AuthorizationError } from "../../app/services/authorizationService.js";
 
@@ -232,6 +241,12 @@ const trail = async (rfq) => ({
 const NOTHING = { finalizations: [], pos: [], lines: [], approvals: [] };
 
 const NOT_FOUND = { status: 0, code: "AWARD_QUOTE_NOT_FOUND" };
+// The engine's answer for an instance whose target is another company's: an unknown id.
+const NO_INSTANCE = { status: 2, message: "Approval instance not found" };
+/** Force a terminal status, as a completion that bypassed the engine would. */
+const forceStatus = (id, status) => db.none(
+  `UPDATE tbl_approval_instances SET status = $2, completed_at = NOW() WHERE id = $1`, [id, status]);
+const instanceRowOf = async (id) => db.one(`SELECT * FROM tbl_approval_instances WHERE id = $1`, [id]);
 const MISMATCH = { status: 0, code: "AWARD_QUOTE_MISMATCH" };
 
 const instanceStatus = async (id) => (await db.one(`SELECT status FROM tbl_approval_instances WHERE id = $1`, [id])).status;
@@ -851,11 +866,15 @@ describe("an award approval can not be forged", () => {
 
     expect(viaApproveQuotes.status).toBe(404);
     expect(viaApproveQuotes.body).toMatchObject(NOT_FOUND);
+    // The engine refuses it as an unknown instance: its target is B's.
     expect(viaEngine.status).toBe(404);
-    expect(viaEngine.body).toMatchObject({ code: "AWARD_QUOTE_NOT_FOUND" });
+    expect(viaEngine.body).toEqual(NO_INSTANCE);
     expect(JSON.stringify([viaApproveQuotes.body, viaEngine.body])).not.toContain("777");
     expect(await instanceStatus(instanceId)).toBe("PENDING");
     expect(await snapshot(rfqB)).toEqual({ pos: [], lines: [], finalizations: [], lifecycle: [] });
+    // Defence in depth: the binder refuses it on its own too.
+    await expect(bindParkedAward(db, await instanceRowOf(instanceId)))
+      .rejects.toMatchObject({ code: "AWARD_QUOTE_NOT_FOUND" });
 
     // Completed without either surface (approvalPropagationService): still no
     // PO on B's RFQ, and nothing written to B's timeline either.
@@ -883,8 +902,18 @@ describe("an award approval can not be forged", () => {
 
     const res = await engineReject(result.instance.id);
 
-    expect(res.status).toBe(200);
-    expect(await instanceStatus(result.instance.id)).toBe("REJECTED");
+    // The engine refuses it as an unknown instance and records nothing.
+    expect(res.status).toBe(404);
+    expect(res.body).toEqual(NO_INSTANCE);
+    expect(await instanceStatus(result.instance.id)).toBe("PENDING");
+    expect(await snapshot(rfqB)).toEqual(before);
+
+    // Defence in depth: the rejection handler, reached on a REJECTED forged
+    // instance without the engine, resets nothing and writes nothing either.
+    await forceStatus(result.instance.id, "REJECTED");
+    await handleNegotiationQuoteRejection(result.instance.id, APPROVER, {
+      comment: "not this vendor", instance: await instanceRowOf(result.instance.id),
+    });
     expect(await snapshot(rfqB)).toEqual(before);
     expect(await db.any(`SELECT id FROM tbl_quote_finalization_history WHERE rfq_id = $1`, [rfqB.rfqId])).toEqual([]);
   });
@@ -922,10 +951,20 @@ describe("an award approval can not be forged", () => {
     const approved = await engineApprove(approving, await pendingApproverOf(approving));
     const rejected = await engineReject(rejecting, await pendingApproverOf(rejecting));
 
-    expect(approved.status).toBe(200);
-    expect(rejected.status).toBe(200);
-    expect(await instanceStatus(approving)).toBe("APPROVED");
-    expect(await instanceStatus(rejecting)).toBe("REJECTED");
+    // The engine refuses both as unknown instances and records nothing.
+    expect([approved.status, rejected.status]).toEqual([404, 404]);
+    expect([approved.body, rejected.body]).toEqual([NO_INSTANCE, NO_INSTANCE]);
+    expect(await instanceStatus(approving)).toBe("PENDING");
+    expect(await instanceStatus(rejecting)).toBe("PENDING");
+    expect(await roundState(toApprove)).toEqual(beforeApprove);
+    expect(await roundState(toReject)).toEqual(beforeReject);
+
+    // Defence in depth: the legacy handlers, reached without the engine on
+    // concluded forged instances, neither activate nor cancel B's rounds.
+    await forceStatus(approving, "APPROVED");
+    await forceStatus(rejecting, "REJECTED");
+    await handleNegotiationPostApproval(approving, BUYER, { instance: await instanceRowOf(approving) });
+    await handleNegotiationRejection(rejecting, BUYER, { comment: "forged" });
     expect(await roundState(toApprove)).toEqual(beforeApprove);
     expect(await roundState(toReject)).toEqual(beforeReject);
     expect((await snapshot(rfqB)).lifecycle).toEqual([]);

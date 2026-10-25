@@ -30,13 +30,14 @@ afterAll(async () => {
 const INITIATOR = IDS.users.a1_proc_buyer;
 const APPROVER = IDS.users.a1_proc_poApp;
 
-const created = { instanceIds: [], stepIds: [], poIds: [], rfqIds: [] };
+const created = { instanceIds: [], stepIds: [], poIds: [], rfqIds: [], mrIds: [] };
 
 beforeEach(async () => {
   created.instanceIds = [];
   created.stepIds = [];
   created.poIds = [];
   created.rfqIds = [];
+  created.mrIds = [];
   await db.none(
     `DELETE FROM tbl_notifications
       WHERE COALESCE(recipient_user_id, sender_user_id) = ANY($1::int[])`,
@@ -63,6 +64,9 @@ afterEach(async () => {
   );
   if (created.poIds.length) {
     await db.none(`DELETE FROM tbl_rfq_purchase_order WHERE id = ANY($1::int[])`, [created.poIds]);
+  }
+  if (created.mrIds.length) {
+    await db.none(`DELETE FROM tbl_material_requisition WHERE id = ANY($1::int[])`, [created.mrIds]);
   }
   if (created.rfqIds.length) {
     await db.none(`DELETE FROM tbl_rfq_products WHERE rfq_id = ANY($1::int[])`, [created.rfqIds]);
@@ -108,6 +112,22 @@ async function makeRealPo() {
   );
   created.poIds.push(po.id);
   return po;
+}
+
+/**
+ * A real material requisition of company A, awaiting its approval. The engine
+ * runs no handler for an instance whose target is not its own company's
+ * (approvalTargetOwner), so a decision needs the MR to exist.
+ */
+async function makeRealMr() {
+  const mr = await db.one(
+    `INSERT INTO tbl_material_requisition (mr_number, title, hospitality_company_id, hotel_id, department_id,
+                                           raised_by, status)
+     VALUES ($1, 'Notif MR', $2, $3, $4, $5, 'pending_approval') RETURNING id, mr_number`,
+    [`MR-NOTIF-${++PO_SEQ}`, IDS.hospitality.A, IDS.hotels.A1, IDS.departments.proc, INITIATOR]
+  );
+  created.mrIds.push(mr.id);
+  return mr;
 }
 
 // A minimal PENDING instance with one step and one approver — enough for the
@@ -225,10 +245,11 @@ describe("rejection tells the initiator", () => {
   });
 
   it("carries a readable label for a material requisition", async () => {
+    const mr = await makeRealMr();
     const { instanceId, stepId } = await makePendingApproval({
       entityType: "MR",
-      entityId: 812,
-      metadata: { mr_number: "MR-812", mr_id: 812 },
+      entityId: mr.id,
+      metadata: { mr_number: mr.mr_number, mr_id: mr.id },
     });
 
     const { executeApprovalAction } = await import(
@@ -245,12 +266,13 @@ describe("rejection tells the initiator", () => {
     const rows = await notificationsFor(INITIATOR, "approval_rejected");
     expect(rows[0].title).toContain("Material Requisition");
     expect(rows[0].title).not.toContain("MR #");
-    expect(rows[0].action_url).toBe("/dashboard/buyer/material-requisitions/812");
+    expect(rows[0].action_url).toBe(`/dashboard/buyer/material-requisitions/${mr.id}`);
   });
 
   it("does not notify the approver about their own decision", async () => {
+    const mr = await makeRealMr();
     const { instanceId, stepId } = await makePendingApproval({
-      entityType: "MR", entityId: 813, metadata: { mr_number: "MR-813", mr_id: 813 },
+      entityType: "MR", entityId: mr.id, metadata: { mr_number: mr.mr_number, mr_id: mr.id },
     });
 
     const { executeApprovalAction } = await import(

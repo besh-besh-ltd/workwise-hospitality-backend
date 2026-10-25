@@ -32,6 +32,7 @@ import generalModel, {
   ENTITY_APPROVE_RESOURCE_MAP
 } from '../../models/generalModel.js';
 import { executeApprovalAction } from '../../services/approvalActionService.js';
+import { ApprovalInstanceNotFoundError } from '../../services/approvalTargetOwner.js';
 import { PoDecisionError } from '../../services/poApprovalService.js';
 import { stageLabel } from '../../services/notificationLinks.js';
 import {
@@ -1334,6 +1335,11 @@ const hospitalityApprovalController = {
 
       res.json({ status: 1, data: result });
     } catch (e) {
+      // An instance whose target is another company's (the engine refuses it
+      // before recording anything): the same answer as an unknown id.
+      if (e instanceof ApprovalInstanceNotFoundError) {
+        return res.status(404).json({ status: 2, message: 'Approval instance not found' });
+      }
       // A refused PO rejection (unknown reason, a route that is not available,
       // a stale approval) answers with its own status and code, like the PO page.
       if (e instanceof PoDecisionError) {

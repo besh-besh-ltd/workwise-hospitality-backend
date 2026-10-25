@@ -93,9 +93,10 @@ SELECT count(*) FROM tbl_quote_items qi JOIN tbl_quotes q ON q.id=qi.quote_id WH
 -- metadata; it now refuses every engine type (403 APPROVAL_TYPE_SERVER_OWNED).
 -- Checks 4, 4b and 5 are deploy checks (PENDING rows that will now be
 -- refused); 6 is a GATE (PENDING forged rows to cancel before the deploy);
--- 6b, 7 and 8 are FORENSIC: did anyone use the hole before it closed?
--- (Fix round 3 added 4b, turned 6 into the gate, and extended 6/7 to
--- NEGOTIATION and 8's activity match.)
+-- 7 and 8 are FORENSIC: did anyone use the hole before it closed?
+-- (Fix round 3 added 4b and 8's activity match. Fix round 4 replaced the
+-- per-type 6/6b/7 with ONE generic target test over every engine type, the
+-- same resolution the app now runs before any approval handler.)
 
 -- 4. Pending NEGOTIATION_QUOTE instances the binders will now refuse: the
 --    metadata RFQ is not the instance company's, or the instance's product is
@@ -134,104 +135,245 @@ SELECT ai.id, ai.hospitality_company_id, ai.entity_id, ai.metadata->>'rfq_id' AS
    AND jsonb_array_length(ai.metadata->'selected_quotes') > 0
  ORDER BY 1;
 
--- 6. GATE: PENDING instances whose handlers would act on ANOTHER company.
+-- 6. GATE: every PENDING instance, of ANY type, whose TARGET is not its own
+--    company's, or does not resolve to one company. The target is what its
+--    handlers act on: the RFQ it publishes, the round it activates or cancels,
+--    the ARC it floats, the MR it releases, the PO it approves (per type in
+--    app/services/approvalTargetOwner.js). The app now refuses such an
+--    instance at every handler dispatch and before any vote, and its cancel
+--    leaves the other company's PO and hold alone; the CTEs from `ids AS (` to the end
+--    of `resolved` are that module's TARGET_COMPANY_CTES, verbatim (a test,
+--    security.forgedTargetDispatch, holds the two equal).
 --    Expect 0 rows. Any row is a forged instance (opened through the generic
---    submit route before it was closed) or a data defect: review it, then
---    CANCEL it with the fenced operator block below BEFORE the deploy. The
---    fixed handlers refuse them (and log a warning), but a pending forged
---    instance must not stay in anyone's approval queue.
---      NEGOTIATION_QUOTE: its award and its rejection act on metadata.rfq_id
---        and its product (metadata.rfq_product_id, else entity_id).
---      NEGOTIATION: its approval activates and its rejection cancels the round
---        metadata.round_id (else entity_id); it must be an RFQ round of the
---        instance's company.
-WITH neg_scope AS (
-  SELECT ai.id, ai.entity_type, ai.status, ai.initiated_by, ai.created_at, ai.completed_at,
-         ai.hospitality_company_id AS instance_company,
-         ai.metadata->>'rfq_id' AS meta_rfq,
-         CASE WHEN ai.entity_type = 'NEGOTIATION_QUOTE'
-              THEN COALESCE(CASE WHEN ai.metadata->>'rfq_product_id' ~ '^\d{1,18}$'
-                                 THEN (ai.metadata->>'rfq_product_id')::bigint END, ai.entity_id) END AS rfq_product_id,
-         CASE WHEN ai.entity_type = 'NEGOTIATION'
-              THEN COALESCE(CASE WHEN ai.metadata->>'round_id' ~ '^\d{1,18}$'
-                                 THEN (ai.metadata->>'round_id')::bigint END, ai.entity_id) END AS round_id
+--    submit route before c3a51cd6 closed it) or a data defect: review it, then
+--    CANCEL the reviewed ids with the fenced operator block below BEFORE the
+--    deploy, so it leaves every approver's queue. target_company NULL means
+--    the target is missing or names more than one company.
+WITH src AS (
+  SELECT ai.id, ai.entity_type, ai.entity_id, ai.metadata
     FROM tbl_approval_instances ai
-   WHERE ai.entity_type IN ('NEGOTIATION_QUOTE', 'NEGOTIATION')
-), judged AS (
-  SELECT n.*,
-         CASE n.entity_type
-           WHEN 'NEGOTIATION_QUOTE' THEN EXISTS (
-             SELECT 1 FROM tbl_rfq r JOIN tbl_rfq_products rp ON rp.rfq_id = r.id
-              WHERE r.id::text = n.meta_rfq AND rp.id = n.rfq_product_id
-                AND r.hospitality_company_id = n.instance_company)
-           WHEN 'NEGOTIATION' THEN EXISTS (
-             SELECT 1 FROM tbl_negotiation_rounds nr JOIN tbl_rfq r ON r.id = nr.rfq_id
-              WHERE nr.id = n.round_id AND COALESCE(nr.source_type, 'RFQ') = 'RFQ'
-                AND r.hospitality_company_id = n.instance_company)
-         END AS own_tenant
-    FROM neg_scope n
-   WHERE n.meta_rfq IS NOT NULL OR n.entity_type = 'NEGOTIATION'
+   WHERE ai.status = 'PENDING'
+),
+ids AS (
+  SELECT s.id, s.entity_type, s.entity_id::bigint AS entity_id,
+         CASE WHEN s.metadata->>'rfq_id'             ~ '^[0-9]{1,10}$' THEN (s.metadata->>'rfq_id')::bigint END             AS m_rfq,
+         CASE WHEN s.metadata->>'rfq_product_id'     ~ '^[0-9]{1,10}$' THEN (s.metadata->>'rfq_product_id')::bigint END     AS m_product,
+         CASE WHEN s.metadata->>'round_id'           ~ '^[0-9]{1,10}$' THEN (s.metadata->>'round_id')::bigint END           AS m_round,
+         CASE WHEN s.metadata->>'arc_id'             ~ '^[0-9]{1,10}$' THEN (s.metadata->>'arc_id')::bigint END             AS m_arc,
+         CASE WHEN s.metadata->>'tech_evaluation_id' ~ '^[0-9]{1,10}$' THEN (s.metadata->>'tech_evaluation_id')::bigint END AS m_te,
+         COALESCE(s.metadata->>'rfq_id', '')             <> '' AS has_rfq,
+         COALESCE(s.metadata->>'rfq_product_id', '')     <> '' AS has_product,
+         COALESCE(s.metadata->>'round_id', '')           <> '' AS has_round,
+         COALESCE(s.metadata->>'tech_evaluation_id', '') <> '' AS has_te
+    FROM src s
+),
+named AS (
+  SELECT i.id,
+         CASE
+           WHEN i.entity_type IN ('RFQ', 'TENDER') THEN ARRAY[
+             (SELECT r.hospitality_company_id::bigint FROM tbl_rfq r WHERE r.id = i.entity_id)]
+           WHEN i.entity_type = 'TECHNICAL' THEN ARRAY[
+             (SELECT r.hospitality_company_id::bigint
+                FROM tbl_tech_evaluation_rounds tr
+                JOIN tbl_rfq_product_tech_evaluation te ON te.id = tr.tbl_rfq_product_tech_evaluation_id
+                JOIN tbl_rfq r ON r.id = te.rfq_id
+               WHERE tr.id = i.entity_id)]
+             || CASE WHEN i.has_te THEN ARRAY[
+                  (SELECT r.hospitality_company_id::bigint
+                     FROM tbl_rfq_product_tech_evaluation te JOIN tbl_rfq r ON r.id = te.rfq_id
+                    WHERE te.id = i.m_te)] ELSE '{}'::bigint[] END
+             || CASE WHEN i.has_rfq THEN ARRAY[
+                  (SELECT r.hospitality_company_id::bigint FROM tbl_rfq r WHERE r.id = i.m_rfq)] ELSE '{}'::bigint[] END
+           WHEN i.entity_type = 'NEGOTIATION' THEN ARRAY[
+             (SELECT r.hospitality_company_id::bigint
+                FROM tbl_negotiation_rounds nr JOIN tbl_rfq r ON r.id = nr.rfq_id
+               WHERE nr.id = CASE WHEN i.has_round THEN i.m_round ELSE i.entity_id END
+                 AND COALESCE(nr.source_type, 'RFQ') = 'RFQ')]
+             || CASE WHEN i.has_rfq THEN ARRAY[
+                  (SELECT r.hospitality_company_id::bigint FROM tbl_rfq r WHERE r.id = i.m_rfq)] ELSE '{}'::bigint[] END
+             || CASE WHEN i.has_product THEN ARRAY[
+                  (SELECT r.hospitality_company_id::bigint
+                     FROM tbl_rfq_products rp JOIN tbl_rfq r ON r.id = rp.rfq_id
+                    WHERE rp.id = i.m_product)] ELSE '{}'::bigint[] END
+           WHEN i.entity_type = 'NEGOTIATION_QUOTE' THEN ARRAY[
+             (SELECT r.hospitality_company_id::bigint
+                FROM tbl_rfq_products rp JOIN tbl_rfq r ON r.id = rp.rfq_id
+               WHERE rp.id = CASE WHEN i.has_product THEN i.m_product ELSE i.entity_id END)]
+             || CASE WHEN i.has_rfq THEN ARRAY[
+                  (SELECT r.hospitality_company_id::bigint FROM tbl_rfq r WHERE r.id = i.m_rfq)] ELSE '{}'::bigint[] END
+           WHEN i.entity_type = 'MR' THEN ARRAY[
+             (SELECT mr.hospitality_company_id::bigint FROM tbl_material_requisition mr WHERE mr.id = i.entity_id)]
+           WHEN i.entity_type = 'PO' THEN ARRAY[
+             (SELECT COALESCE(r.hospitality_company_id, a.hospitality_company_id, mr.hospitality_company_id)::bigint
+                FROM tbl_rfq_purchase_order po
+                LEFT JOIN tbl_rfq r ON r.id = po.rfq_id
+                LEFT JOIN tbl_arc_contract c ON c.id = po.arc_contract_id
+                LEFT JOIN tbl_arc a ON a.id = c.arc_id
+                LEFT JOIN tbl_material_requisition mr ON mr.id = po.source_mr_id
+               WHERE po.id = i.entity_id)]
+           WHEN i.entity_type IN ('ARC_TECH', 'ARC_COMMITTEE', 'ARC_PUBLISH') THEN ARRAY[
+             (SELECT a.hospitality_company_id::bigint FROM tbl_arc a WHERE a.id = i.entity_id)]
+           WHEN i.entity_type = 'ARC_AMENDMENT' THEN ARRAY[
+             (SELECT a.hospitality_company_id::bigint
+                FROM tbl_arc_amendment am
+                JOIN tbl_arc_contract c ON c.id = am.arc_contract_id
+                JOIN tbl_arc a ON a.id = c.arc_id
+               WHERE am.id = i.entity_id)]
+             || COALESCE((SELECT array_agg(a.hospitality_company_id::bigint)
+                            FROM tbl_arc_amendment am
+                            JOIN tbl_arc_contract c ON c.id = am.arc_contract_id
+                            JOIN tbl_arc a ON a.id = c.arc_id
+                           WHERE am.approval_instance_id = i.id), '{}'::bigint[])
+           WHEN i.entity_type = 'ARC_NEGOTIATION' THEN ARRAY[
+             (SELECT a.hospitality_company_id::bigint
+                FROM tbl_negotiation_rounds nr JOIN tbl_arc a ON a.id = nr.source_id
+               WHERE nr.id = i.entity_id
+                 AND i.m_round = i.entity_id
+                 AND nr.source_type = 'ARC'
+                 AND nr.source_id = i.m_arc)]
+           WHEN i.entity_type = 'ARC' THEN
+             CASE WHEN i.has_rfq THEN ARRAY[
+                    (SELECT r.hospitality_company_id::bigint FROM tbl_rfq r
+                      WHERE r.id = i.m_rfq
+                        AND (i.entity_id = i.m_rfq
+                             OR EXISTS (SELECT 1 FROM tbl_rfq_products rp
+                                         WHERE rp.id = i.entity_id AND rp.rfq_id = i.m_rfq)))]
+                  ELSE ARRAY[(SELECT r.hospitality_company_id::bigint FROM tbl_rfq r WHERE r.id = i.entity_id)]
+             END
+         END AS companies
+    FROM ids i
+),
+resolved AS (
+  SELECT n.id,
+         CASE
+           WHEN n.companies IS NULL OR cardinality(n.companies) = 0
+                OR array_position(n.companies, NULL) IS NOT NULL THEN NULL
+           WHEN (SELECT count(DISTINCT c) FROM unnest(n.companies) AS c) = 1 THEN n.companies[1]
+         END AS target_company
+    FROM named n
 )
-SELECT id, entity_type, status, initiated_by, created_at, instance_company, meta_rfq, rfq_product_id, round_id
-  FROM judged
- WHERE status = 'PENDING' AND own_tenant IS NOT TRUE
- ORDER BY id;
+SELECT ai.id, ai.entity_type, ai.entity_id, ai.hospitality_company_id AS instance_company,
+       rs.target_company, ai.initiated_by, ai.created_at
+  FROM resolved rs
+  JOIN tbl_approval_instances ai ON ai.id = rs.id
+ WHERE rs.target_company IS DISTINCT FROM ai.hospitality_company_id
+ ORDER BY ai.id;
 
--- 6b. FORENSIC, any status: the same test over every NEGOTIATION_QUOTE and
---     NEGOTIATION instance. For an APPROVED/REJECTED row, look on the other
---     company's RFQ (meta_rfq, or the round's RFQ) for POs, finalizations,
---     finalization resets, timeline rows and round status changes at/after
---     completed_at. Expect 0 rows.
---     (Same CTE as 6; repeated so each check runs on its own.)
-WITH neg_scope AS (
-  SELECT ai.id, ai.entity_type, ai.status, ai.initiated_by, ai.created_at, ai.completed_at,
-         ai.hospitality_company_id AS instance_company,
-         ai.metadata->>'rfq_id' AS meta_rfq,
-         CASE WHEN ai.entity_type = 'NEGOTIATION_QUOTE'
-              THEN COALESCE(CASE WHEN ai.metadata->>'rfq_product_id' ~ '^\d{1,18}$'
-                                 THEN (ai.metadata->>'rfq_product_id')::bigint END, ai.entity_id) END AS rfq_product_id,
-         CASE WHEN ai.entity_type = 'NEGOTIATION'
-              THEN COALESCE(CASE WHEN ai.metadata->>'round_id' ~ '^\d{1,18}$'
-                                 THEN (ai.metadata->>'round_id')::bigint END, ai.entity_id) END AS round_id
+-- 7. FORENSIC: the same test over every CONCLUDED instance (APPROVED or
+--    REJECTED), whose handler ran without this check before the deploy. A row
+--    is a decision whose handler may have acted on another company's target:
+--    read its entity_id and metadata, and look on that target for status
+--    changes, lifecycle rows, finalizations, POs and ARC events at/after
+--    completed_at. Expect 0 rows.
+WITH src AS (
+  SELECT ai.id, ai.entity_type, ai.entity_id, ai.metadata
     FROM tbl_approval_instances ai
-   WHERE ai.entity_type IN ('NEGOTIATION_QUOTE', 'NEGOTIATION')
-), judged AS (
-  SELECT n.*,
-         CASE n.entity_type
-           WHEN 'NEGOTIATION_QUOTE' THEN EXISTS (
-             SELECT 1 FROM tbl_rfq r JOIN tbl_rfq_products rp ON rp.rfq_id = r.id
-              WHERE r.id::text = n.meta_rfq AND rp.id = n.rfq_product_id
-                AND r.hospitality_company_id = n.instance_company)
-           WHEN 'NEGOTIATION' THEN EXISTS (
-             SELECT 1 FROM tbl_negotiation_rounds nr JOIN tbl_rfq r ON r.id = nr.rfq_id
-              WHERE nr.id = n.round_id AND COALESCE(nr.source_type, 'RFQ') = 'RFQ'
-                AND r.hospitality_company_id = n.instance_company)
-         END AS own_tenant
-    FROM neg_scope n
-   WHERE n.meta_rfq IS NOT NULL OR n.entity_type = 'NEGOTIATION'
+   WHERE ai.status IN ('APPROVED', 'REJECTED')
+),
+ids AS (
+  SELECT s.id, s.entity_type, s.entity_id::bigint AS entity_id,
+         CASE WHEN s.metadata->>'rfq_id'             ~ '^[0-9]{1,10}$' THEN (s.metadata->>'rfq_id')::bigint END             AS m_rfq,
+         CASE WHEN s.metadata->>'rfq_product_id'     ~ '^[0-9]{1,10}$' THEN (s.metadata->>'rfq_product_id')::bigint END     AS m_product,
+         CASE WHEN s.metadata->>'round_id'           ~ '^[0-9]{1,10}$' THEN (s.metadata->>'round_id')::bigint END           AS m_round,
+         CASE WHEN s.metadata->>'arc_id'             ~ '^[0-9]{1,10}$' THEN (s.metadata->>'arc_id')::bigint END             AS m_arc,
+         CASE WHEN s.metadata->>'tech_evaluation_id' ~ '^[0-9]{1,10}$' THEN (s.metadata->>'tech_evaluation_id')::bigint END AS m_te,
+         COALESCE(s.metadata->>'rfq_id', '')             <> '' AS has_rfq,
+         COALESCE(s.metadata->>'rfq_product_id', '')     <> '' AS has_product,
+         COALESCE(s.metadata->>'round_id', '')           <> '' AS has_round,
+         COALESCE(s.metadata->>'tech_evaluation_id', '') <> '' AS has_te
+    FROM src s
+),
+named AS (
+  SELECT i.id,
+         CASE
+           WHEN i.entity_type IN ('RFQ', 'TENDER') THEN ARRAY[
+             (SELECT r.hospitality_company_id::bigint FROM tbl_rfq r WHERE r.id = i.entity_id)]
+           WHEN i.entity_type = 'TECHNICAL' THEN ARRAY[
+             (SELECT r.hospitality_company_id::bigint
+                FROM tbl_tech_evaluation_rounds tr
+                JOIN tbl_rfq_product_tech_evaluation te ON te.id = tr.tbl_rfq_product_tech_evaluation_id
+                JOIN tbl_rfq r ON r.id = te.rfq_id
+               WHERE tr.id = i.entity_id)]
+             || CASE WHEN i.has_te THEN ARRAY[
+                  (SELECT r.hospitality_company_id::bigint
+                     FROM tbl_rfq_product_tech_evaluation te JOIN tbl_rfq r ON r.id = te.rfq_id
+                    WHERE te.id = i.m_te)] ELSE '{}'::bigint[] END
+             || CASE WHEN i.has_rfq THEN ARRAY[
+                  (SELECT r.hospitality_company_id::bigint FROM tbl_rfq r WHERE r.id = i.m_rfq)] ELSE '{}'::bigint[] END
+           WHEN i.entity_type = 'NEGOTIATION' THEN ARRAY[
+             (SELECT r.hospitality_company_id::bigint
+                FROM tbl_negotiation_rounds nr JOIN tbl_rfq r ON r.id = nr.rfq_id
+               WHERE nr.id = CASE WHEN i.has_round THEN i.m_round ELSE i.entity_id END
+                 AND COALESCE(nr.source_type, 'RFQ') = 'RFQ')]
+             || CASE WHEN i.has_rfq THEN ARRAY[
+                  (SELECT r.hospitality_company_id::bigint FROM tbl_rfq r WHERE r.id = i.m_rfq)] ELSE '{}'::bigint[] END
+             || CASE WHEN i.has_product THEN ARRAY[
+                  (SELECT r.hospitality_company_id::bigint
+                     FROM tbl_rfq_products rp JOIN tbl_rfq r ON r.id = rp.rfq_id
+                    WHERE rp.id = i.m_product)] ELSE '{}'::bigint[] END
+           WHEN i.entity_type = 'NEGOTIATION_QUOTE' THEN ARRAY[
+             (SELECT r.hospitality_company_id::bigint
+                FROM tbl_rfq_products rp JOIN tbl_rfq r ON r.id = rp.rfq_id
+               WHERE rp.id = CASE WHEN i.has_product THEN i.m_product ELSE i.entity_id END)]
+             || CASE WHEN i.has_rfq THEN ARRAY[
+                  (SELECT r.hospitality_company_id::bigint FROM tbl_rfq r WHERE r.id = i.m_rfq)] ELSE '{}'::bigint[] END
+           WHEN i.entity_type = 'MR' THEN ARRAY[
+             (SELECT mr.hospitality_company_id::bigint FROM tbl_material_requisition mr WHERE mr.id = i.entity_id)]
+           WHEN i.entity_type = 'PO' THEN ARRAY[
+             (SELECT COALESCE(r.hospitality_company_id, a.hospitality_company_id, mr.hospitality_company_id)::bigint
+                FROM tbl_rfq_purchase_order po
+                LEFT JOIN tbl_rfq r ON r.id = po.rfq_id
+                LEFT JOIN tbl_arc_contract c ON c.id = po.arc_contract_id
+                LEFT JOIN tbl_arc a ON a.id = c.arc_id
+                LEFT JOIN tbl_material_requisition mr ON mr.id = po.source_mr_id
+               WHERE po.id = i.entity_id)]
+           WHEN i.entity_type IN ('ARC_TECH', 'ARC_COMMITTEE', 'ARC_PUBLISH') THEN ARRAY[
+             (SELECT a.hospitality_company_id::bigint FROM tbl_arc a WHERE a.id = i.entity_id)]
+           WHEN i.entity_type = 'ARC_AMENDMENT' THEN ARRAY[
+             (SELECT a.hospitality_company_id::bigint
+                FROM tbl_arc_amendment am
+                JOIN tbl_arc_contract c ON c.id = am.arc_contract_id
+                JOIN tbl_arc a ON a.id = c.arc_id
+               WHERE am.id = i.entity_id)]
+             || COALESCE((SELECT array_agg(a.hospitality_company_id::bigint)
+                            FROM tbl_arc_amendment am
+                            JOIN tbl_arc_contract c ON c.id = am.arc_contract_id
+                            JOIN tbl_arc a ON a.id = c.arc_id
+                           WHERE am.approval_instance_id = i.id), '{}'::bigint[])
+           WHEN i.entity_type = 'ARC_NEGOTIATION' THEN ARRAY[
+             (SELECT a.hospitality_company_id::bigint
+                FROM tbl_negotiation_rounds nr JOIN tbl_arc a ON a.id = nr.source_id
+               WHERE nr.id = i.entity_id
+                 AND i.m_round = i.entity_id
+                 AND nr.source_type = 'ARC'
+                 AND nr.source_id = i.m_arc)]
+           WHEN i.entity_type = 'ARC' THEN
+             CASE WHEN i.has_rfq THEN ARRAY[
+                    (SELECT r.hospitality_company_id::bigint FROM tbl_rfq r
+                      WHERE r.id = i.m_rfq
+                        AND (i.entity_id = i.m_rfq
+                             OR EXISTS (SELECT 1 FROM tbl_rfq_products rp
+                                         WHERE rp.id = i.entity_id AND rp.rfq_id = i.m_rfq)))]
+                  ELSE ARRAY[(SELECT r.hospitality_company_id::bigint FROM tbl_rfq r WHERE r.id = i.entity_id)]
+             END
+         END AS companies
+    FROM ids i
+),
+resolved AS (
+  SELECT n.id,
+         CASE
+           WHEN n.companies IS NULL OR cardinality(n.companies) = 0
+                OR array_position(n.companies, NULL) IS NOT NULL THEN NULL
+           WHEN (SELECT count(DISTINCT c) FROM unnest(n.companies) AS c) = 1 THEN n.companies[1]
+         END AS target_company
+    FROM named n
 )
-SELECT id, entity_type, status, initiated_by, created_at, completed_at, instance_company, meta_rfq, rfq_product_id, round_id
-  FROM judged
- WHERE own_tenant IS NOT TRUE
- ORDER BY created_at DESC;
-
--- 7. FORENSIC: instances naming an RFQ that is not their company's.
---      RFQ / TENDER: entity_id is the RFQ; handleRFQPostApproval publishes it,
---        so an approved row here published another company's RFQ.
---      NEGOTIATION: metadata.rfq_id is the RFQ its legacy selected_quotes
---        award writes finalizations on.
---    Expect 0 rows.
-SELECT ai.id, ai.entity_type, ai.status, ai.initiated_by, ai.created_at, ai.completed_at,
-       ai.hospitality_company_id AS instance_company,
-       CASE WHEN ai.entity_type = 'NEGOTIATION' THEN ai.metadata->>'rfq_id' ELSE ai.entity_id::text END AS named_rfq,
-       r.hospitality_company_id AS rfq_company
-  FROM tbl_approval_instances ai
-  LEFT JOIN tbl_rfq r
-         ON r.id::text = CASE WHEN ai.entity_type = 'NEGOTIATION' THEN ai.metadata->>'rfq_id' ELSE ai.entity_id::text END
- WHERE (ai.entity_type IN ('RFQ', 'TENDER')
-        OR (ai.entity_type = 'NEGOTIATION' AND ai.metadata ? 'rfq_id'))
-   AND (r.hospitality_company_id = ai.hospitality_company_id) IS NOT TRUE
- ORDER BY ai.created_at DESC;
+SELECT ai.id, ai.entity_type, ai.entity_id, ai.status, ai.hospitality_company_id AS instance_company,
+       rs.target_company, ai.initiated_by, ai.created_at, ai.completed_at
+  FROM resolved rs
+  JOIN tbl_approval_instances ai ON ai.id = rs.id
+ WHERE rs.target_company IS DISTINCT FROM ai.hospitality_company_id
+ ORDER BY ai.completed_at DESC NULLS LAST, ai.id;
 
 -- 8. FORENSIC: every use of the generic submit route the activity trail saw.
 --    No screen calls it (frontend and admin-panel have no caller). The trail
@@ -240,8 +382,8 @@ SELECT ai.id, ai.entity_type, ai.status, ai.initiated_by, ai.created_at, ai.comp
 --    is a naive timestamp in the session time zone, the trail's occurred_at
 --    a timestamptz). COVERAGE: only since activity capture was deployed
 --    (migration 20260829091000_activity_events); earlier uses left no row, so
---    6b and 7 are the checks for those. Any row: read the instance's
---    entity_type, entity_id and metadata, and run 6b/7 for it. Expect 0 rows
+--    7 is the check for those. Any row: read the instance's
+--    entity_type, entity_id and metadata, and run 7 for it. Expect 0 rows
 --    outside tests.
 SELECT ae.id, ae.occurred_at, ae.actor_user_id, ae.actor_label, ae.hospitality_company_id, ae.summary,
        ai.id AS approval_instance_id, ai.entity_type, ai.entity_id AS instance_entity_id,
@@ -258,16 +400,43 @@ SELECT ae.id, ae.occurred_at, ae.actor_user_id, ae.actor_label, ae.hospitality_c
 -- OPERATOR BLOCK: NOT A CHECK. NOT READ-ONLY. COMMENTED OUT ON PURPOSE.
 -- ----------------------------------------------------------------------------
 -- Run ONLY after a person has reviewed every row check 6 returned and agreed
--- each is not a legitimate approval. Paste the reviewed ids by hand; never
--- feed check 6 into it as a subquery. Cancelling an instance runs no
--- post-approval handler, so it writes nothing to either company.
+-- each is not a legitimate approval. Paste the reviewed ids by hand into
+-- `reviewed` (never feed check 6 into it as a subquery), and the user id of
+-- the operator cancelling them into `actor` (the cancel action's
+-- approver_user_id, as the app records the canceller).
+--
+-- It does what the app's cancel does (generalModel.cancelApprovalInstance)
+-- for an instance whose target is another company's: the instance goes
+-- CANCELLED, its PENDING steps go CANCELLED, and one CANCELLED action row
+-- records why. PO rows included: the app's cancel closes a PO's hold only when
+-- the PO is the instance's own company's, so for these rows it touches no PO
+-- and no hold (a hold on that PO belongs to its own company's approval), and
+-- neither does this block. PENDING instances only.
+-- Row-count check: unless EVERY reviewed id is a PENDING instance it raises,
+-- and the transaction writes nothing. Cancelling runs no post-approval
+-- handler, so it writes nothing to either company's entities.
 --
 -- BEGIN;
--- UPDATE tbl_approval_instances
---    SET status = 'CANCELLED', completed_at = NOW()
---  WHERE status = 'PENDING'
---    AND entity_type IN ('NEGOTIATION_QUOTE', 'NEGOTIATION')
---    AND id IN (/* reviewed ids from check 6 */);
--- -- The row count must equal the number of reviewed ids; otherwise ROLLBACK.
+-- DO $$
+-- DECLARE
+--   reviewed bigint[] := ARRAY[/* reviewed ids from check 6 */]::bigint[];
+--   actor    int      := /* operator user id */;
+--   n        int;
+-- BEGIN
+--   UPDATE tbl_approval_instances
+--      SET status = 'CANCELLED', completed_at = NOW()
+--    WHERE id = ANY(reviewed) AND status = 'PENDING';
+--   GET DIAGNOSTICS n = ROW_COUNT;
+--   IF n <> cardinality(reviewed) THEN
+--     RAISE EXCEPTION 'SEC1 cancel: % of % reviewed ids are PENDING instances; nothing written',
+--       n, cardinality(reviewed);
+--   END IF;
+--   UPDATE tbl_approval_instance_steps
+--      SET status = 'CANCELLED', completed_at = NOW()
+--    WHERE approval_instance_id = ANY(reviewed) AND status = 'PENDING';
+--   INSERT INTO tbl_approval_actions (approval_instance_id, approver_user_id, action, comment)
+--   SELECT r, actor, 'CANCELLED', '[CANCELLED] SEC1: target belongs to another company'
+--     FROM unnest(reviewed) AS r;
+-- END $$;
 -- COMMIT;
 -- ============================================================================

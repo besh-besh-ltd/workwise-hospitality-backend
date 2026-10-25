@@ -16,6 +16,8 @@
 //   - propagation completing the instance activates the round, once;
 //   - Approve on a stuck round, by someone who could approve it, finishes it;
 //     Reject on it, and a second Approve, are refused, never a success;
+//   - a caller in the company with no seat on the instance and no
+//     arc-comm.approve gets 409, and the round stays as it is;
 //   - another company's caller gets the answer a missing round gets (404).
 //
 // Real HTTP + Postgres, the real ARC Commercial Evaluator role.
@@ -34,6 +36,7 @@ const EVAL_1   = IDS.users.a1_proc_buyer;    // creates the round
 const EVAL_2   = IDS.users.a1_proc_commEval;
 const EVAL_3   = IDS.users.a1_proc_commApp;
 const OUTSIDER = IDS.users.companyB_admin;   // company B only
+const BYSTANDER = IDS.users.a1_eng_buyer;    // company A, RFQ Creator: no seat, no arc-comm.approve
 const VENDOR_A = IDS.users.vendor_alpha;
 const CATEGORY = TEST_CATEGORIES.beverages;
 const VARIANT  = 1;
@@ -124,10 +127,10 @@ describe("ARC negotiation — a round stuck under an APPROVED instance", () => {
   beforeAll(async () => {
     originalUsers = await db.any(
       `SELECT id, user_type, status FROM tbl_users WHERE id = ANY($1::int[])`,
-      [[EVAL_1, EVAL_2, EVAL_3, VENDOR_A, OUTSIDER]]
+      [[EVAL_1, EVAL_2, EVAL_3, VENDOR_A, OUTSIDER, BYSTANDER]]
     );
     await db.none(`UPDATE tbl_users SET user_type = 2, status = 1 WHERE id = ANY($1::int[])`,
-      [[EVAL_1, EVAL_2, EVAL_3, OUTSIDER]]);
+      [[EVAL_1, EVAL_2, EVAL_3, OUTSIDER, BYSTANDER]]);
     await db.none(`UPDATE tbl_users SET user_type = 3, status = 1 WHERE id = $1`, [VENDOR_A]);
     insertedCategoryDept = !(await db.oneOrNone(
       `SELECT 1 FROM tbl_category_department WHERE category_id=$1 AND department_id=$2`, [CATEGORY, DEPT]));
@@ -242,6 +245,20 @@ describe("ARC negotiation — a round stuck under an APPROVED instance", () => {
     const again = await approve(EVAL_3, arc.arcId, roundId);
     expect(again.status).toBe(400);
     expect(await startedEvents(arc.arcId, roundId)).toBe(1);
+  });
+
+  test("a caller in the company who could not have approved it gets 409, and the stuck round is left as it is", async () => {
+    const arc = await seedArc();
+    const { roundId, instanceId } = await launchRound(arc);
+    await completeWithoutHandler(instanceId);
+    const before = await round(roundId);
+
+    const res = await approve(BYSTANDER, arc.arcId, roundId);
+    expect(res.status).toBe(409);
+    expect(res.body.status).not.toBe(1);
+    expect(await round(roundId)).toEqual(before);
+    expect(before.status).toBe("PENDING_APPROVAL");
+    expect(await startedEvents(arc.arcId, roundId)).toBe(0);
   });
 
   test("another company's caller is answered like a missing round, and nothing changes", async () => {

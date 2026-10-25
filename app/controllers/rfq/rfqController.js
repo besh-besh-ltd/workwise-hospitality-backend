@@ -51,8 +51,9 @@ import {
 } from './rfqUpdateHelpers.js';
 import { cancelAndReissueApproval } from '../general/reapprovalService.js';
 import { v4 as uuidv4 } from 'uuid';
-import { executeApprovalAction } from '../../services/approvalActionService.js';
+import { executeApprovalAction, dispatchPostApprovalAction } from '../../services/approvalActionService.js';
 import { instanceTenantForCaller } from '../../services/approvalTenantScope.js';
+import { ApprovalInstanceNotFoundError } from '../../services/approvalTargetOwner.js';
 import { checkTechEvalWritable } from '../../services/techEvalScoringGuard.js';
 import {
   assertUserHasScope,
@@ -17863,10 +17864,11 @@ getClauses: async (req, res) => {
         });
       }
 
-      // If auto-approved, trigger post-approval processing (mark vendors, update round, send notifications)
+      // If auto-approved, trigger post-approval processing (mark vendors, update round, send notifications).
+      // Through the one dispatcher, which checks the instance's target first.
       if (result.auto_approved && result.approval_instance_id) {
         try {
-          await handleTechnicalPostApproval(result.approval_instance_id, userId);
+          await dispatchPostApprovalAction(result.approval_instance_id, userId, { status: 'APPROVED' });
         } catch (postApprovalError) {
           logError('Error in TECHNICAL auto-approve post-approval processing', postApprovalError);
         }
@@ -19263,6 +19265,15 @@ getClauses: async (req, res) => {
     } catch (error) {
       logError(error);
 
+      // The engine refused an instance whose target is another company's:
+      // the same answer as an unknown id.
+      if (error instanceof ApprovalInstanceNotFoundError) {
+        return res.status(404).json({
+          status: 2,
+          message: 'Approval instance not found'
+        });
+      }
+
       if (error.message?.includes('not an approver')) {
         return res.status(403).json({
           status: 0,
@@ -19380,6 +19391,15 @@ getClauses: async (req, res) => {
       });
     } catch (error) {
       logError(error);
+
+      // The engine refused an instance whose target is another company's:
+      // the same answer as an unknown id.
+      if (error instanceof ApprovalInstanceNotFoundError) {
+        return res.status(404).json({
+          status: 2,
+          message: 'Approval instance not found'
+        });
+      }
 
       if (error.message?.includes('not an approver')) {
         return res.status(403).json({

@@ -219,7 +219,6 @@ const POLICY_STEPS = [
 const INSTANCE_HOTEL = IDS.hotels.A2;
 const INSTANCE_DEPT = IDS.departments.proc;
 
-let nextEntityId = 8540001; // no tbl_rfq row has an id this high → an unpublished RFQ
 const made = { instanceIds: [], entityIds: [], rfqIds: [] };
 
 const step = (order, sourceType, sourceId) => ({
@@ -243,9 +242,25 @@ async function editPolicy(client, policy, steps, { confirmed = true } = {}) {
   });
 }
 
-/** A PENDING RFQ approval built by the production creator. */
+/**
+ * A PENDING RFQ approval built by the production creator, on a real draft RFQ
+ * of company A unless one is given. A draft is unpublished, so propagation
+ * reshapes its approval; and the engine answers an instance whose RFQ does not
+ * exist like a missing instance (SEC1, approvalTargetOwner). A completed
+ * approval leaves a draft as it is (handleRFQPostApproval publishes only an
+ * RFQ awaiting approval, status 3).
+ */
 async function makeInstance(policy, { entityId } = {}) {
-  const id = entityId ?? nextEntityId++;
+  let id = entityId;
+  if (id == null) {
+    id = Number((await makeRFQ(db, {
+      createdBy: IDS.users.a1_proc_buyer,
+      hospitality: IDS.hospitality.A,
+      hotel: INSTANCE_HOTEL,
+      department: INSTANCE_DEPT,
+    })).rfq_id);
+    made.rfqIds.push(id);
+  }
   const res = await createApprovalInstance({
     entity_type: "RFQ",
     entity_id: id,
@@ -746,6 +761,20 @@ describe("an edit that adds levels never lets an in-flight approval skip or fini
     expect((await instanceRow(instance.id)).status).toBe("APPROVED");
     expect(res.body.propagation.instances_auto_completed).toBe(1);
     expect((await lastChangeSummary(instance.id)).autoCompleted).toBe(true);
+
+    // The handler runs after the response (fire-and-forget) and its last write
+    // is the auto-completion lifecycle row. Wait for it, so it lands before this
+    // test's cleanup rather than after it (where it would outlive the users).
+    const deadline = Date.now() + 20_000;
+    let dispatched = null;
+    while (!dispatched && Date.now() < deadline) {
+      dispatched = await db.oneOrNone(
+        `SELECT 1 FROM tbl_lifecycle_history
+          WHERE metadata->>'approval_instance_id' = $1 AND metadata ? 'auto_completed_by'`,
+        [String(instance.id)]);
+      if (!dispatched) await new Promise((r) => setTimeout(r, 100));
+    }
+    expect(dispatched).not.toBeNull();
   });
 });
 

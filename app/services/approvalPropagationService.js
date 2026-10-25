@@ -551,57 +551,44 @@ export async function advanceInstanceToNextStep(instanceId, t) {
     return { instanceCompleted: false, nextStepOrder: nextStep.step_order, nextStepId: nextStep.id };
   }
 
-  // No more pending steps — instance is fully approved
-  await t.none(
-    `UPDATE tbl_approval_instances SET status = 'APPROVED', completed_at = NOW() WHERE id = $1`,
+  // No more pending steps — instance is fully approved. Conditional on it
+  // still being PENDING: two propagations (or a propagation and a vote)
+  // completing the same instance at once both read PENDING above, and the
+  // second waits on this row's lock. It then finds the row no longer PENDING,
+  // writes nothing and reports nothing completed, so its caller does not
+  // dispatch the post-approval handler a second time.
+  const completed = await t.result(
+    `UPDATE tbl_approval_instances SET status = 'APPROVED', completed_at = NOW()
+      WHERE id = $1 AND status = 'PENDING'`,
     [instanceId]
   );
+  if (completed.rowCount !== 1) {
+    return { instanceCompleted: false, nextStepOrder: null, nextStepId: null };
+  }
 
   return { instanceCompleted: true, nextStepOrder: null, nextStepId: null };
 }
 
 /**
- * Dispatch the post-approval handler for an auto-completed instance.
- * Uses the same registry as approvalActionService.js.
+ * Dispatch the post-approval handler for an auto-completed instance, through
+ * approvalActionService's dispatcher: the one registry, and the one place
+ * that checks the instance's target is its own company's before any handler
+ * runs. A refused instance runs no handler and records no lifecycle row (the
+ * row would land on the other company's entity).
  * Fire-and-forget: errors are logged but never thrown.
  */
 async function dispatchPostApprovalHandler(instanceId, changedBy, reason) {
   try {
+    // Lazy: approvalActionService loads controllers on dispatch.
+    const { dispatchPostApprovalAction } = await import('./approvalActionService.js');
     const instance = await getApprovalInstanceById(instanceId);
     if (!instance) return;
 
-    // Lazy-import registry to avoid circular deps
-    const postActionRegistry = {
-      RFQ:               { APPROVED: () => import('../controllers/rfq/rfqController.js').then(m => m.handleRFQPostApproval) },
-      TENDER:            { APPROVED: () => import('../controllers/rfq/rfqController.js').then(m => m.handleRFQPostApproval) },
-      TECHNICAL:         { APPROVED: () => import('../controllers/rfq/rfqController.js').then(m => m.handleTechnicalPostApproval) },
-      PO:                { APPROVED: () => import('../controllers/po/purchaseOrderController.js').then(m => m.handlePOPostApproval) },
-      // ARC v2 entity types — separate from v1's catch-all 'ARC'. See plan §5.5.
-      ARC_TECH:          { APPROVED: () => import('../controllers/arc_v2/arcEvaluationController.js').then(m => m.handleArcTechPostApproval) },
-      ARC_COMMITTEE:     { APPROVED: () => import('../controllers/arc_v2/arcCommitteeController.js').then(m => m.handleArcCommitteeApproval) },
-      ARC_AMENDMENT:     { APPROVED: () => import('../controllers/arc_v2/arcAmendmentController.js').then(m => m.handleArcAmendmentApproval) },
-      // An ARC negotiation round or an ARC publish completed by a policy or
-      // membership change must still activate / float. Both handlers act only
-      // while their entity is still pending (the round's PENDING_APPROVAL, the
-      // ARC's pending_publish_approval), so a later surface reaching them too
-      // changes nothing.
-      ARC_NEGOTIATION:   { APPROVED: () => import('../controllers/arc_v2/arcNegotiationController.js').then(m => m.handleArcNegotiationApproval) },
-      ARC_PUBLISH:       { APPROVED: () => import('../controllers/arc_v2/arcController.js').then(m => m.handleArcPublishApproval) },
-      MR:                { APPROVED: () => import('../controllers/mr/mrController.js').then(m => m.handleMrPostApproval) },
-      NEGOTIATION:       { APPROVED: () => import('../controllers/negotiation/negotiationController.js').then(m => m.handleNegotiationPostApproval) },
-      NEGOTIATION_QUOTE: { APPROVED: () => import('../controllers/general/negotiationQuotePostApproval.js').then(m => m.handleNegotiationQuotePostApproval) },
-    };
-
-    const loader = postActionRegistry[instance.entity_type]?.APPROVED;
-    if (loader) {
-      const handler = await loader();
-      if (typeof handler === 'function') {
-        await handler(instanceId, changedBy, {
-          comment: `Auto-completed due to ${reason}`,
-          instance,
-        });
-      }
-    }
+    const out = await dispatchPostApprovalAction(instanceId, changedBy, {
+      status: 'APPROVED',
+      comment: `Auto-completed due to ${reason}`,
+    });
+    if (out.refused) return;
 
     // Record lifecycle event
     try {

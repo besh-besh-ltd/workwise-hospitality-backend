@@ -9,6 +9,7 @@ import { approvalActionUrl, entityLabel, buyerHome } from './notificationLinks.j
 import db from '../config/dbConn.js';
 import { bindParkedAward, bindSelectedQuotes } from './po/awardQuoteBinding.js';
 import { isApproverOnCurrentStep } from './approvalMembership.js';
+import { refusesForeignTarget, ApprovalInstanceNotFoundError } from './approvalTargetOwner.js';
 
 /**
  * Approval Action Service
@@ -122,6 +123,9 @@ const postActionRegistry = {
   },
 };
 
+/** Every engine type with a post-approval or rejection handler. */
+export const REGISTERED_APPROVAL_TYPES = Object.freeze(Object.keys(postActionRegistry));
+
 /**
  * Execute an approval action and dispatch the entity-specific post-action.
  *
@@ -138,6 +142,16 @@ const postActionRegistry = {
  */
 export async function executeApprovalAction(args) {
   const instance = await getApprovalInstanceById(args.approval_instance_id);
+
+  // The instance's target (the RFQ, round, ARC, MR or PO its handlers act on)
+  // must be its own company's. One opened in this company naming another
+  // company's target (the generic submit route accepted every type until
+  // c3a51cd6) is answered like a missing instance, before any vote is
+  // recorded, any handler runs or anyone is notified. dispatchPostApprovalAction
+  // makes the same check for every other way a handler is reached.
+  if (instance && await refusesForeignTarget(db, instance, 'executeApprovalAction')) {
+    throw new ApprovalInstanceNotFoundError();
+  }
 
   // PO decisions take their own path, both of them, and both lock the PO row
   // before the approval instance (poApprovalService's lock order):
@@ -190,14 +204,16 @@ export async function executeApprovalAction(args) {
 
   // 2. Dispatch entity-specific post-action only if the instance terminally transitioned.
   if (result.instance_status === 'APPROVED' || result.instance_status === 'REJECTED') {
-    await dispatchPostApprovalAction(args.approval_instance_id, args.approver_user_id, {
+    const dispatched = await dispatchPostApprovalAction(args.approval_instance_id, args.approver_user_id, {
       status: result.instance_status,
       comment: args.comment,
     });
-    await notifyApprovalOutcome(args.approval_instance_id, args.approver_user_id, {
-      status: result.instance_status,
-      comment: args.comment,
-    });
+    if (!dispatched.refused) {
+      await notifyApprovalOutcome(args.approval_instance_id, args.approver_user_id, {
+        status: result.instance_status,
+        comment: args.comment,
+      });
+    }
   }
 
   return result;
@@ -354,28 +370,45 @@ export async function notifyApprovalOutcome(approvalInstanceId, actorUserId, { s
 
 /**
  * Fire the entity-specific post-action for an instance that reached a
- * terminal status. Exported because instances can ALSO terminally transition
- * at CREATION time — createApprovalInstance auto-approves every step whose
- * only required approver is the initiator, returning `autoApproved: true`
- * WITHOUT any executeApprovalAction call. Callers that create instances must
- * invoke this when that happens, or side effects (contract generation,
- * status flips) silently never run.
+ * terminal status. THE dispatcher: executeApprovalAction, the propagation
+ * service's auto-completion (handleAutoCompletedInstances), ARC round recovery
+ * and every create-time auto-approval reach a handler through here. Exported
+ * because instances can ALSO terminally transition at CREATION time —
+ * createApprovalInstance auto-approves every step whose only required approver
+ * is the initiator, returning `autoApproved: true` WITHOUT any
+ * executeApprovalAction call. Callers that create instances must invoke this
+ * when that happens, or side effects (contract generation, status flips)
+ * silently never run.
+ *
+ * Before any handler: the instance's target must be its own company's
+ * (approvalTargetOwner). Otherwise nothing runs and `refused` is true, so the
+ * caller notifies nobody either.
  *
  * Post-actions must never fail the approval itself — errors are logged and
  * swallowed, matching the behaviour of the entity handlers' own try/catch.
+ *
+ * @returns {Promise<{dispatched: boolean, refused: boolean, result?: *}>}
+ *   result is the handler's own return value.
  */
 export async function dispatchPostApprovalAction(approvalInstanceId, actorUserId, { status, comment } = {}) {
   try {
     const instance = await getApprovalInstanceById(approvalInstanceId);
-    const lookup = postActionRegistry[instance?.entity_type];
+    if (!instance) return { dispatched: false, refused: false };
+    if (await refusesForeignTarget(db, instance, `dispatch:${status}`)) {
+      return { dispatched: false, refused: true };
+    }
+    const lookup = postActionRegistry[instance.entity_type];
     const loader = lookup?.[status];
     if (loader) {
       const handler = await loader();
       if (typeof handler === 'function') {
-        await handler(approvalInstanceId, actorUserId, { comment, instance });
+        const result = await handler(approvalInstanceId, actorUserId, { comment, instance });
+        return { dispatched: true, refused: false, result };
       }
     }
+    return { dispatched: false, refused: false };
   } catch (postErr) {
     logError(`Post-approval handler failed for instance ${approvalInstanceId}`, postErr);
+    return { dispatched: false, refused: false };
   }
 }

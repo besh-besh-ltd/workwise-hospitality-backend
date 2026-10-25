@@ -307,14 +307,14 @@ export async function createRound(req, res) {
         txContext: t,
       });
 
-      // Auto-approve: the round is activated after commit by
-      // handleArcNegotiationApproval (dispatched below), the one place that
-      // activates an ARC round. It claims the round by its PENDING_APPROVAL
-      // status, so it must find it still pending here; flipping it ACTIVE in
-      // this transaction would leave the handler nothing to claim and the
-      // vendors un-notified. If that dispatch fails, the round stays
-      // PENDING_APPROVAL under an APPROVED instance, which approveRound
-      // recovers.
+      // Auto-approve: activate the round in THIS transaction, so the committed
+      // round is ACTIVE whatever happens after commit. activateArcRoundTx is
+      // the same claim the post-approval handler makes (its PENDING_APPROVAL
+      // status), so the two can never both activate it. The vendors are told
+      // after commit (notifyArcRoundStarted below).
+      if (engineResult.autoApproved === true) {
+        await activateArcRoundTx(t, { roundId: round.id, arcId, actorUserId: userId });
+      }
 
       return {
         __round:        round,
@@ -331,11 +331,13 @@ export async function createRound(req, res) {
       scheduleArcNegotiationRoundExpiration(result.__round);
 
       if (result.__autoApproved) {
-        // Fire post-approval effects (vendor notifications) post-commit
-        await dispatchPostApprovalAction(result.__instanceId, userId, {
-          status: 'APPROVED',
-          comment: 'Auto-approved — creator is the configured ARC_NEGOTIATION approver',
-        });
+        // The round committed ACTIVE above; tell its vendors. A failure here
+        // must not turn a created, active round into an error response.
+        try {
+          await notifyArcRoundStarted({ arcId, roundId: result.__round.id, actorUserId: userId });
+        } catch (notifyErr) {
+          logger.error({ err: notifyErr, roundId: result.__round.id }, '[arcNeg] createRound: round-started notification failed');
+        }
       } else {
         await notifyArcEvent({
           arcId,
@@ -433,10 +435,15 @@ export async function approveRound(req, res) {
       // handler that failed): finish it, for someone who could approve it.
       // The handler claims the round by its PENDING_APPROVAL status, so this
       // activates it once. Anything else is a conflict, never a success.
+      // Through the one dispatcher, so the instance's target is checked like
+      // every other handler run.
       const approved = instances?.find?.((i) => i.status === 'APPROVED');
       if (approved && await mayRecoverRound(req, approved, arcId)) {
-        const out = await handleArcNegotiationApproval(approved.id, userId, { instance: approved });
-        if (out?.activated) {
+        const out = await dispatchPostApprovalAction(approved.id, userId, {
+          status: 'APPROVED',
+          comment: 'Recovered: the approval had completed without activating the round',
+        });
+        if (out.result?.activated) {
           return ok(res, { allApproved: true, recovered: true }, 'Round approved');
         }
       }
@@ -923,15 +930,59 @@ export async function submitVendorQuote(req, res) {
 // ============================================================
 
 /**
- * Called when an ARC_NEGOTIATION instance reaches APPROVED: by
- * approvalActionService (an approver's last vote), by approvalPropagationService
- * (a policy or membership change completing it), and by approveRound's
+ * Activate an ARC round awaiting approval, inside the caller's transaction:
+ * claim it by its PENDING_APPROVAL status (this ARC's round only), approve its
+ * vendor rows and log negotiation_round_started. Returns false, writing
+ * nothing, when the round is not this ARC's or not pending approval, so a
+ * second caller (createRound's auto-approve, the post-approval handler,
+ * propagation, recovery) can never activate it twice. Notifications are the
+ * caller's, after commit (notifyArcRoundStarted).
+ *
+ * @returns {Promise<boolean>} whether this call activated the round
+ */
+export async function activateArcRoundTx(t, { roundId, arcId, actorUserId }) {
+  const claimed = await t.oneOrNone(
+    `UPDATE tbl_negotiation_rounds
+        SET status = 'ACTIVE', approved_at = $3, published_at = $3, updated_at = NOW()
+      WHERE id = $1 AND source_type = 'ARC' AND source_id = $2 AND status = 'PENDING_APPROVAL'
+      RETURNING id`,
+    [Number(roundId), Number(arcId), new Date()]
+  );
+  if (!claimed) return false;
+  await arcNegotiationModel.updateAllVendorsStatus(roundId, 'APPROVED', t);
+  await logArcEvent({
+    arcId,
+    eventType: ARC_EVENT_TYPES.NEGOTIATION_ROUND_STARTED,
+    actorId: actorUserId,
+    payload:  { round_id: roundId },
+    txContext: t,
+  });
+  return true;
+}
+
+/** Tell an activated round's vendors it is open. After commit only. */
+export async function notifyArcRoundStarted({ arcId, roundId, actorUserId }) {
+  const vendorUsers = await arcNegotiationModel.getVendorsForRound(roundId);
+  await notifyArcEvent({
+    arcId,
+    eventType:         ARC_EVENT_TYPES.NEGOTIATION_ROUND_STARTED,
+    actorId:           actorUserId,
+    recipientsOverride: vendorUsers,
+    payload:            { round_id: roundId },
+  });
+}
+
+/**
+ * Called when an ARC_NEGOTIATION instance reaches APPROVED, always through
+ * approvalActionService.dispatchPostApprovalAction (which first checks the
+ * instance's target is its own company's): an approver's last vote, a policy
+ * or membership change completing it (propagation), and approveRound's
  * recovery of a round left PENDING_APPROVAL under an APPROVED instance.
  * Sets round status = ACTIVE + notifies vendors.
  *
- * Idempotent: the round is claimed by a `status = 'PENDING_APPROVAL'` update of
- * THIS ARC's round, so a second call (or a round already active, closed or
- * cancelled) changes nothing and notifies nobody.
+ * Idempotent: activateArcRoundTx claims the round by its PENDING_APPROVAL
+ * status, so a second call (or a round already active, closed or cancelled)
+ * changes nothing and notifies nobody.
  * Must never throw (swallow + log).
  *
  * @returns {Promise<{activated: boolean}>}
@@ -945,40 +996,13 @@ export async function handleArcNegotiationApproval(approvalInstanceId, actorUser
       return { activated: false };
     }
 
-    const activated = await db.tx(async (t) => {
-      const now = new Date();
-      const claimed = await t.oneOrNone(
-        `UPDATE tbl_negotiation_rounds
-            SET status = 'ACTIVE', approved_at = $3, published_at = $3, updated_at = NOW()
-          WHERE id = $1 AND source_type = 'ARC' AND source_id = $2 AND status = 'PENDING_APPROVAL'
-          RETURNING id`,
-        [Number(roundId), Number(arcId), now]
-      );
-      if (!claimed) return false;
-      await arcNegotiationModel.updateAllVendorsStatus(roundId, 'APPROVED', t);
-      await logArcEvent({
-        arcId,
-        eventType: ARC_EVENT_TYPES.NEGOTIATION_ROUND_STARTED,
-        actorId: actorUserId,
-        payload:  { round_id: roundId },
-        txContext: t,
-      });
-      return true;
-    });
+    const activated = await db.tx((t) => activateArcRoundTx(t, { roundId, arcId, actorUserId }));
     if (!activated) {
       logger.info({ approvalInstanceId, roundId, arcId }, '[arcNeg] handleArcNegotiationApproval: round not pending approval, nothing to do');
       return { activated: false };
     }
 
-    // Notify targeted vendors post-commit
-    const vendorUsers = await arcNegotiationModel.getVendorsForRound(roundId);
-    await notifyArcEvent({
-      arcId,
-      eventType:         ARC_EVENT_TYPES.NEGOTIATION_ROUND_STARTED,
-      actorId:           actorUserId,
-      recipientsOverride: vendorUsers,
-      payload:            { round_id: roundId },
-    });
+    await notifyArcRoundStarted({ arcId, roundId, actorUserId });
     return { activated: true };
   } catch (err) {
     logger.error({ err, approvalInstanceId }, '[arcNeg] handleArcNegotiationApproval failed');
@@ -987,8 +1011,13 @@ export async function handleArcNegotiationApproval(approvalInstanceId, actorUser
 }
 
 /**
- * Called by approvalActionService when an ARC_NEGOTIATION instance reaches REJECTED.
- * Sets round status = CANCELLED + notifies initiator.
+ * Called when an ARC_NEGOTIATION instance reaches REJECTED (through the
+ * dispatcher, see above). Cancels the round + notifies the initiator.
+ *
+ * Claims the round the same way approval does: only THIS ARC's round, and only
+ * while it is PENDING_APPROVAL. A round already active, closed or cancelled is
+ * left alone (an approval can only refuse a round that was waiting for it), and
+ * a second call changes nothing and notifies nobody.
  * Must never throw.
  */
 export async function handleArcNegotiationRejection(approvalInstanceId, actorUserId, { comment, instance } = {}) {
@@ -1000,10 +1029,15 @@ export async function handleArcNegotiationRejection(approvalInstanceId, actorUse
       return;
     }
 
-    await db.tx(async (t) => {
-      await arcNegotiationModel.updateRoundStatus(roundId, 'CANCELLED', {
-        closed_at: new Date(),
-      }, t);
+    const cancelled = await db.tx(async (t) => {
+      const claimed = await t.oneOrNone(
+        `UPDATE tbl_negotiation_rounds
+            SET status = 'CANCELLED', closed_at = $3, updated_at = NOW()
+          WHERE id = $1 AND status = 'PENDING_APPROVAL' AND source_type = 'ARC' AND source_id = $2
+          RETURNING id`,
+        [Number(roundId), Number(arcId), new Date()]
+      );
+      if (!claimed) return false;
       await arcNegotiationModel.updateAllVendorsStatus(roundId, 'REJECTED', t);
       await logArcEvent({
         arcId,
@@ -1012,7 +1046,12 @@ export async function handleArcNegotiationRejection(approvalInstanceId, actorUse
         payload:  { round_id: roundId, comment },
         txContext: t,
       });
+      return true;
     });
+    if (!cancelled) {
+      logger.info({ approvalInstanceId, roundId, arcId }, '[arcNeg] handleArcNegotiationRejection: round not pending approval, nothing to do');
+      return;
+    }
 
     removeArcNegotiationRoundExpiration(roundId);
 
