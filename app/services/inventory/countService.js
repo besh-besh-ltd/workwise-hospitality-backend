@@ -644,7 +644,11 @@ export async function approveCount(t, user, countId, reasons = {}, unitCosts = n
       postedBy: userId,
     }))
   );
-  const valueOf = new Map(posted.map((m) => [m.sourceLineId, m.value]));
+  // A track_expiry line split across batches posts one row per batch: sum them.
+  const valueOf = new Map();
+  for (const m of posted) {
+    valueOf.set(m.sourceLineId, Math.round(((valueOf.get(m.sourceLineId) ?? 0) + m.value) * 10000) / 10000);
+  }
 
   if (work.length) {
     await t.none(

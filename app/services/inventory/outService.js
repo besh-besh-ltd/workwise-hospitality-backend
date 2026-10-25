@@ -53,9 +53,13 @@ export async function loadOutDoc(t, outId) {
             m.unit_cost::text AS unit_cost, m.value::text AS value
        FROM tbl_inv_out_line l
        JOIN tbl_inv_item i ON i.id = l.inv_item_id
-       LEFT JOIN tbl_inv_movement m
-         ON m.source_type = 'OUT' AND m.source_id = l.out_id AND m.source_line_id = l.id
-        AND m.hospitality_company_id = l.hospitality_company_id
+       -- one row per batch for a track_expiry item split across batches (ledger FEFO)
+       LEFT JOIN LATERAL (
+         SELECT min(mm.unit_cost) AS unit_cost, sum(mm.value) AS value
+           FROM tbl_inv_movement mm
+          WHERE mm.source_type = 'OUT' AND mm.source_id = l.out_id AND mm.source_line_id = l.id
+            AND mm.hospitality_company_id = l.hospitality_company_id
+       ) m ON true
       WHERE l.out_id = $1
       ORDER BY l.id`,
     [outId]
