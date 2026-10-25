@@ -825,6 +825,15 @@ async function main() {
       callOff: { poId: ID.callOffPo, poNumber: "E2E-INV-CO-1002", hotel: ID.A1, arcId: ID.arc, contractId: ID.contract, mrId: ID.mr, requiredBy: out.callOff.requiredBy, lineIds: Object.fromEntries(CALL_OFF_LINES.map((l) => [l.key, l.lineId])), total: out.callOff.total },
     },
     siteRep: { tokenId: out.siteRep.tokenId, poId: ID.callOffPo, hotelId: ID.A1, token: SITE_REP_TOKEN, link: siteRepLink },
+    // What Reorder (step 10) matches an MR draft against: ARC 96801, hotel A1, department F&B.
+    // remaining = committed - consumed, in the contract's unit; an MR draft does not consume.
+    contractLines: Object.fromEntries(
+      CONTRACT_LINES.map((c) => {
+        const consumed = CALL_OFF_LINES.find((l) => l.key === c.key)?.qty ?? 0;
+        return [c.key, { arcContractLineId: c.lineId, uom: c.uom, unitRate: c.rate, committed: c.committed, remaining: c.committed - consumed }];
+      })
+    ),
+    reorder: { hotelId: ID.A1, departmentId: DEPT.FB, user: "INVE2E-CTRL" },
   };
   fs.mkdirSync(path.dirname(MANIFEST), { recursive: true });
   fs.writeFileSync(MANIFEST, JSON.stringify(manifest, null, 2));
@@ -851,6 +860,10 @@ async function main() {
   console.log("\nPURCHASE ORDERS (both vendor-accepted, status approved)");
   line(`PO ${ID.rfqPo} E2E-INV-PO-1001`, `multi-hotel RFQ PO, A1 + A2: paneer 40 kg, rice 10 Bag, caps 500 pc; ₹${out.rfqPo.total}`);
   line(`PO ${ID.callOffPo} E2E-INV-CO-1002`, `call-off PO, A1: paneer 15 kg, caps 300 pc; ₹${out.callOff.total}; due ${out.callOff.requiredBy}`);
+  console.log("\nRATE CONTRACT ARC-E2E-INV-0001 (A1, F&B): what Reorder's MR draft matches");
+  for (const [key, c] of Object.entries(manifest.contractLines)) {
+    line(`${P[key].item.name} line ${c.arcContractLineId}`, `₹${c.unitRate}/${c.uom}, ${c.remaining} of ${c.committed} ${c.uom} remaining`);
+  }
   console.log("\nSITE-REP RECEIVE LINK (PO 96802 @ A1)");
   console.log(`  ${siteRepLink}`);
   console.log(`\nManifest: ${MANIFEST}\n`);
