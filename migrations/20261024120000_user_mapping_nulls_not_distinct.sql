@@ -24,8 +24,15 @@
 -- Idempotent: a clean table deletes nothing, and a key that is already
 -- NULLS NOT DISTINCT is left alone. Both tables are small (under 1,000 rows),
 -- so rebuilding the key's index is brief.
+--
+-- Locking. Rebuilding a key takes an exclusive lock, and nearly every request
+-- reads tbl_hospitality_user_mappings. lock_timeout makes the migration give
+-- up (rolling back whole) if a long transaction holds either table, instead of
+-- holding one table locked while it queues for the other. Just re-run it.
 
 BEGIN;
+
+SET LOCAL lock_timeout = '5s';
 
 UPDATE public.tbl_hospitality_user_mappings m
    SET auto_map_projects = true

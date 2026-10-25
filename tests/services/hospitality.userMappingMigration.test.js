@@ -107,4 +107,37 @@ describe("20261024120000_user_mapping_nulls_not_distinct", () => {
     expect(await userMappingUniqueDef()).toMatch(/NULLS NOT DISTINCT/);
     expect(await projectKeyDef()).toMatch(/NULLS NOT DISTINCT/);
   });
+
+  // Rebuilding a key takes an exclusive lock, and nearly every request reads
+  // tbl_hospitality_user_mappings (the hospitality-context check). If a long
+  // transaction holds the project table, the migration must give up — and
+  // leave nothing half-applied — rather than hold the user table locked while
+  // it waits, queueing every request behind it.
+  it("gives up rather than wait behind a long transaction, changing nothing", async () => {
+    await db.none(DOWN); // so the keys need rebuilding
+    const holder = await db.connect();
+    const runner = await db.connect();
+    let timer;
+    try {
+      await holder.none("BEGIN");
+      await holder.any("SELECT 1 FROM tbl_hospitality_project_mappings LIMIT 1");
+
+      const outcome = await Promise.race([
+        runner.none(UP).then(() => "applied", (e) => e),
+        new Promise((resolve) => { timer = setTimeout(() => resolve("still waiting"), 15000); }),
+      ]);
+      expect(outcome).toMatchObject({ code: "55P03" }); // lock_not_available
+    } finally {
+      clearTimeout(timer);
+      await holder.none("ROLLBACK").catch(() => {});
+      holder.done();
+      await runner.none("ROLLBACK").catch(() => {});
+      runner.done();
+    }
+
+    expect(await userMappingUniqueDef()).not.toMatch(/NULLS NOT DISTINCT/);
+    await db.none(UP);
+    expect(await userMappingUniqueDef()).toMatch(/NULLS NOT DISTINCT/);
+    expect(await projectKeyDef()).toMatch(/NULLS NOT DISTINCT/);
+  }, 40000);
 });
