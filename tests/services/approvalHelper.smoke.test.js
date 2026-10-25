@@ -70,8 +70,42 @@ async function createPoCommitted() {
   return po.id;
 }
 
+// A NEGOTIATION approval needs its round behind it: the engine answers an
+// instance whose target does not exist (or is another company's) like a
+// missing instance (SEC1, approvalTargetOwner).
+const insertedRoundIds = [];
+async function createRoundCommitted() {
+  const rfqNo = nextEntityId();
+  const rfq = await db.one(
+    `INSERT INTO tbl_rfq (rfq_no, comment, company_name, response_email, contact_name,
+                          contact_number, bid_end_date, location, is_published, status,
+                          created_by, updated_by, "timestamp", hospitality_company_id,
+                          hotel_id, process_id, is_tender, title)
+     VALUES ($1,'','','b@t','b','0', NOW() - INTERVAL '1 day','Mumbai',1,1,$2,$2,NOW(),$3,$4,$5,0,$6)
+     RETURNING id`,
+    [rfqNo, IDS.users.a1_proc_buyer, IDS.hospitality.A, IDS.hotels.A1, IDS.processes.A_P1, `Smoke round RFQ ${rfqNo}`]
+  );
+  insertedRfqIds.push(rfq.id);
+  const product = await db.one(
+    `INSERT INTO tbl_rfq_products (rfq_id, comment, datasheet, spec_file, qap_file, qap, product_variant_id, variant)
+     VALUES ($1,'','','','','',1,0) RETURNING id`,
+    [rfq.id]
+  );
+  const round = await db.one(
+    `INSERT INTO tbl_negotiation_rounds (rfq_id, source_type, source_id, rfq_product_id, round_number, status,
+                                         end_date, vendor_ids, vendor_approvals, created_by)
+     VALUES ($1, 'RFQ', $1, $2, 1, 'PENDING_APPROVAL', (now() AT TIME ZONE 'UTC') + interval '2 days',
+             ARRAY[]::int[], '[]'::jsonb, $3) RETURNING id`,
+    [rfq.id, product.id, IDS.users.a1_proc_buyer]
+  );
+  insertedRoundIds.push(round.id);
+  return round.id;
+}
+
 async function createInstanceCommitted({ entity_type = "RFQ", policy_id }) {
-  const entity_id = entity_type === "PO" ? await createPoCommitted() : nextEntityId();
+  const entity_id = entity_type === "PO" ? await createPoCommitted()
+    : entity_type === "NEGOTIATION" ? await createRoundCommitted()
+    : nextEntityId();
   const result = await createApprovalInstance({
     entity_type,
     entity_id,
@@ -126,7 +160,12 @@ afterAll(async () => {
   if (insertedPoIds.length) {
     await db.none(`DELETE FROM tbl_rfq_purchase_order WHERE id = ANY($1::int[])`, [insertedPoIds]);
   }
+  if (insertedRoundIds.length) {
+    await db.none(`DELETE FROM tbl_negotiation_round_quotes WHERE negotiation_round_id = ANY($1::int[])`, [insertedRoundIds]);
+    await db.none(`DELETE FROM tbl_negotiation_rounds WHERE id = ANY($1::int[])`, [insertedRoundIds]);
+  }
   if (insertedRfqIds.length) {
+    await db.none(`DELETE FROM tbl_lifecycle_history WHERE entity_id = ANY($1::int[])`, [[...insertedRfqIds, ...insertedRoundIds]]);
     await db.none(`DELETE FROM tbl_rfq_products WHERE rfq_id = ANY($1::int[])`, [insertedRfqIds]);
     await db.none(`DELETE FROM tbl_rfq WHERE id = ANY($1::int[])`, [insertedRfqIds]);
   }

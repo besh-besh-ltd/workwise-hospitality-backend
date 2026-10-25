@@ -37,6 +37,15 @@ export class AuthorizationError extends Error {
     this.status = 403;
     this.data = data;
   }
+
+  // `data` is the REFUSED record's scope tuple (its company, hotel,
+  // department, process). sendScopeError already leaves it out of the
+  // response; this keeps it out of any other body too, e.g. a generic
+  // `res.json({ error })` catch, which serializes the error's own enumerable
+  // fields. Code that needs the tuple reads err.data directly.
+  toJSON() {
+    return { name: this.name, code: this.code, status: this.status, message: this.message };
+  }
 }
 
 export class NoApprovalPolicyError extends Error {
@@ -537,7 +546,15 @@ export async function userCanReadEntity(userId, resource, entity, dbContext = db
 
 /**
  * Send a typed error as a JSON response. Recognized errors expose their
- * code/status/data; anything else becomes a generic 500.
+ * code/status; anything else becomes a generic 500.
+ *
+ * An AuthorizationError's `data` is NOT sent. It describes the record the
+ * caller was refused (its hospitality_company_id, hotel_id, department_id,
+ * process_id) and the permission it needed, so echoing it handed another
+ * tenant's ids to whoever probed for them. It stays on the error for logs and
+ * tests. A NoApprovalPolicyError keeps its `data`: it names the scope the
+ * caller was creating in (their own), and ProcessScopeErrorBanner lists it
+ * under "Details" so they can see which policy is missing.
  *
  * Callers in controllers:
  *   } catch (err) {
@@ -545,7 +562,14 @@ export async function userCanReadEntity(userId, resource, entity, dbContext = db
  *   }
  */
 export function sendScopeError(res, err) {
-  if (err instanceof AuthorizationError || err instanceof NoApprovalPolicyError) {
+  if (err instanceof AuthorizationError) {
+    return res.status(err.status).json({
+      status: 3,
+      code: err.code,
+      message: err.message,
+    });
+  }
+  if (err instanceof NoApprovalPolicyError) {
     return res.status(err.status).json({
       status: 3,
       code: err.code,

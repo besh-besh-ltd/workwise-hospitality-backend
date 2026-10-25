@@ -65,6 +65,20 @@ jest.unstable_mockModule("../../app/config/dbConn.js", () => ({
   pgp: {},
 }));
 
+// The target-owner check (SEC1) reads the instance's target from Postgres; it
+// is pinned against a real database in security.forgedTargetDispatch.test.js.
+// This suite is about ordering, so every instance here owns its target.
+jest.unstable_mockModule("../../app/services/approvalTargetOwner.js", () => {
+  class ApprovalInstanceNotFoundError extends Error {}
+  return {
+    TARGET_COMPANY_CTES: "",
+    instanceTargetCompany: async () => null,
+    instanceTargetIsOwn: async () => true,
+    refusesForeignTarget: async () => false,
+    ApprovalInstanceNotFoundError,
+  };
+});
+
 jest.unstable_mockModule("../../app/services/poDocumentService.js", () => ({
   writePoDocument: (...a) => regenImpl(...a),
 }));

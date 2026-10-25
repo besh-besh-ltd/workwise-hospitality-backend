@@ -5,11 +5,11 @@
 // response under 400, so each repeat used to add another "approved" or
 // "rejected" line to the trail for a decision that happened once.
 //
-// The PO decision service now marks those answers `data.no_op: true`, and the
-// capture skips on that flag alone. It does NOT skip on `already_completed`:
-// for non-PO approvals the engine sets that flag while the post-action and
-// the initiator's notification still re-run, and the row is the record of who
-// re-triggered them. The control below pins that.
+// The PO decision service marks those answers `data.no_op: true`, and the
+// capture skips them. It also skips the engine's `already_completed` answer
+// for any approval: an APPROVE or REJECT on a concluded instance runs no
+// post-action and sends no notification (executeApprovalAction returns before
+// both), so there is nothing to record. The last describe pins that.
 //
 // Real HTTP, real Postgres. Mail is captured at the SMTP transport.
 
@@ -125,22 +125,24 @@ describe("a repeated PO decision leaves one activity row", () => {
   });
 });
 
-describe("control: a non-PO `already_completed` repeat is still recorded", () => {
-  it("writes a row for every repeat on the approval card", async () => {
-    // The cheapest concluded non-PO approval: an INDENT instance, which has no
-    // post-action handler, initiated by the caller (so no notification goes
-    // out either). The engine answers `already_completed` before any approver
-    // check, exactly as it does for an RFQ or MR approval whose handler re-runs.
+describe("a non-PO `already_completed` repeat writes no row either", () => {
+  it("writes nothing for a decision sent to a concluded approval on the approval card", async () => {
+    // The cheapest concluded non-PO approval: an RFQ approval of the PO's own
+    // RFQ (its target must be its own company's, or the engine answers it like
+    // a missing instance), initiated by the caller. The engine answers
+    // `already_completed` before any approver check, and since the engine
+    // stopped re-running post-actions on it nothing happens at all.
+    // This used to write a "critical" approval_decided row per repeat.
     const a = await world.pendingPo();
     const indent = await db.one(
       `INSERT INTO tbl_approval_instances
          (entity_type, entity_id, approval_policy_id, status, current_step,
           hospitality_company_id, hotel_id, department_id, initiated_by)
-       SELECT 'INDENT', 0, approval_policy_id, 'APPROVED', 1,
+       SELECT 'RFQ', $3, approval_policy_id, 'APPROVED', 1,
               hospitality_company_id, hotel_id, department_id, $2
          FROM tbl_approval_instances WHERE id = $1
        RETURNING id`,
-      [a.instanceId, W.PO_APPROVER]
+      [a.instanceId, W.PO_APPROVER, a.rfq.id]
     );
     extraInstances.push(indent.id);
     const since = new Date();
@@ -153,6 +155,6 @@ describe("control: a non-PO `already_completed` repeat is still recorded", () =>
       expect(res.body.data.no_op).toBeUndefined();
     }
 
-    expect(await cardRows(since, W.PO_APPROVER)).toHaveLength(2);
+    expect(await cardRows(since, W.PO_APPROVER)).toHaveLength(0);
   });
 });

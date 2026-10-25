@@ -623,7 +623,7 @@ describe("buyer view", () => {
     const rfq = await openRfq();
     await routeAndAccept(rfq.rfq_id);
     expect((await createQuote(B, rfq)).status).toBe(200);
-    const item = await db.one(`SELECT id FROM tbl_quote_items WHERE rfq_id = $1`, [rfq.rfq_id]);
+    const item = await db.one(`SELECT id, quote_id FROM tbl_quote_items WHERE rfq_id = $1`, [rfq.rfq_id]);
     // finalize needs the buyer in the company's PO hierarchy (or no hierarchy at all)
     const { company_id } = await db.one(`SELECT company_id FROM tbl_users WHERE id = $1`, [BUYER]);
     hierarchyIds.push(
@@ -644,7 +644,7 @@ describe("buyer view", () => {
       product_variant_id: VARIANT,
       variant: 0,
       vendor_id: B,
-      quote_id: item.id,
+      quote_id: item.quote_id,
       quote_item_id: item.id,
       route_type: "PO",
       comment: "awarding the routed member",

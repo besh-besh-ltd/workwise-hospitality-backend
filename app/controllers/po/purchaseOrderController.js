@@ -27,6 +27,7 @@ import { normalizeOwnS3Url } from "../../helper/s3Urls.js";
 import { InventoryError, sendInventoryError } from "../../services/inventory/errors.js";
 import { redactForReceiveToken } from "../../helper/receiveTokenView.js";
 import { fillDefaultDueDates, acceptanceDatesFollowUp, queuePlanChangeFollowUp } from "../../services/inventory/planService.js";
+import { bindPoPayload, awardQuoteNotFound } from "../../services/po/awardQuoteBinding.js";
 
 // Tiny tagged-error class for controllers that need to map a thrown
 // failure mode to a specific HTTP status code (instead of the historic
@@ -287,6 +288,16 @@ export const updatePO = async (req, res) => {
 /**
  * Replaces product_info.charges_meta with authoritative values from tbl_quote_items.
  * Prevents frontend normalization or stale data from corrupting PO charges.
+ *
+ * The quote line is bound to the payload's RFQ, product and vendor first
+ * (bindPoPayload) and a refusal propagates: the read below copies that line's
+ * pricing into the PO, so it must never run for another RFQ's or another
+ * vendor's line.
+ *
+ * There is no "use the payload as-is" fallback any more. A missing line or a
+ * failed read used to return the caller's payload untouched, so the PO line was
+ * priced from the request body's unit_price and charges; both now throw, and
+ * the caller's transaction drafts nothing.
  */
 export const buildAuthoritativePOPayload = async (poInfo, txn) => {
   const dbCtx = txn || db;
@@ -296,73 +307,69 @@ export const buildAuthoritativePOPayload = async (poInfo, txn) => {
     return poInfo;
   }
 
-  try {
-    const dbRow = await dbCtx.oneOrNone(
-      `SELECT qi.freight_price, qi.freight_mode,
-              qi.package_price, qi.package_mode,
-              qi.tax, qi.tax_mode,
-              qi.other_charges,
-              qi.unit_price,
-              qi.pricing_method, qi.entered_mrp,
-              qi.mrp_discount, qi.mrp_discount_mode
-       FROM tbl_quote_items qi
-       WHERE qi.id = $1`,
-      [quoteItemId]
-    );
+  await bindPoPayload(dbCtx, poInfo);
 
-    if (!dbRow) {
-      logger.warn(`buildAuthoritativePOPayload: Quote item ${quoteItemId} not found, using payload as-is`);
-      return poInfo;
-    }
+  const dbRow = await dbCtx.oneOrNone(
+    `SELECT qi.freight_price, qi.freight_mode,
+            qi.package_price, qi.package_mode,
+            qi.tax, qi.tax_mode,
+            qi.other_charges,
+            qi.unit_price,
+            qi.pricing_method, qi.entered_mrp,
+            qi.mrp_discount, qi.mrp_discount_mode
+     FROM tbl_quote_items qi
+     WHERE qi.id = $1`,
+    [quoteItemId]
+  );
 
-    // unit_price is money and must come from the quote the vendor actually
-    // submitted, not from the request body. The award payload carries a
-    // client-supplied unit_price (rfqValidation requires it) which nothing
-    // downstream re-checked, so a stale or altered value would flow straight
-    // into the PO line and its printed PDF — both of which recompute from
-    // unit_price rather than from any stored total.
-    let unitPrice = dbRow.unit_price;
+  // bindPoPayload has just read this row, so only a concurrent delete gets
+  // here. Refuse rather than price the line from the request body.
+  if (!dbRow) throw awardQuoteNotFound();
 
-    // MRP (tax-inclusive) lines: tbl_quote_items.unit_price is a numeric(15,2)
-    // column, so the stored exclusive rate is a rounded echo of a repeating
-    // decimal and pricing the PO from it reintroduces the per-unit drift.
-    // Re-derive it at full precision from the audit inputs the vendor actually
-    // entered. tbl_purchase_order_product.unit_price is unconstrained numeric,
-    // so the exact rate persists — which is what keeps every later PO recompute
-    // (PO edit, and the PDF, both of which re-run the engine off unit_price)
-    // reproducing "MRP less discount x qty" to the paisa without needing MRP
-    // columns on the PO tables at all.
-    if (dbRow.pricing_method === 'MRP' && Number(dbRow.entered_mrp) > 0) {
-      unitPrice = deriveMrpLine({
-        mrp: dbRow.entered_mrp,
-        discount: dbRow.mrp_discount,
-        discount_mode: dbRow.mrp_discount_mode,
-        gst_pct: dbRow.tax,
-      }).base;
-    }
+  // unit_price is money and must come from the quote the vendor actually
+  // submitted, not from the request body. The award payload carries a
+  // client-supplied unit_price (rfqValidation requires it) which nothing
+  // downstream re-checked, so a stale or altered value would flow straight
+  // into the PO line and its printed PDF — both of which recompute from
+  // unit_price rather than from any stored total.
+  let unitPrice = dbRow.unit_price;
 
-    return {
-      ...poInfo,
-      product_info: {
-        ...poInfo.product_info,
-        unit_price: unitPrice,
-        charges_meta: {
-          freight_price: dbRow.freight_price,
-          freight_mode: dbRow.freight_mode,
-          package_price: dbRow.package_price,
-          package_mode: dbRow.package_mode,
-          tax: dbRow.tax,
-          // GST on an MRP line is always a percentage extracted from within the
-          // price — force it so the PO can never be priced with an absolute tax.
-          tax_mode: dbRow.pricing_method === 'MRP' ? 'percentage' : dbRow.tax_mode,
-          other_charges: dbRow.other_charges || []
-        }
-      }
-    };
-  } catch (err) {
-    logError('buildAuthoritativePOPayload error, using payload as-is:', err);
-    return poInfo;
+  // MRP (tax-inclusive) lines: tbl_quote_items.unit_price is a numeric(15,2)
+  // column, so the stored exclusive rate is a rounded echo of a repeating
+  // decimal and pricing the PO from it reintroduces the per-unit drift.
+  // Re-derive it at full precision from the audit inputs the vendor actually
+  // entered. tbl_purchase_order_product.unit_price is unconstrained numeric,
+  // so the exact rate persists — which is what keeps every later PO recompute
+  // (PO edit, and the PDF, both of which re-run the engine off unit_price)
+  // reproducing "MRP less discount x qty" to the paisa without needing MRP
+  // columns on the PO tables at all.
+  if (dbRow.pricing_method === 'MRP' && Number(dbRow.entered_mrp) > 0) {
+    unitPrice = deriveMrpLine({
+      mrp: dbRow.entered_mrp,
+      discount: dbRow.mrp_discount,
+      discount_mode: dbRow.mrp_discount_mode,
+      gst_pct: dbRow.tax,
+    }).base;
   }
+
+  return {
+    ...poInfo,
+    product_info: {
+      ...poInfo.product_info,
+      unit_price: unitPrice,
+      charges_meta: {
+        freight_price: dbRow.freight_price,
+        freight_mode: dbRow.freight_mode,
+        package_price: dbRow.package_price,
+        package_mode: dbRow.package_mode,
+        tax: dbRow.tax,
+        // GST on an MRP line is always a percentage extracted from within the
+        // price — force it so the PO can never be priced with an absolute tax.
+        tax_mode: dbRow.pricing_method === 'MRP' ? 'percentage' : dbRow.tax_mode,
+        other_charges: dbRow.other_charges || []
+      }
+    }
+  };
 };
 
 /**
@@ -377,6 +384,12 @@ export const draftPO = async (poInfo, user, txn, opts = {}) => {
     if (!rfq_id || !product_info || !product_info.rfq_product_id) {
       throw new Error('Missing required PO fields.');
     }
+
+    // Every PO line is drafted from a quote line bound to this RFQ, product and
+    // vendor, whoever the caller is (finalize, an approval replaying a parked
+    // payload, the negotiation award). The global charges read below and the
+    // line written by draftPurchaseOrder both key on it.
+    await bindPoPayload(txn || db, poInfo);
 
     // Server-authoritative recompute: ignore the client's total_value and
     // derive it from the engine using the charges_meta that will actually
