@@ -67,8 +67,9 @@
 //     batches is written as one movement row per batch, in that order, each
 //     with the line's sourceLineId and its batch_no / expiry_date (NULL for
 //     the undated bucket); valuation runs per row, in sequence.
-//   - An expiry write-off (ADJUST_OUT / COUNT_OUT with reasonCode EXPIRY)
-//     takes the batches that have already expired (expiry before today in
+//   - An expiry write-off (ADJUST_OUT with reasonCode EXPIRY; count lines
+//     carry free-text reasons, so a count loss always goes FEFO) takes the
+//     batches that have already expired (expiry before today in
 //     IST) first, earliest first, after any batch it names; the rest goes
 //     FEFO as above. Writing off expired stock must empty the expired lot,
 //     not the undated bucket.
@@ -309,7 +310,7 @@ function fefo(a, b) {
 const stocked = (set, except = null) => [...set.buckets.values()].filter((b) => b !== except && b.qty > 0n).sort(fefo);
 
 /** Outbound types that write stock off; with reasonCode EXPIRY they take expired lots first. */
-const WRITE_OFF_TYPES = new Set(['ADJUST_OUT', 'COUNT_OUT']);
+const WRITE_OFF_TYPES = new Set(['ADJUST_OUT']);
 const writesOffExpiry = (line) => WRITE_OFF_TYPES.has(line.type) && line.reasonCode === 'EXPIRY';
 
 /** A deficit in the undated bucket is stock already issued: stock on hand covers it, FEFO. */
