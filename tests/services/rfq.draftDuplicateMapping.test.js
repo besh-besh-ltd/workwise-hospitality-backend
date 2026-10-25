@@ -205,6 +205,25 @@ describe("POST /rfq/save-draft — the access check is not weakened", () => {
   });
 });
 
+describe("POST /rfq/save-draft — a missing role permission", () => {
+  // Once the duplicate grant no longer throws, the next gate a buyer meets is
+  // the role check (rfq.create for the business unit + department + process).
+  // A refusal there must say so, not fall into the generic failure sentence.
+  it("tells the buyer the save was refused for lack of the RFQ permission", async () => {
+    // BUYER's rfq.create role covers Procurement only.
+    const rfq_id = await makeDraft(BUYER, { department: IDS.departments.eng });
+
+    const res = await buyer
+      .post("/api/v1/rfq/save-draft")
+      .send(saveBody(rfq_id, IDS.hotels.A1, "should not save"));
+    expect(res.status).toBe(403);
+    expect(res.body.message).toBe("User lacks rfq.create scope for this entity");
+
+    const after = await db.one(`SELECT comment FROM tbl_rfq WHERE id = $1`, [rfq_id]);
+    expect(after.comment).not.toBe("should not save");
+  });
+});
+
 describe("POST /rfq/save-draft — an unexpected failure", () => {
   it("says only the generic sentence, never the database's own message", async () => {
     const rfq_id = await makeDraft(BUYER);

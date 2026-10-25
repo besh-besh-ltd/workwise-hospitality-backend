@@ -7031,6 +7031,13 @@ const rfqController = {
     } catch (error) {
       logError(error);
 
+      // Typed errors from authorizationService (a missing rfq.create role, no
+      // approval policy) carry their own 4xx and a message the buyer can act
+      // on — same as POST /rfq/create.
+      if (error instanceof AuthorizationError || error instanceof NoApprovalPolicyError) {
+        return sendScopeError(res, error);
+      }
+
       // F-DRAFT-500: saveRfqDraft signals business-logic rejections by
       // throwing `new Error(JSON.stringify({message, status, ...}))`.
       // Translate the structured-error shape to a sensible HTTP code so
