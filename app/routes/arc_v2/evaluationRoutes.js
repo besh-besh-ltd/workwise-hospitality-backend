@@ -60,6 +60,9 @@ r.post('/:arcId/comm-eval/clarification/:clarificationId/uphold', passportSignIn
 // Create/close require COMM_WRITE; approve/reject are engine-gated (acl[2,8] only).
 r.post('/:arcId/comm-eval/negotiation/rounds',                                  passportSignIn, acl([2, 8]), COMM_WRITE, negotiationController.createRound);
 r.get( '/:arcId/comm-eval/negotiation/rounds',                                  passportSignIn, acl([2, 8]), COMM_READ,  negotiationController.listRounds);
+// Access is decided in the controller: commercial read keys OR a seat on one of
+// the ARC's round approvals (approvers may hold no module role).
+r.get( '/:arcId/comm-eval/negotiation/approval-bundle',                         passportSignIn, acl([2, 8]),             negotiationController.getApprovalBundle);
 r.get( '/:arcId/comm-eval/negotiation/rounds/:roundId/quotes',                  passportSignIn, acl([2, 8]), COMM_READ,  negotiationController.getRoundQuotes);
 r.post('/:arcId/comm-eval/negotiation/rounds/:roundId/approve',                 passportSignIn, acl([2, 8]),             negotiationController.approveRound);
 r.post('/:arcId/comm-eval/negotiation/rounds/:roundId/reject',                  passportSignIn, acl([2, 8]),             negotiationController.rejectRound);
