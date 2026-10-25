@@ -257,6 +257,7 @@ SELECT ai.id, ai.entity_type, ai.entity_id, ai.hospitality_company_id AS instanc
   FROM resolved rs
   JOIN tbl_approval_instances ai ON ai.id = rs.id
  WHERE rs.target_company IS DISTINCT FROM ai.hospitality_company_id
+    OR ai.hospitality_company_id IS NULL  -- no company: the app refuses these too
  ORDER BY ai.id;
 
 -- 7. FORENSIC: the same test over every CONCLUDED instance (APPROVED or
@@ -373,6 +374,7 @@ SELECT ai.id, ai.entity_type, ai.entity_id, ai.status, ai.hospitality_company_id
   FROM resolved rs
   JOIN tbl_approval_instances ai ON ai.id = rs.id
  WHERE rs.target_company IS DISTINCT FROM ai.hospitality_company_id
+    OR ai.hospitality_company_id IS NULL  -- no company: the app refuses these too
  ORDER BY ai.completed_at DESC NULLS LAST, ai.id;
 
 -- 8. FORENSIC: every use of the generic submit route the activity trail saw.
@@ -435,7 +437,7 @@ SELECT ae.id, ae.occurred_at, ae.actor_user_id, ae.actor_label, ae.hospitality_c
 --      SET status = 'CANCELLED', completed_at = NOW()
 --    WHERE approval_instance_id = ANY(reviewed) AND status = 'PENDING';
 --   INSERT INTO tbl_approval_actions (approval_instance_id, approver_user_id, action, comment)
---   SELECT r, actor, 'CANCELLED', '[CANCELLED] SEC1: target belongs to another company'
+--   SELECT r, actor, 'CANCELLED', '[CANCELLED] SEC1: target belongs to another company or does not exist'
 --     FROM unnest(reviewed) AS r;
 -- END $$;
 -- COMMIT;

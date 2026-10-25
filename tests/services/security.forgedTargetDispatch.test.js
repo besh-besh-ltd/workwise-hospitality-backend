@@ -401,7 +401,7 @@ describe("pre-deploy gate (check 6) and its operator block", () => {
       if (cancelled.includes(id)) {
         expect(row).toMatchObject({
           status: "CANCELLED", done: true, steps: ["CANCELLED"],
-          actions: [`CANCELLED|[CANCELLED] SEC1: target belongs to another company|${APPROVER_A}`],
+          actions: [`CANCELLED|[CANCELLED] SEC1: target belongs to another company or does not exist|${APPROVER_A}`],
         });
       } else {
         expect({ id, status: row.status, actions: row.actions }).toEqual({ id, status: "PENDING", actions: null });
