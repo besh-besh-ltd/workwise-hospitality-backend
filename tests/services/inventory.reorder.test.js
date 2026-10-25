@@ -21,6 +21,7 @@ import { makeRfqPo, setPlan } from "../helpers/invReceiptFixtures.js";
 import {
   getReorderList, createReorderMrDraft, runLowStockSweep,
 } from "../../app/services/inventory/reorderService.js";
+import { assertUserHasScope } from "../../app/services/authorizationService.js";
 
 const ENG = IDS.departments.eng;
 const VENDOR = IDS.users.vendor_alpha;
@@ -41,6 +42,14 @@ afterAll(async () => {
 
 let seq = 0;
 const tag = () => `inv-d3-${process.pid}-${++seq}`;
+
+/**
+ * mr.create (the system "MR Raiser" role) for a buyer at A1: one department,
+ * or every one (departmentId null). An MR draft needs it at the exact
+ * department; Storekeeper and Inventory Controller do not carry it.
+ */
+const grantMr = async (t, userId = STORE_ID, { hotelId = A1, departmentId = null, processId = null } = {}) =>
+  grantRoleScope(t, { userId, roleId: await roleId(t, "MR Raiser"), companyId: CO, hotelId, departmentId, processId });
 
 async function mapVariant(t, invItemId, variantId) {
   await t.none(
@@ -260,6 +269,7 @@ describe("reorder worklist", () => {
   it("contracted lines: the cheapest per department the caller may raise an MR for", async () => {
     await withTx(async (t) => {
       await grantCast(t);
+      await grantMr(t);
       const v = V[0];
       const milk = await itemWith(t, { name: "Milk", variantId: v, reorderLevel: 10, maxQty: 50 });
       const fb90 = await makeContract(t, { departmentId: FB, lines: [{ variantId: v, unitRate: 90 }] });
@@ -281,18 +291,25 @@ describe("reorder worklist", () => {
       expect(row.productVariantId).toBe(v);
       expect(row.contractedLines.map((l) => l.arcContractLineId)).not.toContain(fb90.lineIds[0]);
 
-      // a buyer scoped to Engineering at A1 sees no F&B or Housekeeping rates
+      // a buyer who may raise MRs only for Engineering at A1 sees no F&B or Housekeeping rates
       const eng = IDS.users.a1_eng_buyer;
       await grantRoleScope(t, { userId: eng, roleId: await roleId(t, "Storekeeper"), companyId: CO, hotelId: A1, departmentId: ENG });
+      await grantMr(t, eng, { departmentId: ENG });
       const engList = await getReorderList(t, { id: eng, user_type: 2 }, { hotelId: A1 });
       expect(engList.departments.map((d) => d.id)).toEqual([ENG]);
       expect(rowOf(engList, milk)).toMatchObject({ contracted: null, contractedLines: [], productVariantId: v });
+
+      // nor does one who may raise none (inventory.update is not mr.create)
+      const ctrlList = await getReorderList(t, CTRL, { hotelId: A1 });
+      expect(ctrlList.departments).toEqual([]);
+      expect(rowOf(ctrlList, milk)).toMatchObject({ contracted: null, contractedLines: [] });
     });
   });
 
   it("a line shows the rate the MR will store, and the cheapest is picked on that rate", async () => {
     await withTx(async (t) => {
       await grantCast(t);
+      await grantMr(t);
       const v = V[0];
       const milk = await itemWith(t, { name: "Milk", variantId: v, reorderLevel: 10, maxQty: 50 });
       // F&B: a group line at 90 with this hotel's override at 60, a plain line at 80
@@ -349,13 +366,42 @@ describe("reorder worklist", () => {
     });
   });
 
-  it("can.createMrDraft: inventory.update at the hotel, and a buyer", async () => {
+  it("can.createMrDraft: a buyer holding mr.create at the hotel, in any department", async () => {
     await withTx(async (t) => {
       await grantCast(t);
       await itemWith(t, { name: "Milk", variantId: V[0], reorderLevel: 10, maxQty: 50 });
-      expect((await getReorderList(t, STORE, { hotelId: A1 })).can).toEqual({ createMrDraft: true });
-      // the same storekeeper on a non-buyer account
-      expect((await getReorderList(t, { id: STORE_ID, user_type: 5 }, { hotelId: A1 })).can).toEqual({ createMrDraft: false });
+      const at = async (user) => {
+        const list = await getReorderList(t, user, { hotelId: A1 });
+        return { can: list.can, departments: list.departments.map((d) => d.id) };
+      };
+      // Storekeeper only, Inventory Controller only: inventory.update is not mr.create
+      expect(await at(STORE)).toEqual({ can: { createMrDraft: false }, departments: [] });
+      expect(await at(CTRL)).toEqual({ can: { createMrDraft: false }, departments: [] });
+      // mr.create bound to a process does not count: an MR has no process
+      await grantMr(t, STORE_ID, { departmentId: FB, processId: IDS.processes.A_P1 });
+      // nor does mr.create at another hotel
+      await grantMr(t, STORE_ID, { hotelId: A2, departmentId: FB });
+      expect(await at(STORE)).toEqual({ can: { createMrDraft: false }, departments: [] });
+
+      // mr.create at A1 for F&B: that department, and the flag
+      await grantMr(t, STORE_ID, { departmentId: FB });
+      expect(await at(STORE)).toEqual({ can: { createMrDraft: true }, departments: [FB] });
+      // every department it lists is one the draft's own check admits
+      await expect(
+        assertUserHasScope(STORE_ID, "mr.create", { hospitality_company_id: CO, hotel_id: A1, department_id: FB }, t)
+      ).resolves.toBeUndefined();
+      await expect(
+        assertUserHasScope(STORE_ID, "mr.create", { hospitality_company_id: CO, hotel_id: A1, department_id: HK }, t)
+      ).rejects.toMatchObject({ name: "AuthorizationError" });
+      // the same grant on a non-buyer account
+      expect(await at({ id: STORE_ID, user_type: 5 })).toEqual({ can: { createMrDraft: false }, departments: [] });
+
+      // mr.create for every department of the hotel
+      await grantMr(t, CTRL_ID);
+      const all = await at(CTRL);
+      expect(all.can).toEqual({ createMrDraft: true });
+      expect(all.departments).toEqual(expect.arrayContaining([FB, HK, ENG]));
+
       // inventory.read only
       const viewer = IDS.users.a1_proc_techEval;
       const custom = Number((await t.one(
@@ -393,6 +439,7 @@ describe("MR draft from the reorder list", () => {
   it("contracted items create an MR draft with ARC line", async () => {
     await withTx(async (t) => {
       await grantCast(t);
+      await grantMr(t, STORE_ID, { departmentId: FB });
       const [v1, , v3] = V;
       const milk = await itemWith(t, { name: "Milk", variantId: v1, reorderLevel: 10, maxQty: 50, qty: 4 });
       const juice = await itemWith(t, { name: "Juice", variantId: v3, reorderLevel: 12, maxQty: 36 });
@@ -440,6 +487,7 @@ describe("MR draft from the reorder list", () => {
   it("non-contracted item rejected from MR path", async () => {
     await withTx(async (t) => {
       await grantCast(t);
+      await grantMr(t, STORE_ID, { departmentId: FB });
       const [v1, v2, v3, v4] = V;
       const milk = await itemWith(t, { name: "Milk", variantId: v1, reorderLevel: 10, maxQty: 50 });
       const soap = await itemWith(t, { name: "Soap", stockUom: "pcs", variantId: v2, reorderLevel: 10, maxQty: 40 });
@@ -488,6 +536,7 @@ describe("MR draft from the reorder list", () => {
   it("a contract's remaining quantity is a hard cap; a group hotel's own share is soft", async () => {
     await withTx(async (t) => {
       await grantCast(t);
+      await grantMr(t);
       const [v1, , v3] = V;
       const milk = await itemWith(t, { name: "Milk", variantId: v1, reorderLevel: 10, maxQty: 50 });
       const juice = await itemWith(t, { name: "Juice", variantId: v3, reorderLevel: 12, maxQty: 36 });
@@ -548,6 +597,8 @@ describe("MR draft from the reorder list", () => {
   it("a repeated clientEventId answers the draft it made, and never another one", async () => {
     await withTx(async (t) => {
       await grantCast(t);
+      await grantMr(t);
+      await grantMr(t, CTRL_ID);
       const milk = await itemWith(t, { name: "Milk", variantId: V[0], reorderLevel: 10, maxQty: 50 });
       await makeContract(t, { departmentId: FB, lines: [{ variantId: V[0], unitRate: 80 }] });
       await makeContract(t, { departmentId: HK, lines: [{ variantId: V[0], unitRate: 80 }] });
@@ -576,17 +627,33 @@ describe("MR draft from the reorder list", () => {
     });
   });
 
-  it("the hotel and department come from the caller's scope", async () => {
+  it("the hotel comes from the caller's scope; the department needs mr.create there", async () => {
     await withTx(async (t) => {
       await grantCast(t);
       const milk = await itemWith(t, { name: "Milk", variantId: V[0], reorderLevel: 10, maxQty: 50 });
       await makeContract(t, { departmentId: FB, lines: [{ variantId: V[0] }] });
       const body = { hotelId: A1, departmentId: FB, items: [{ invItemId: milk, qty: 5 }] };
+      const refusal = async (user, input = body) => {
+        const err = await thrownBy(t, (sp) => createReorderMrDraft(sp, user, input));
+        return { code: err.code, details: err.details };
+      };
+      const answer = async (user, input) => {
+        const err = await thrownBy(t, (sp) => createReorderMrDraft(sp, user, input));
+        return { code: err.code, message: err.message, details: err.details };
+      };
+      const noMrCreate = {
+        code: "FORBIDDEN", details: { resource: "mr", action: "create", hotelId: A1, departmentId: FB },
+      };
 
       // another company's hotel
-      expect((await thrownBy(t, (sp) => createReorderMrDraft(sp, FOREIGN, body))).code).toBe("NOT_FOUND");
+      expect((await refusal(FOREIGN)).code).toBe("NOT_FOUND");
 
-      // inventory.read without inventory.update: can see the hotel, cannot act
+      // Storekeeper only, Inventory Controller only: they see the hotel, and
+      // inventory.update does not raise an MR
+      expect(await refusal(STORE)).toEqual(noMrCreate);
+      expect(await refusal(CTRL)).toEqual(noMrCreate);
+
+      // inventory.read only: the same
       const viewer = IDS.users.a1_proc_techEval;
       const custom = Number((await t.one(
         `INSERT INTO tbl_roles (title, description, created_by) VALUES ('D3 inventory viewer', 'reorder test', $1) RETURNING id`,
@@ -598,26 +665,45 @@ describe("MR draft from the reorder list", () => {
         [custom]
       );
       await grantRoleScope(t, { userId: viewer, roleId: custom, companyId: CO });
-      expect((await thrownBy(t, (sp) => createReorderMrDraft(sp, { id: viewer, user_type: 2 }, body))).code).toBe("FORBIDDEN");
+      expect(await refusal({ id: viewer, user_type: 2 })).toEqual(noMrCreate);
 
-      // a storekeeper scoped to Engineering cannot raise an F&B requisition
+      // mr.create at A1 for Engineering cannot raise an F&B requisition
       const eng = IDS.users.a1_eng_buyer;
       await grantRoleScope(t, { userId: eng, roleId: await roleId(t, "Storekeeper"), companyId: CO, hotelId: A1, departmentId: ENG });
+      await grantMr(t, eng, { departmentId: ENG });
       const engUser = { id: eng, user_type: 2 };
-      const out = await thrownBy(t, (sp) => createReorderMrDraft(sp, engUser, body));
-      expect(out.code).toBe("NOT_FOUND");
-      expect(out.details).toMatchObject({ field: "departmentId" });
+      expect(await refusal(engUser)).toEqual(noMrCreate);
       // Engineering itself is in scope (milk just has no Engineering contract)
-      const own = await thrownBy(t, (sp) => createReorderMrDraft(sp, engUser, { ...body, departmentId: ENG }));
-      expect(own.details).toMatchObject({ reason: "NOT_CONTRACTED" });
-      // an unknown department is not found either
-      const ghost = await thrownBy(t, (sp) => createReorderMrDraft(sp, STORE, { ...body, departmentId: 999999 }));
-      expect(ghost.code).toBe("NOT_FOUND");
+      expect((await refusal(engUser, { ...body, departmentId: ENG })).details).toMatchObject({ reason: "NOT_CONTRACTED" });
+
+      // mr.create bound to a process does not count (an MR has no process)
+      await grantMr(t, STORE_ID, { departmentId: FB, processId: IDS.processes.A_P1 });
+      expect(await refusal(STORE)).toEqual(noMrCreate);
+
+      // mr.create with no inventory.read at the hotel: the hotel is not
+      // visible, and reads exactly as a hotel that does not exist
+      const raiserOnly = { id: IDS.users.a1_proc_commEval, user_type: 2 };
+      await grantMr(t, raiserOnly.id, { departmentId: FB });
+      const hidden = await answer(raiserOnly, body);
+      expect(hidden.code).toBe("NOT_FOUND");
+      expect(hidden).toEqual(await answer(raiserOnly, { ...body, hotelId: 2000000000 }));
+
+      // mr.create at A1 for F&B: the draft is made
+      await grantMr(t, STORE_ID, { departmentId: FB });
+      const made = await createReorderMrDraft(t, STORE, body);
+      expect(made).toMatchObject({ hotelId: A1, departmentId: FB, items: [{ invItemId: milk, quantity: 5 }] });
+      // and only for F&B
+      expect(await refusal(STORE, { ...body, departmentId: HK })).toEqual({
+        ...noMrCreate, details: { ...noMrCreate.details, departmentId: HK },
+      });
+
+      // an unknown department is not found
+      const ghost = await refusal(STORE, { ...body, departmentId: 999999 });
+      expect(ghost).toEqual({ code: "NOT_FOUND", details: { field: "departmentId" } });
 
       // a foreign item id is not found
       const other = await makeItem(t, { companyId: IDS.hospitality.B, name: "Company B item" });
-      const foreignItem = await thrownBy(t, (sp) => createReorderMrDraft(sp, STORE, { ...body, items: [{ invItemId: other, qty: 1 }] }));
-      expect(foreignItem.code).toBe("NOT_FOUND");
+      expect((await refusal(STORE, { ...body, items: [{ invItemId: other, qty: 1 }] })).code).toBe("NOT_FOUND");
     });
   });
 });
@@ -746,6 +832,8 @@ describe("over HTTP", () => {
     priorUserType = (await db.one(`SELECT user_type FROM tbl_users WHERE id = $1`, [STORE_ID])).user_type;
     await db.none(`UPDATE tbl_users SET user_type = 2 WHERE id = $1`, [STORE_ID]);
     scopes = await grantCast(db);
+    // ... holding mr.create at A1 for F&B
+    scopes.push(await grantMr(db, STORE_ID, { departmentId: FB }));
     await db.tx(async (t) => {
       milk = await itemWith(t, { name: "HTTP milk", variantId: V[0], reorderLevel: 10, maxQty: 50, qty: 4 });
       soap = await itemWith(t, { name: "HTTP soap", stockUom: "pcs", variantId: V[1], reorderLevel: 10, maxQty: 40 });
@@ -824,8 +912,14 @@ describe("over HTTP", () => {
     expect(rows).toHaveLength(1);
   });
 
-  it("403 without inventory.update or on a non-buyer account; a department out of scope is a 404 envelope", async () => {
+  it("403 without mr.create at the hotel and department, or on a non-buyer account; an unknown department is a 404 envelope", async () => {
     const body = { hotelId: A1, departmentId: FB, items: [{ invItemId: milk, qty: 1 }] };
+    const noMrCreate = {
+      status: 0,
+      message: "You don't have permission to raise a material requisition for this department at this hotel",
+      code: "FORBIDDEN",
+      details: { resource: "mr", action: "create", hotelId: A1, departmentId: FB },
+    };
 
     // CTRL holds inventory.update company-wide but is not a buyer (user_type NULL)
     const ctrl = await httpClient(CTRL_ID);
@@ -834,7 +928,8 @@ describe("over HTTP", () => {
     expect(notBuyer.body).toMatchObject({ status: 0, code: "FORBIDDEN" });
     expect((await ctrl.get(`/api/v1/inventory/reorder?hotelId=${A1}`)).body.data.can).toEqual({ createMrDraft: false });
 
-    // a buyer with inventory.read only
+    // a buyer with inventory.read only, Storekeeper only, Inventory Controller
+    // only, then mr.create for Engineering only: each sees the hotel and gets 403
     const viewer = IDS.users.a1_proc_techEval;
     const priorType = (await db.one(`SELECT user_type FROM tbl_users WHERE id = $1`, [viewer])).user_type;
     const role = Number((await db.one(
@@ -848,13 +943,25 @@ describe("over HTTP", () => {
          SELECT $1, id FROM tbl_permissions WHERE resource::text = 'inventory' AND action::text = 'read'`,
         [role]
       );
-      scope = [await grantRoleScope(db, { userId: viewer, roleId: role, companyId: CO })];
       await db.none(`UPDATE tbl_users SET user_type = 2 WHERE id = $1`, [viewer]);
       const client = await httpClient(viewer);
-      const readOnly = await client.post("/api/v1/inventory/reorder/mr-draft").send(body);
-      expect(readOnly.status).toBe(403);
-      expect(readOnly.body).toMatchObject({ status: 0, code: "FORBIDDEN" });
-      expect((await client.get(`/api/v1/inventory/reorder?hotelId=${A1}`)).body.data.can).toEqual({ createMrDraft: false });
+      const holding = async (grants) => {
+        await revokeRoleScopes(db, scope);
+        scope = [];
+        for (const g of grants) scope.push(await grantRoleScope(db, { userId: viewer, companyId: CO, ...g }));
+        const post = await client.post("/api/v1/inventory/reorder/mr-draft").send(body);
+        const get = await client.get(`/api/v1/inventory/reorder?hotelId=${A1}`);
+        return { post: { status: post.status, body: post.body }, can: get.body.data?.can };
+      };
+      const refused = { post: { status: 403, body: noMrCreate }, can: { createMrDraft: false } };
+      expect(await holding([{ roleId: role }])).toEqual(refused);
+      expect(await holding([{ roleId: await roleId(db, "Storekeeper") }])).toEqual(refused);
+      expect(await holding([{ roleId: await roleId(db, "Inventory Controller") }])).toEqual(refused);
+      // mr.create at A1 for Engineering: the list offers a draft (for Engineering), F&B is refused
+      expect(await holding([
+        { roleId: await roleId(db, "Storekeeper") },
+        { roleId: await roleId(db, "MR Raiser"), hotelId: A1, departmentId: IDS.departments.eng },
+      ])).toEqual({ ...refused, can: { createMrDraft: true } });
     } finally {
       await db.none(`UPDATE tbl_users SET user_type = $2 WHERE id = $1`, [viewer, priorType ?? null]);
       await revokeRoleScopes(db, scope);
@@ -862,7 +969,7 @@ describe("over HTTP", () => {
       await db.none(`DELETE FROM tbl_roles WHERE id = $1`, [role]);
     }
 
-    // a department that does not exist (or is not the caller's): the inventory 404 envelope
+    // a department that does not exist: the inventory 404 envelope
     const store = await httpClient(STORE_ID);
     const ghost = await store.post("/api/v1/inventory/reorder/mr-draft").send({ ...body, departmentId: 999999 });
     expect(ghost.status).toBe(404);
