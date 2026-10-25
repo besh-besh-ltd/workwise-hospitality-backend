@@ -195,16 +195,44 @@ export async function instanceOwnsRfq(dbCtx, instance, rfqId) {
 }
 
 /**
+ * Does this approval instance belong to the company that owns the RFQ
+ * negotiation round `roundId`? A NEGOTIATION instance names its round by
+ * metadata.round_id (or entity_id), and its handlers activate or cancel that
+ * round: the round's RFQ must be the instance company's. An ARC-sourced round,
+ * an unknown id or a missing company is false.
+ *
+ * @param {object} dbCtx
+ * @param {object} instance  the tbl_approval_instances row (hospitality_company_id)
+ * @param {*} roundId
+ * @returns {Promise<boolean>}
+ */
+export async function instanceOwnsRound(dbCtx, instance, roundId) {
+  const company = toId(instance?.hospitality_company_id);
+  const round = toId(roundId);
+  if (!company || !round) return false;
+  const row = await dbCtx.oneOrNone(
+    `SELECT 1
+       FROM tbl_negotiation_rounds nr
+       JOIN tbl_rfq r ON r.id = nr.rfq_id
+      WHERE nr.id = $1 AND COALESCE(nr.source_type, 'RFQ') = 'RFQ' AND r.hospitality_company_id = $2`,
+    [round, company]
+  );
+  return !!row;
+}
+
+const PO_USER_NOT_INITIATOR = "This approval's parked award names a different user than the one who opened it.";
+
+/**
  * A NEGOTIATION_QUOTE approval's parked award (metadata.po_payload, written by
  * finalize), checked before the approval that turns it into a PO is recorded.
  * The instance must be its company's award of a product on that company's
  * RFQ (bindInstanceToRfq); the payload must bind (bindPoPayload) and must be
  * the award of the product the instance is for (entity_id is the rfq_product
- * id) on the RFQ the instance names. An instance with no po_payload has
- * nothing to bind.
+ * id) on the RFQ the instance names; a parked po_user must be the instance's
+ * initiator. An instance with no po_payload has nothing to bind.
  *
  * @param {object} dbCtx
- * @param {object} instance  the tbl_approval_instances row: { entity_id, hospitality_company_id, metadata }
+ * @param {object} instance  the tbl_approval_instances row: { entity_id, hospitality_company_id, initiated_by, metadata }
  * @throws PoDecisionError as bindAwardQuote
  */
 export async function bindParkedAward(dbCtx, instance = {}) {
@@ -214,6 +242,12 @@ export async function bindParkedAward(dbCtx, instance = {}) {
   if (!payload) return null;
   if (toId(payload.product_info?.rfq_product_id) !== toId(entityId)) throw mismatch(OTHER_AWARDED_PRODUCT);
   if (meta.rfq_id != null && toId(meta.rfq_id) !== toId(payload.rfq_id)) throw notFound(NOT_ON_RFQ);
+  // finalize parks po_user = the finalizing user, who is also the instance's
+  // initiator; the PO is drafted in that user's name. Anything else was not
+  // written by finalize.
+  if (meta.po_user != null && toId(meta.po_user?.id) !== toId(instance.initiated_by)) {
+    throw mismatch(PO_USER_NOT_INITIATOR);
+  }
   await bindInstanceToRfq(dbCtx, instance, payload.rfq_id);
   return bindPoPayload(dbCtx, payload);
 }

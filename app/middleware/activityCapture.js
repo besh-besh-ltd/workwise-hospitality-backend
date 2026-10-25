@@ -257,14 +257,15 @@ const captureEvent = async (req, res, responseBody) => {
   // says the thing actually happened, by handing over its detail.
   if (definition?.requireDetail && !res.locals?.activityDetail) return;
 
-  // A repeated decision that ran nothing (an approver's double-click on a PO
-  // they already decided) says so with `data.no_op`, set only where the PO
-  // decision service returned early with nothing recorded (R26). It is not a
-  // second decision, so it gets no second row. `already_completed` alone is
-  // NOT enough: for non-PO approvals the engine sets it while the post-action
-  // and the initiator's notification still re-run, and that row is the record
-  // of who re-triggered them.
-  if (responseBody?.data?.no_op === true) return;
+  // A repeated decision that ran nothing is not a second decision, so it gets
+  // no second row. Two flags say so:
+  //   - `data.no_op`: set where a service returned early with nothing recorded
+  //     (the PO decision service, R26; inventory replays).
+  //   - `data.already_completed`: the approval engine's answer for an instance
+  //     that had already concluded (or an approver repeating their own
+  //     decision). executeApprovalAction runs no post-approval handler and
+  //     sends no notification for it, so nothing was re-triggered either.
+  if (responseBody?.data?.no_op === true || responseBody?.data?.already_completed === true) return;
 
   const scope = await resolveScope(definition, {
     req,

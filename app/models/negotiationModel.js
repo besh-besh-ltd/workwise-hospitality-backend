@@ -2580,26 +2580,44 @@ const negotiationModel = {
   // round id. The tie-break that works on all 884 is metadata->>'rfq_id':
   // the true round is the one whose rfq_id matches the instance's metadata.
   //
-  // Resolution ladder (verified: 884/884 resolve, 815 direct + 69 via metadata):
+  // The rfq_id tie-break still misroutes a legacy instance whose entity_id
+  // (an rfq_product_id) collides with ANOTHER round of the SAME RFQ: that
+  // round passes the tie-break and wins. So the metadata round is preferred
+  // whenever it is itself a round of the metadata RFQ; it names the round the
+  // instance was opened for, while entity_id only does on the modern shape
+  // (where the two agree anyway).
+  //
+  // Resolution ladder:
+  //   0. metadata->>'round_id' resolves to a round of metadata->>'rfq_id'
+  //                                                     → that round
   //   1. entity_id resolves to a round AND (no metadata rfq_id, or that round's
   //      rfq_id matches it)                            → entity_id
   //   2. otherwise metadata->>'round_id' resolves       → that round
+  // (ARC_NEGOTIATION instances carry no rfq_id: rung 0 never applies, and
+  // entity_id is their round.) Casts go through bigint behind a digits-only
+  // guard, so an oversized number in metadata matches nothing instead of
+  // failing the whole query.
   //
-  // Shared by getPendingNegotiationRoundIds and getRoundApprovalState so the
-  // listing toggle and the detail page's approval card can never disagree.
+  // Shared by getPendingNegotiationRoundIds, getRoundApprovalState and the
+  // listing's tab counts, so the toggle, the counts and the detail page's
+  // approval card can never disagree.
   negotiationInstanceRoundJoinSql: (instanceAlias = 'i') => `
          LEFT JOIN tbl_negotiation_rounds _nrd ON _nrd.id = ${instanceAlias}.entity_id
          LEFT JOIN tbl_negotiation_rounds _nrm
-                ON _nrm.id = CASE WHEN (${instanceAlias}.metadata->>'round_id') ~ '^[0-9]+$'
-                                  THEN (${instanceAlias}.metadata->>'round_id')::int END`,
+                ON _nrm.id = CASE WHEN (${instanceAlias}.metadata->>'round_id') ~ '^[0-9]{1,18}$'
+                                  THEN (${instanceAlias}.metadata->>'round_id')::bigint END`,
 
   negotiationInstanceRoundIdSql: (instanceAlias = 'i') => `
          CASE
+           WHEN _nrm.id IS NOT NULL
+                AND (${instanceAlias}.metadata->>'rfq_id') ~ '^[0-9]{1,18}$'
+                AND _nrm.rfq_id = (${instanceAlias}.metadata->>'rfq_id')::bigint
+             THEN _nrm.id
            WHEN _nrd.id IS NOT NULL
                 AND (
                   (${instanceAlias}.metadata->>'rfq_id') IS NULL
-                  OR (${instanceAlias}.metadata->>'rfq_id') !~ '^[0-9]+$'
-                  OR _nrd.rfq_id = (${instanceAlias}.metadata->>'rfq_id')::int
+                  OR (${instanceAlias}.metadata->>'rfq_id') !~ '^[0-9]{1,18}$'
+                  OR _nrd.rfq_id = (${instanceAlias}.metadata->>'rfq_id')::bigint
                 )
              THEN _nrd.id
            ELSE _nrm.id

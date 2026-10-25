@@ -433,6 +433,36 @@ describe("SECURITY: POST /approval/cancel — cross-tenant instance", () => {
 });
 
 // ---------------------------------------------------------------------------
+// The RFQ and tech-eval approval routes decide an instance by id, like the
+// generic action route. They answered another company's instance with its
+// type ("only for TECHNICAL approval instances") or its approver state, which
+// confirms it exists. A foreign instance now gets the missing-instance 404.
+describe("SECURITY: RFQ approval routes answer a foreign instance like a missing one", () => {
+  it("POST /rfq/tech-eval/approval/action and /rfq/:id/approve-action: same 404 as an unknown id, nothing recorded", async () => {
+    const entityId = 998813;
+    const foreign = await makeInstance({
+      hospitality: IDS.hospitality.B, hotel: IDS.hotels.B1, policyId: B_POLICY, entityId,
+    });
+    const { missing } = await db.one(`SELECT COALESCE(MAX(id), 0) + 100000 AS missing FROM tbl_approval_instances`);
+    const client = await httpClient(IDS.users.companyA_admin);
+    const body = (id) => ({ approval_instance_id: id, action: "APPROVE", comment: "ok" });
+
+    for (const path of ["/api/v1/rfq/tech-eval/approval/action", `/api/v1/rfq/${entityId}/approve-action`]) {
+      const res = await client.post(path).send(body(foreign));
+      const unknown = await client.post(path).send(body(Number(missing)));
+      expect({ path, status: res.status }).toEqual({ path, status: 404 });
+      expect(res.status).toBe(unknown.status);
+      expect(res.body).toEqual(unknown.body);
+    }
+    const after = await db.one(`SELECT status FROM tbl_approval_instances WHERE id=$1`, [foreign]);
+    expect(after.status).toBe("PENDING");
+    const { n } = await db.one(
+      `SELECT count(*)::int AS n FROM tbl_approval_actions WHERE approval_instance_id = $1`, [foreign]);
+    expect(n).toBe(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
 describe("SECURITY: approval PROCESS mutations", () => {
   it("PUT /processes/:id 404s across tenants and leaves the row unchanged", async () => {
     const before = await db.one(

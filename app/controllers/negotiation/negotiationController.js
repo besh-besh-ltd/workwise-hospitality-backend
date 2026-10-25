@@ -47,7 +47,7 @@ const formatRoundDeadlineIst = (endDate) => {
 import { draftPO, buildAuthoritativePOPayload } from '../po/purchaseOrderController.js';
 import { notifyDraftCreated } from '../../services/po/poInitiateNotifier.js';
 import { PoDecisionError } from '../../services/po/poDecisionError.js';
-import { bindParkedAward, bindSelectedQuotes, selectedQuoteLine } from '../../services/po/awardQuoteBinding.js';
+import { bindParkedAward, bindSelectedQuotes, selectedQuoteLine, instanceOwnsRound } from '../../services/po/awardQuoteBinding.js';
 import { recordApprovedWithoutPo } from '../general/negotiationQuotePostApproval.js';
 import { isApproverOnCurrentStep, NOT_AN_APPROVER_MESSAGE } from '../../services/approvalMembership.js';
 import { buildDraftedPos } from '../../models/po/poInitiateGuide.js';
@@ -509,6 +509,18 @@ const handleNegotiationPostApproval = async (approval_instance_id, approver_user
     const round_id = metadata.round_id || instance.entity_id;
     const remarks = options?.comment ?? null;
 
+    // The round this instance activates must be on an RFQ of the instance's
+    // own company. An instance whose metadata names another company's round
+    // (one opened through the generic submit route before it was closed to
+    // this type) activates nothing and awards nothing.
+    if (round_id && !(await instanceOwnsRound(t, instance, round_id))) {
+      logger.warn(
+        { approval_instance_id, hospitality_company_id: instance.hospitality_company_id, round_id, rfq_id },
+        '[negotiation] NEGOTIATION approval names a round that is not its company\'s: nothing activated'
+      );
+      return { activated: false };
+    }
+
     // Legacy shape: a handful of historical NEGOTIATION instances carry
     // selected_quotes and expect the award to be written here. Rounds created
     // by createRound never do (their metadata has no selected_quotes), so for
@@ -669,6 +681,16 @@ const handleNegotiationRejection = async (approval_instance_id, approver_user_id
     const metadata = instance.metadata || {};
     const round_id = metadata.round_id || instance.entity_id;
     const comment = options?.comment || null;
+
+    // Only the instance's own company's round is cancelled (see
+    // handleNegotiationPostApproval).
+    if (round_id && !(await instanceOwnsRound(t, instance, round_id))) {
+      logger.warn(
+        { approval_instance_id, hospitality_company_id: instance.hospitality_company_id, round_id },
+        '[negotiation] NEGOTIATION rejection names a round that is not its company\'s: nothing cancelled'
+      );
+      return;
+    }
 
     if (round_id) {
       try {

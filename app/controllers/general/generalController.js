@@ -31,7 +31,6 @@ import generalModel, {
   getApprovalProcessTenant,
   ENTITY_APPROVE_RESOURCE_MAP
 } from '../../models/generalModel.js';
-import { resolveHospitalityCompanyScope } from '../../helper/arc_v2/resolveHospitalityCompany.js';
 import { executeApprovalAction } from '../../services/approvalActionService.js';
 import { PoDecisionError } from '../../services/poApprovalService.js';
 import { stageLabel } from '../../services/notificationLinks.js';
@@ -54,6 +53,7 @@ import { AVAILABLE_HIERARCHY_TYPES } from '../../util/constants.js';
 import { initiatePurchaseOrder } from '../../models/purchaseOrderModel.js';
 import db from '../../config/dbConn.js';
 import { requestIsCompanyAdmin } from '../../middleware/companyAdmin.js';
+import { resolveApprovalCompanyScope, inCompanyScope } from '../../services/approvalTenantScope.js';
 import {
   listDelegations,
   findOverlappingDelegation,
@@ -400,72 +400,11 @@ const generalController = {
 // ===========================================================================
 // Tenant scope for the approval endpoints.
 // ---------------------------------------------------------------------------
-// Every handler below derives its company scope from req.user via these two
-// helpers. A client-supplied `hospitality_company_id` may only NARROW the
-// result; it can never widen it.
+// Every handler below derives its company scope from req.user via
+// resolveApprovalCompanyScope / inCompanyScope (services/approvalTenantScope.js,
+// shared with the RFQ and ARC approval routes). A client-supplied
+// `hospitality_company_id` may only NARROW the result; it can never widen it.
 // ===========================================================================
-
-/**
- * Companies this request may read approval config for.
- *   null      → super admin (user_type 8): every company.
- *   number[]  → exactly these companies ([] = no access).
- *
- * resolveHospitalityCompanyScope() reads tbl_hospitality_user_mappings and
- * already refuses client widening for non-admins. Two active production
- * buyers (358, 407) carry RBAC role scopes but no hospitality mapping row, so
- * we union in tbl_user_role_scopes.company_id — still derived entirely from
- * req.user, and it keeps those users from losing their own tenant's policies.
- */
-async function resolveApprovalCompanyScope(req) {
-  // Memoised per request: several handlers below need the scope more than once
-  // (guard + mutation-target resolution) and it costs two queries to build.
-  if (req.__approvalCompanyScope !== undefined) return req.__approvalCompanyScope;
-
-  const scope = await computeApprovalCompanyScope(req);
-  req.__approvalCompanyScope = scope;
-  return scope;
-}
-
-async function computeApprovalCompanyScope(req) {
-  const mapped = await resolveHospitalityCompanyScope(req);
-  if (mapped === null) return null; // super admin (user_type 8)
-
-  const scoped = (await db.any(
-    `SELECT DISTINCT company_id
-       FROM tbl_user_role_scopes
-      WHERE user_id = $1 AND company_id IS NOT NULL`,
-    [req.user?.id || null]
-  )).map((r) => Number(r.company_id));
-
-  // Company admins own every business unit under their OWN parent buyer
-  // company and may carry NEITHER a hospitality mapping NOR an RBAC role scope
-  // — verified in production: all three legacy user_type-7 users have zero rows
-  // in both tables. Without this union the scope collapses to [] for the only
-  // role that may reach the Approval Wizard, so it could neither list nor save
-  // a single policy.
-  //
-  // Keyed on the capability rather than on user_type 7, or an administrator
-  // promoted the new way — an ordinary buyer holding company.admin — would fall
-  // through to whatever scope they happened to hold as a buyer, which is
-  // precisely the estate they were promoted to see beyond.
-  //
-  // tbl_users.company_id is loaded from the DB by the jwtUsr strategy, so this
-  // is still derived entirely from req.user — never from a header or the body.
-  // It is the same tenancy edge hospitalityController.js enforces everywhere as
-  // `record.buyer_company_id !== company.id`.
-  let administered = [];
-  if ((await requestIsCompanyAdmin(req)) && req.user?.company_id) {
-    administered = (await db.any(
-      `SELECT id
-         FROM tbl_hospitality_companies
-        WHERE buyer_company_id = $1
-          AND COALESCE(is_deleted, 0) = 0`,
-      [Number(req.user.company_id)]
-    )).map((r) => Number(r.id));
-  }
-
-  return [...new Set([...(mapped || []), ...scoped, ...administered])];
-}
 
 /**
  * The companies a stuck-approvals request may read.
@@ -484,12 +423,6 @@ async function resolveStuckScope(req, scopeIds) {
   return rows.map((r) => Number(r.id));
 }
 
-/** True when `companyId` is inside the request's server-derived scope. */
-function inCompanyScope(scopeIds, companyId) {
-  if (scopeIds === null) return true; // super admin
-  if (companyId === null || companyId === undefined) return false;
-  return scopeIds.includes(Number(companyId));
-}
 
 /**
  * Resolve a policy id to its owning company and 404 when it belongs to another

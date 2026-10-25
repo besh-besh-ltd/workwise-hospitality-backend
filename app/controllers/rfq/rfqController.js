@@ -52,6 +52,7 @@ import {
 import { cancelAndReissueApproval } from '../general/reapprovalService.js';
 import { v4 as uuidv4 } from 'uuid';
 import { executeApprovalAction } from '../../services/approvalActionService.js';
+import { instanceTenantForCaller } from '../../services/approvalTenantScope.js';
 import { checkTechEvalWritable } from '../../services/techEvalScoringGuard.js';
 import {
   assertUserHasScope,
@@ -19213,8 +19214,12 @@ getClauses: async (req, res) => {
         });
       }
 
-      // Verify this is a TECHNICAL approval instance
-      const instance = await getApprovalInstanceById(approval_instance_id);
+      // Verify this is a TECHNICAL approval instance. Tenant first: an
+      // instance of another company answers exactly like a missing one,
+      // before its type or state is said.
+      const instance = (await instanceTenantForCaller(req, approval_instance_id))
+        ? await getApprovalInstanceById(approval_instance_id)
+        : null;
       if (!instance) {
         return res.status(404).json({
           status: 2,
@@ -19249,7 +19254,10 @@ getClauses: async (req, res) => {
           instance_status: result.instance_status,
           step_status: result.step_status,
           next_step: result.next_step,
-          next_step_id: result.next_step_id
+          next_step_id: result.next_step_id,
+          // A replay of a concluded instance: nothing was decided or run, and
+          // the activity trail records nothing for it.
+          ...(result.already_completed ? { already_completed: true } : {})
         }
       });
     } catch (error) {
@@ -19318,8 +19326,11 @@ getClauses: async (req, res) => {
         });
       }
 
-      // Verify this is an RFQ or TENDER approval instance
-      const instance = await getApprovalInstanceById(approval_instance_id);
+      // Verify this is an RFQ or TENDER approval instance. Tenant first (see
+      // techEvalApprovalAction): a foreign instance is a missing one.
+      const instance = (await instanceTenantForCaller(req, approval_instance_id))
+        ? await getApprovalInstanceById(approval_instance_id)
+        : null;
       if (!instance) {
         return res.status(404).json({
           status: 2,
@@ -19362,7 +19373,9 @@ getClauses: async (req, res) => {
           instance_status: result.instance_status,
           step_status: result.step_status,
           next_step: result.next_step,
-          next_step_id: result.next_step_id
+          next_step_id: result.next_step_id,
+          // A replay of a concluded instance (see techEvalApprovalAction).
+          ...(result.already_completed ? { already_completed: true } : {})
         }
       });
     } catch (error) {

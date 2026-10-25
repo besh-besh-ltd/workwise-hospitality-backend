@@ -580,6 +580,13 @@ async function dispatchPostApprovalHandler(instanceId, changedBy, reason) {
       ARC_TECH:          { APPROVED: () => import('../controllers/arc_v2/arcEvaluationController.js').then(m => m.handleArcTechPostApproval) },
       ARC_COMMITTEE:     { APPROVED: () => import('../controllers/arc_v2/arcCommitteeController.js').then(m => m.handleArcCommitteeApproval) },
       ARC_AMENDMENT:     { APPROVED: () => import('../controllers/arc_v2/arcAmendmentController.js').then(m => m.handleArcAmendmentApproval) },
+      // An ARC negotiation round or an ARC publish completed by a policy or
+      // membership change must still activate / float. Both handlers act only
+      // while their entity is still pending (the round's PENDING_APPROVAL, the
+      // ARC's pending_publish_approval), so a later surface reaching them too
+      // changes nothing.
+      ARC_NEGOTIATION:   { APPROVED: () => import('../controllers/arc_v2/arcNegotiationController.js').then(m => m.handleArcNegotiationApproval) },
+      ARC_PUBLISH:       { APPROVED: () => import('../controllers/arc_v2/arcController.js').then(m => m.handleArcPublishApproval) },
       MR:                { APPROVED: () => import('../controllers/mr/mrController.js').then(m => m.handleMrPostApproval) },
       NEGOTIATION:       { APPROVED: () => import('../controllers/negotiation/negotiationController.js').then(m => m.handleNegotiationPostApproval) },
       NEGOTIATION_QUOTE: { APPROVED: () => import('../controllers/general/negotiationQuotePostApproval.js').then(m => m.handleNegotiationQuotePostApproval) },

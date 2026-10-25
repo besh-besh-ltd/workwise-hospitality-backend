@@ -4,6 +4,7 @@ import {
   resetQuoteFinalizationForSendback,
 } from '../../models/generalModel.js';
 import { logError } from '../../helper/common.js';
+import { logger } from '../../util/logger.js';
 import { notifyDraftCreated } from '../../services/po/poInitiateNotifier.js';
 import { draftPO, buildAuthoritativePOPayload } from '../po/purchaseOrderController.js';
 import { autoInitiateRFQPOs } from '../../models/purchaseOrderModel.js';
@@ -58,9 +59,9 @@ export const recordApprovedWithoutPo = async ({ instance, approverUserId, metada
   if (!rfqId) return;
   try {
     if (!(await instanceOwnsRfq(db, instance, rfqId))) {
-      logError(
-        `[negotiationQuotePostApproval] NO_PO not recorded: approval_instance_id=${instance?.id} ` +
-        `(company ${instance?.hospitality_company_id}) names rfq_id=${rfqId}, which is not its company's.`
+      logger.warn(
+        { approval_instance_id: instance?.id, hospitality_company_id: instance?.hospitality_company_id, rfq_id: rfqId },
+        '[negotiationQuotePostApproval] NO_PO not recorded: the instance names an RFQ that is not its company\'s'
       );
       return;
     }
@@ -321,6 +322,19 @@ export const handleNegotiationQuoteRejection = async (approval_instance_id, appr
     const rfq_id = metadata.rfq_id;
     const rfq_product_id = metadata.rfq_product_id || instance.entity_id;
     if (!rfq_id || !rfq_product_id) return;
+
+    // Only the instance's own company's award is undone: the product being
+    // reset must be on an RFQ of the instance's company. An instance whose
+    // metadata names another company's RFQ (one opened through the generic
+    // submit route before it was closed to this type) must not reset that
+    // company's finalization or write to its timeline.
+    if (!(await instanceOwnsRfq(db, { ...instance, entity_id: rfq_product_id }, rfq_id))) {
+      logger.warn(
+        { approval_instance_id, hospitality_company_id: instance.hospitality_company_id, rfq_id, rfq_product_id },
+        '[negotiationQuotePostApproval] rejection names an RFQ that is not its company\'s: nothing reset, nothing recorded'
+      );
+      return;
+    }
 
     // 1. Reset the vendor finalization so vendors don't keep seeing the award.
     try {

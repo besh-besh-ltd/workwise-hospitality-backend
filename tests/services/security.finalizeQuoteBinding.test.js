@@ -33,6 +33,11 @@
 //     from the price parked in metadata.
 //   - replaying APPROVE on a concluded approval runs nothing, and a caller from
 //     another company is told only what a missing instance would tell them.
+//   - a forged instance that does exist (opened before the submit route was
+//     closed) changes nothing of the other company's on REJECT either: no
+//     finalization reset, no timeline row; a forged legacy NEGOTIATION
+//     instance neither activates nor cancels the other company's round.
+//   - a parked po_user must be the instance's initiator.
 //   - a PO refused after approveQuotes committed the approval (a hold opened
 //     as the approval landed) is reported as an approval without a PO and
 //     recorded on the timeline with a remark naming the hold; a hold already
@@ -86,8 +91,11 @@ afterEach(async () => {
      UNION
      SELECT ai.id FROM tbl_approval_instances ai
        JOIN tbl_rfq_purchase_order po ON po.id = ai.entity_id
-      WHERE ai.entity_type = 'PO' AND po.rfq_id = ANY($1::int[])`,
-    [ids]
+      WHERE ai.entity_type = 'PO' AND po.rfq_id = ANY($1::int[])
+     UNION
+     SELECT ai.id FROM tbl_approval_instances ai
+      WHERE ai.entity_type IN ('NEGOTIATION', 'NEGOTIATION_QUOTE') AND (ai.metadata->>'rfq_id') = ANY($2::text[])`,
+    [ids, ids.map(String)]
   );
   const instanceIds = instances.map((r) => r.id);
   await db.none(`DELETE FROM tbl_po_send_backs WHERE rfq_id = ANY($1::int[])`, [ids]);
@@ -232,6 +240,15 @@ const approveQuotes = async (product, userId = APPROVER) => (await httpClient(us
 const engineApprove = async (instanceId, userId = APPROVER) => (await httpClient(userId))
   .post("/api/v1/general/hospitality/approval/action")
   .send({ approval_instance_id: instanceId, action: "APPROVE", comment: "approving" });
+const engineReject = async (instanceId, userId = APPROVER) => (await httpClient(userId))
+  .post("/api/v1/general/hospitality/approval/action")
+  .send({ approval_instance_id: instanceId, action: "REJECT", comment: "not this vendor" });
+/** The first PENDING approver on an instance's current step. */
+const pendingApproverOf = async (instanceId) => Number((await db.one(
+  `SELECT sa.approver_user_id FROM tbl_approval_instances i
+     JOIN tbl_approval_instance_steps s ON s.approval_instance_id = i.id AND s.step_order = i.current_step
+     JOIN tbl_approval_step_approvers sa ON sa.approval_instance_step_id = s.id
+    WHERE i.id = $1 AND sa.status = 'PENDING' ORDER BY sa.approver_user_id LIMIT 1`, [instanceId])).approver_user_id);
 
 /** A COMPLETED negotiation round on `product` and `vendor`'s quote in it. `legacy`: the quote names no product (older rows). */
 async function addRoundQuote(rfq, product, { vendor = ALPHA, price = 300, creator = BUYER, legacy = false } = {}) {
@@ -510,6 +527,29 @@ describe("a parked finalize payload is bound again before its approval is record
     expect(res.body).toMatchObject(MISMATCH);
     expect(await instanceStatus(instanceId)).toBe("PENDING");
     expect(await trail(rfq)).toMatchObject({ pos: [], lines: [] });
+  });
+
+  it("refuses a parked payload whose po_user is not the user who opened the approval, on both surfaces (400)", async () => {
+    const rfq = await makeRfq();
+    const product = await addProduct(rfq);
+    const line = await addQuote(rfq, product);
+    const instanceId = await parkedAward(rfq, product, line);
+    // finalize parks po_user = the finalizing user = the initiator; this one
+    // was rewritten to draft the PO in someone else's name.
+    await db.none(
+      `UPDATE tbl_approval_instances SET metadata = jsonb_set(metadata, '{po_user,id}', to_jsonb($2::int)) WHERE id = $1`,
+      [instanceId, APPROVER]
+    );
+
+    const viaApproveQuotes = await approveQuotes(product);
+    const viaEngine = await engineApprove(instanceId);
+
+    expect(viaApproveQuotes.status).toBe(400);
+    expect(viaApproveQuotes.body).toMatchObject(MISMATCH);
+    expect(viaEngine.status).toBe(400);
+    expect(viaEngine.body).toMatchObject({ code: "AWARD_QUOTE_MISMATCH" });
+    expect(await instanceStatus(instanceId)).toBe("PENDING");
+    expect(await trail(rfq)).toMatchObject({ finalizations: [], pos: [], lines: [] });
   });
 
   it("a parked payload that binds is still approved into a PO", async () => {
@@ -822,6 +862,73 @@ describe("an award approval can not be forged", () => {
     await db.none(`UPDATE tbl_approval_instances SET status = 'APPROVED', completed_at = NOW() WHERE id = $1`, [instanceId]);
     await handleAutoCompletedInstances([instanceId], APPROVER, "policy change");
     expect(await snapshot(rfqB)).toEqual({ pos: [], lines: [], finalizations: [], lifecycle: [] });
+  });
+
+  it("rejecting a forged instance resets nothing and writes nothing on the other company's RFQ", async () => {
+    const { rfqB, productB, lineB, metadata } = await foreignAward();
+    // Company B has awarded its product to ALPHA.
+    await db.none(
+      `INSERT INTO tbl_quote_finalization (rfq_id, rfq_no, product_variant_id, vendor_id, quote_id, created_by, variant, "timestamp")
+       VALUES ($1, $2, $3, $4, $5, $6, $7, NOW())`,
+      [rfqB.rfqId, rfqB.rfqNo, VARIANT, ALPHA, lineB.quoteId, OTHER_COMPANY, productB.variant]
+    );
+    const before = await snapshot(rfqB);
+    expect(before.finalizations).toHaveLength(1);
+    // A forged instance (company A, company B's product and RFQ), rejected by A's approver.
+    const result = await createApprovalInstance({
+      entity_type: "NEGOTIATION_QUOTE", entity_id: productB.rfqProductId,
+      hospitality_company_id: IDS.hospitality.A, hotel_id: IDS.hotels.A1, department_id: null,
+      process_id: IDS.processes.A_P1, initiated_by: BUYER, metadata,
+    });
+
+    const res = await engineReject(result.instance.id);
+
+    expect(res.status).toBe(200);
+    expect(await instanceStatus(result.instance.id)).toBe("REJECTED");
+    expect(await snapshot(rfqB)).toEqual(before);
+    expect(await db.any(`SELECT id FROM tbl_quote_finalization_history WHERE rfq_id = $1`, [rfqB.rfqId])).toEqual([]);
+  });
+
+  it("a forged legacy NEGOTIATION instance neither activates nor cancels the other company's round", async () => {
+    const rfqB = await makeRfq({ company: "B" });
+    const productB = await addProduct(rfqB);
+    const roundB = async (roundNumber) => db.one(
+      `INSERT INTO tbl_negotiation_rounds
+         (rfq_id, round_number, end_date, status, created_by, source_type, source_id, rfq_product_id,
+          vendor_ids, vendor_approvals)
+       VALUES ($1, $6, (now() AT TIME ZONE 'UTC') + interval '2 days', 'PENDING_APPROVAL', $2, 'RFQ', $1, $3,
+               ARRAY[$4]::int[], $5::jsonb)
+       RETURNING id`,
+      [rfqB.rfqId, OTHER_COMPANY, productB.rfqProductId, ALPHA,
+        JSON.stringify([{ vendor_id: ALPHA, status: "PENDING" }]), roundNumber]
+    ).then((r) => Number(r.id));
+    const roundState = async (id) => db.one(
+      `SELECT status, approved_at, published_at, vendor_approvals FROM tbl_negotiation_rounds WHERE id = $1`, [id]);
+    /** Company A's NEGOTIATION instance naming company B's round. */
+    const forgedOn = async (roundId) => (await createApprovalInstance({
+      entity_type: "NEGOTIATION", entity_id: roundId,
+      hospitality_company_id: IDS.hospitality.A, hotel_id: IDS.hotels.A1, department_id: null,
+      process_id: IDS.processes.A_P1, initiated_by: BUYER,
+      metadata: { round_id: roundId, rfq_id: rfqB.rfqId, rfq_product_id: productB.rfqProductId, round_number: 1 },
+    })).instance.id;
+
+    const toApprove = await roundB(1);
+    const toReject = await roundB(2);
+    const beforeApprove = await roundState(toApprove);
+    const beforeReject = await roundState(toReject);
+    const approving = await forgedOn(toApprove);
+    const rejecting = await forgedOn(toReject);
+
+    const approved = await engineApprove(approving, await pendingApproverOf(approving));
+    const rejected = await engineReject(rejecting, await pendingApproverOf(rejecting));
+
+    expect(approved.status).toBe(200);
+    expect(rejected.status).toBe(200);
+    expect(await instanceStatus(approving)).toBe("APPROVED");
+    expect(await instanceStatus(rejecting)).toBe("REJECTED");
+    expect(await roundState(toApprove)).toEqual(beforeApprove);
+    expect(await roundState(toReject)).toEqual(beforeReject);
+    expect((await snapshot(rfqB)).lifecycle).toEqual([]);
   });
 
   it("prices a selected_quotes award from the vendor's quote line, never from the price parked in metadata", async () => {
