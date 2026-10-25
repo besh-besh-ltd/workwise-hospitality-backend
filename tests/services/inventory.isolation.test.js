@@ -23,7 +23,10 @@
 //
 // "Exactly as a missing id does" means the whole answer: HTTP status, content
 // type and the full JSON body (status, message, code, details, anything else),
-// with only the ids the request itself carried normalised (see signature()).
+// with only true echoes normalised: an id field answered back under the name
+// the request sent it (see signature()). Every emptied table counts ids in its
+// own range, so no foreign id can equal a request id by coincidence, and the
+// comparator's own tests replay two leaks that once got past it.
 // Every probe naming someone else's record has a twin naming no record at all
 // (a replayed idempotency key has no "missing" form, so its full answer is
 // pinned instead).
@@ -46,6 +49,7 @@ import fs from "fs";
 import path from "path";
 import { fileURLToPath, pathToFileURL } from "url";
 import excelJS from "exceljs";
+import express from "express";
 import { db, closeDb, truncateDynamic } from "../setup/db.js";
 import { IDS } from "../fixtures/ids.js";
 import { makeRFQ } from "../factories/rfq.js";
@@ -121,74 +125,84 @@ const leaksIn = (body, secrets = SECRETS_A) => {
 
 const pathOf = (p) => (p.startsWith("/api/") ? p : `${BASE}${p}`);
 
-const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-const isId = (s) => /^\d+$/.test(s) || UUID.test(s);
-/** In free text only a long id (3+ digits) or a UUID counts: a lone "1" is a quantity, not an echo. */
-const textId = (s) => /^\d{3,}$/.test(s) || UUID.test(s);
-/** A key that holds an id (or a list of them): id, poId, hotel_id, deliveryLineIds ... */
+/** A key that holds an id (or a list of them): id, poId, hotel_id, deliveryLineIds, clientEventId ... */
 const ID_KEY = /(^id$|Id$|_id$|Ids$|_ids$)/;
+/** One name per id field however it is spelt: poId = po_id, grnLineIds = grnLineId. */
+const fold = (k) => k.replace(/_/g, "").toLowerCase().replace(/ids$/, "id");
+/** `dispatches` -> `dispatch`, `items` -> `item`: names a bare `:id` after the segment before it. */
+const singular = (w) => (/(ch|sh|s|x)es$/.test(w) ? w.slice(0, -2) : w.replace(/s$/, ""));
+/** Response fields that echo a non-id request value verbatim, by route: the scanned code. */
+const ECHO_FIELDS = [{ route: `${BASE}/scan/resolve`, key: "code" }];
 
 /**
- * Every id a request carries: path segments, query values, body and
- * multipart-field leaves, and ids inside string values (a scanned short link,
- * a `hotel:123` context). `whole` holds the query / body strings themselves:
- * a response string equal to one is that value echoed back (a scanned code).
+ * The values a request sent, by (folded) name: the route's path params (named
+ * from `pattern`, e.g. "PATCH /po/:poId/deliveries/:deliveryId"), and its
+ * id-keyed query / body / multipart fields. Nothing else: a quantity, a date
+ * or a remark is never an echo.
  */
-function requestIds(spec) {
-  const out = new Set();
-  out.whole = new Set();
-  const add = (v) => {
-    if (typeof v === "number" && Number.isInteger(v)) v = String(v);
-    if (typeof v !== "string") return;
-    out.whole.add(v);
-    for (const part of v.split(/[^0-9A-Za-z-]+/)) if (isId(part)) out.add(part);
-  };
-  const walk = (v) => {
-    if (Array.isArray(v)) v.forEach(walk);
-    else if (v && typeof v === "object" && !Buffer.isBuffer(v)) Object.values(v).forEach(walk);
-    else add(v);
+function sentValues(spec, pattern) {
+  const sent = new Map();
+  const put = (key, value) => {
+    if (value === null || value === undefined || typeof value === "object") return;
+    const k = fold(key);
+    if (!sent.has(k)) sent.set(k, new Set());
+    sent.get(k).add(String(value));
   };
   const [p, query = ""] = pathOf(spec.path).split("?");
-  for (const part of p.split("/")) if (isId(part)) out.add(part);
-  for (const [, v] of new URLSearchParams(query)) add(v);
-  walk(spec.body);
-  walk(spec.fields);
-  return out;
+  if (pattern) {
+    const pat = pathOf(pattern.slice(pattern.indexOf(" ") + 1)).split("/");
+    const segs = p.split("/");
+    if (pat.length !== segs.length) throw new Error(`${spec.path} does not match the route ${pattern}`);
+    pat.forEach((s, i) => {
+      if (!s.startsWith(":")) return;
+      put(s.slice(1), decodeURIComponent(segs[i]));
+      if (s === ":id" && i > 0) put(`${singular(pat[i - 1])}Id`, decodeURIComponent(segs[i]));
+    });
+  }
+  const echoes = ECHO_FIELDS.filter((e) => e.route === p).map((e) => e.key);
+  const keep = (k) => ID_KEY.test(k) || echoes.includes(k);
+  for (const [k, v] of new URLSearchParams(query)) if (keep(k)) put(k, v);
+  const walk = (v, key) => {
+    if (Array.isArray(v)) v.forEach((x) => walk(x, key));
+    else if (v && typeof v === "object" && !Buffer.isBuffer(v)) for (const [k, x] of Object.entries(v)) walk(x, k);
+    else if (key && keep(key)) put(key, v);
+  };
+  walk(spec.body, null);
+  walk(spec.fields, null);
+  return { sent, echoes };
 }
 
-const escapeRe = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 /**
- * `value` with the ids the request carried replaced by "<echo>": the value of
- * an id key (id, poId, hotel_id, deliveryLineIds ...), and a long id or UUID
- * inside any string.
+ * `value` with an echo replaced by "<echo>": a field (or list) under an id key,
+ * or one of the route's ECHO_FIELDS, whose value the request sent under that
+ * same name. Any other id stays as it is, so a foreign id is never mistaken
+ * for an echo because it happens to equal some other value of the request.
  */
-function normalized(value, ids, idKey = false) {
-  if (Array.isArray(value)) return value.map((v) => normalized(v, ids, idKey));
+function normalized(value, req, key = null) {
+  if (Array.isArray(value)) return value.map((v) => normalized(v, req, key));
   if (value && typeof value === "object") {
-    return Object.fromEntries(Object.entries(value).map(([k, v]) => [k, normalized(v, ids, ID_KEY.test(k))]));
+    return Object.fromEntries(Object.entries(value).map(([k, v]) => [k, normalized(v, req, k)]));
   }
-  if ((typeof value === "number" || typeof value === "string") && idKey && ids.has(String(value))) return "<echo>";
-  if (typeof value !== "string") return value;
-  if (ids.whole.has(value)) return "<echo>";
-  let s = value;
-  for (const id of ids) {
-    if (textId(id)) s = s.replace(new RegExp(`(?<![0-9A-Za-z])${escapeRe(id)}(?![0-9A-Za-z])`, "g"), "<echo>");
+  const echoable = key && (ID_KEY.test(key) || req.echoes.includes(key));
+  if (echoable && (typeof value === "number" || typeof value === "string") && req.sent.get(fold(key))?.has(String(value))) {
+    return "<echo>";
   }
-  return s;
+  return value;
 }
 
 /**
  * What an answer looks like from outside: HTTP status, content type and the
- * full body, with only the ids echoed back from `spec` (the request that got
- * it) normalised. Two refusals are indistinguishable iff their signatures are.
+ * full body, with only true echoes of `spec` (the request that got it)
+ * normalised; `pattern` is its route, which names the path params. Two
+ * refusals are indistinguishable iff their signatures are equal.
  */
-function signature(res, spec) {
+function signature(res, spec, pattern = null) {
   const body = Buffer.isBuffer(res.body) ? { binary: res.body.length } : res.body;
   const empty = body && typeof body === "object" && !Object.keys(body).length;
   return {
     status: res.status,
     type: res.type ?? null,
-    body: normalized(empty && res.text ? res.text : body ?? null, requestIds(spec)),
+    body: normalized(empty && res.text ? res.text : body ?? null, sentValues(spec, pattern)),
   };
 }
 
@@ -447,6 +461,51 @@ async function activitySettled() {
 
 let countsBefore = null;
 
+// Separate id ranges. After a truncate every table counts from 1 again, so PO
+// 5, delivery 5 and GRN line 5 would all exist, and an id the answer should
+// never carry could pass for one the request sent. Each table the truncate
+// leaves empty (the dynamic tables and whatever their CASCADE reaches) gets
+// its own block of ID_RANGE ids instead, its sequence found in the catalogue
+// (pg_depend: owned-by and identity sequences), and put back afterwards.
+const ID_RANGE = 1_000_000;
+const rebased = [];
+
+async function separateIdRanges() {
+  const owned = await db.any(
+    `SELECT s.oid::regclass::text AS seq, t.relname AS tbl, a.attname AS col, ps.seqmax::text AS seqmax
+       FROM pg_class s
+       JOIN pg_sequence ps ON ps.seqrelid = s.oid
+       JOIN pg_depend d ON d.classid = 'pg_class'::regclass AND d.objid = s.oid
+                       AND d.refclassid = 'pg_class'::regclass AND d.deptype IN ('a', 'i')
+       JOIN pg_class t ON t.oid = d.refobjid AND t.relkind IN ('r', 'p')
+       JOIN pg_namespace n ON n.oid = t.relnamespace AND n.nspname = 'public'
+       JOIN pg_attribute a ON a.attrelid = t.oid AND a.attnum = d.refobjsubid
+      WHERE s.relkind = 'S'
+      ORDER BY t.relname, a.attname`
+  );
+  let block = 0;
+  for (const o of owned.filter((r) => countsBefore[r.tbl] === 0)) {
+    block += 1;
+    const base = block * ID_RANGE;
+    if (Number(o.seqmax) < base + ID_RANGE || base + ID_RANGE >= BOGUS) {
+      throw new Error(`no room for an id range of ${ID_RANGE} for ${o.tbl}.${o.col} (${o.seq})`);
+    }
+    const cur = await db.one(`SELECT last_value::text AS last, is_called FROM ${o.seq}`);
+    rebased.push({ ...o, last: cur.last, called: cur.is_called });
+    await db.one(`SELECT setval($1::regclass, $2)`, [o.seq, base]);
+  }
+  return rebased.length;
+}
+
+/** Each sequence back where it was (or at its table's max id, should rows remain). */
+async function restoreIdRanges() {
+  for (const r of rebased) {
+    const { max } = await db.one(`SELECT max($1:name)::text AS max FROM $2:name`, [r.col, r.tbl]);
+    if (max != null && BigInt(max) >= BigInt(r.last)) await db.one(`SELECT setval($1::regclass, $2::bigint, true)`, [r.seq, max]);
+    else await db.one(`SELECT setval($1::regclass, $2::bigint, $3)`, [r.seq, r.last, r.called]);
+  }
+}
+
 // ---------------------------------------------------------------------------
 // the world
 // ---------------------------------------------------------------------------
@@ -571,6 +630,13 @@ async function buildWorld() {
   }), "B count");
   W.tokenB = await issueToken(W.poB.poId, { hotelId: B1 });
 
+  // Sanity: ids of different tables never coincide (each table has its own range).
+  const blocks = [
+    W.poA.poId, W.poA.lineIds[0], W.deliveryA.id, W.deliveryA.lines[0].id, W.grnA.id, W.grnA.lines[0].id, W.itemA1,
+    W.outA.id, W.adjA.id, W.countA.id, W.dispatchA.id, W.tokenA.tokenId,
+  ].map((id) => Math.floor(Number(id) / ID_RANGE));
+  expect({ distinct: new Set(blocks).size, rebased: Math.min(...blocks) >= 1 }).toEqual({ distinct: blocks.length, rebased: true });
+
   // Sanity: the world carries the markers the leak checks look for.
   expect(W.grnA.grnNumber).toContain("ISOA1SECRET");
   expect(W.outA.outNumber).toContain("ISOA1SECRET");
@@ -584,6 +650,7 @@ beforeAll(async () => {
     watermark[table] = Number((await db.one(`SELECT COALESCE(max(id), 0)::bigint AS n FROM ${table}`)).n);
   }
   countsBefore = await tableCounts();
+  expect(await separateIdRanges()).toBeGreaterThan(40);
   for (const id of [VENDOR, OTHER_VENDOR]) {
     prevUser[id] = await db.one(`SELECT user_type, status FROM tbl_users WHERE id = $1`, [id]);
     await db.none(`UPDATE tbl_users SET user_type = 3, status = 1 WHERE id = $1`, [id]);
@@ -615,6 +682,7 @@ afterAll(async () => {
       await db.none(`UPDATE tbl_users SET user_type = $2, status = $3 WHERE id = $1`, [id, row.user_type, row.status]);
     }
     await dropAbove("tbl_audit_row_changes");
+    await restoreIdRanges();
     // Nothing of the suite's may outlive it: every table holds what it held before.
     if (countsBefore) {
       const after = await tableCounts();
@@ -1353,7 +1421,12 @@ function mountOf(layer) {
   return mount;
 }
 
-/** Every METHOD + full path mounted on the app, with its route's handlers. */
+/**
+ * Every METHOD + full path mounted on the app, with its route's handlers. A
+ * `.all()` route is listed as ALL, and plain middleware mounted at a path
+ * (`use('/x', fn)`, which answers anything under /x) as USE: both need a row
+ * like any other route. Middleware on "/" (auth, parsers) is not a route.
+ */
 function mountedRoutes(app) {
   const out = [];
   const walk = (stack, prefix) => {
@@ -1363,14 +1436,15 @@ function mountedRoutes(app) {
           throw new Error(`route guard cannot read the route ${String(layer.route.path)} under ${prefix || "/"}`);
         }
         for (const m of Object.keys(layer.route.methods)) {
-          if (m !== "_all") {
-            out.push({ key: `${m.toUpperCase()} ${prefix}${layer.route.path}`, handles: layer.route.stack.map((l) => l.handle) });
-          }
+          const method = m === "_all" ? "ALL" : m.toUpperCase();
+          out.push({ key: `${method} ${prefix}${layer.route.path}`, handles: layer.route.stack.map((l) => l.handle) });
         }
       } else if (layer.name === "mounted_app") {
         throw new Error(`route guard cannot walk a mounted sub-app under ${prefix || "/"}`);
       } else if (layer.handle?.stack) {
         walk(layer.handle.stack, prefix + mountOf(layer));
+      } else if (!layer.regexp?.fast_slash) {
+        out.push({ key: `USE ${prefix}${mountOf(layer)}`, handles: [layer.handle] });
       }
     }
   };
@@ -1397,7 +1471,10 @@ async function inventoryHandlers() {
 // 1. Every inventory route has an entry
 // ---------------------------------------------------------------------------
 
-const underBase = (key) => key.split(" ")[1].startsWith(`${BASE}/`);
+const underBase = (key) => {
+  const p = key.split(" ")[1];
+  return p === BASE || p.startsWith(`${BASE}/`);
+};
 
 describe("route enumeration guard", () => {
   it("every mounted inventory route has an isolation entry, and every entry is mounted", async () => {
@@ -1420,7 +1497,7 @@ describe("route enumeration guard", () => {
     const handlers = await inventoryHandlers();
     const usesInventory = (r) => r.handles.some((h) => handlers.has(h));
     // Sanity: the matcher recognises the handler of every /inventory route itself.
-    expect(routes.filter((r) => underBase(r.key) && !usesInventory(r)).map((r) => r.key)).toEqual([]);
+    expect(routes.filter((r) => underBase(r.key) && !r.key.startsWith("USE ") && !usesInventory(r)).map((r) => r.key)).toEqual([]);
     // Anywhere else, each must be an ELSEWHERE entry (which the first test ties to a row).
     const outside = routes.filter((r) => !underBase(r.key) && usesInventory(r)).map((r) => r.key);
     expect(outside.filter((k) => !ELSEWHERE.includes(k))).toEqual([]);
@@ -1435,6 +1512,69 @@ describe("route enumeration guard", () => {
     expect(() => mountOf(layer("^\\/x\\/(?:([^\\/]+?))\\/?(?=\\/|$)"))).toThrow(/cannot read the mount/); // a param with no key
     expect(() => mountOf(layer("^\\/x$"))).toThrow(/cannot read the mount/); // not a mount regexp at all
   });
+
+  it("an .all() route and plain middleware mounted at a path are routes too", () => {
+    const router = express.Router();
+    router.all("/anything", (req, res) => res.end());
+    router.use("/hidden", (req, res) => res.end());
+    router.get("/x", (req, res) => res.end());
+    const app = express();
+    app.use(BASE, router);
+    app.use((req, res, next) => next()); // on "/": not a route
+    expect(mountedRoutes(app).map((r) => r.key)).toEqual([`ALL ${BASE}/anything`, `USE ${BASE}/hidden`, `GET ${BASE}/x`]);
+    const star = express();
+    star.use("*", (req, res) => res.end());
+    expect(() => mountedRoutes(star)).toThrow(/cannot read the mount/);
+  });
+});
+
+describe("the comparator", () => {
+  // Answers built by hand, ids deliberately colliding the way they do right
+  // after a truncate (PO 5, delivery 5, GRN line 1, qty 1).
+  const answer = (body) => ({ status: 404, type: "application/json", body: { status: 2, code: "NOT_FOUND", ...body } });
+  const same = (pattern, a, aSpec, b, bSpec) => JSON.stringify(signature(a, aSpec, pattern)) === JSON.stringify(signature(b, bSpec, pattern));
+
+  it("an id the request sent, answered back under the same name, is an echo", () => {
+    const pattern = "PATCH /po/:poId/deliveries/:deliveryId";
+    const spec = q("patch", "/po/7/deliveries/5", { dueDate: null });
+    const twin = q("patch", `/po/7/deliveries/${BOGUS}`, { dueDate: null });
+    expect(same(pattern,
+      answer({ message: "Delivery not found", details: { deliveryId: "5" } }), spec,
+      answer({ message: "Delivery not found", details: { deliveryId: String(BOGUS) } }), twin)).toBe(true);
+  });
+
+  it("a foreign PO id is not an echo because it equals another id of the request (patchDueDate mutation)", () => {
+    // The foreign delivery 5 belongs to PO 5; a missing one falls back to the caller's own PO 7.
+    const pattern = "PATCH /po/:poId/deliveries/:deliveryId";
+    const spec = q("patch", "/po/7/deliveries/5", { dueDate: null });
+    const twin = q("patch", `/po/7/deliveries/${BOGUS}`, { dueDate: null });
+    expect(same(pattern,
+      answer({ message: "Delivery not found", details: { deliveryId: "5", poId: 5 } }), spec,
+      answer({ message: "Delivery not found", details: { deliveryId: String(BOGUS), poId: 7 } }), twin)).toBe(false);
+  });
+
+  it("a foreign GRN id is not an echo because it equals a line id or a quantity (RTV mutation)", () => {
+    // The foreign line 1 belongs to GRN 1; a missing one falls back to the caller's own GRN 3.
+    const body = (grnLineId) => ({ grnId: 3, disposition: "REPLACE", remarks: "x", lines: [{ grnLineId, qty: 1, reason: "damaged" }] });
+    expect(same("POST /rtv",
+      answer({ message: "Some lines are not on this goods receipt", details: { grnLineIds: [1], grnId: 1 } }), q("post", "/rtv", body(1)),
+      answer({ message: "Some lines are not on this goods receipt", details: { grnLineIds: [BOGUS], grnId: 3 } }), q("post", "/rtv", body(BOGUS)),
+    )).toBe(false);
+  });
+
+  it("a whole value is an echo only in a field that echoes it: the scanned code, on the scan route", () => {
+    const scan = (code) => q("get", `/scan/resolve?code=${code}`);
+    const resolved = (code) => ({ status: 200, type: "application/json", body: { status: 1, data: { kind: "unknown", code, item: null } } });
+    expect(same("GET /scan/resolve", resolved("8901234500017"), scan("8901234500017"), resolved(NO_CODE), scan(NO_CODE))).toBe(true);
+    // The same field on another route is data, not an echo.
+    const add = (code) => q("post", "/items/5/barcodes", { code });
+    const added = (code) => ({ status: 200, type: "application/json", body: { status: 1, data: { code } } });
+    expect(same("POST /items/:id/barcodes", added("8901234500017"), add("8901234500017"), added(NO_CODE), add(NO_CODE))).toBe(false);
+  });
+
+  it("a request path that does not fit the route named for it is an error, not a guess", () => {
+    expect(() => signature(answer({}), q("get", "/grn/5/pdf"), "GET /grn/:id")).toThrow(/does not match the route/);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -1447,9 +1587,9 @@ async function expectRefused(res, { route, actor, status, secrets = SECRETS_A })
   }).toEqual({ route, actor, status, bodyStatus: status === 404 ? 2 : 0, leaks: [] });
 }
 
-/** Two answers must be indistinguishable: the whole signature, ids echoed from each request normalised. */
-async function expectSame(label, res, spec, twinRes, twinSpec) {
-  expect({ ...label, answer: signature(res, spec) }).toEqual({ ...label, answer: signature(twinRes, twinSpec) });
+/** Two answers to requests on `pattern` must be indistinguishable: the whole signature, true echoes normalised. */
+async function expectSame(label, pattern, res, spec, twinRes, twinSpec) {
+  expect({ ...label, answer: signature(res, spec, pattern) }).toEqual({ ...label, answer: signature(twinRes, twinSpec, pattern) });
 }
 
 describe("records addressed by id", () => {
@@ -1462,7 +1602,7 @@ describe("records addressed by id", () => {
     // Company B: 404, nothing of A's, and indistinguishable from a missing id.
     const asB = await send(C.bAll, real);
     await expectRefused(asB, { route, actor: "B", status: 404 });
-    await expectSame({ route, actor: "B" }, asB, real, await send(C.bAll, missingSpec), missingSpec);
+    await expectSame({ route, actor: "B" }, route, asB, real, await send(C.bAll, missingSpec), missingSpec);
     const callers = { B: C.bAll, OTHER: C.other };
     for (const [i, probe] of (row.foreign?.(ids) ?? []).entries()) {
       const actor = `${probe.who} foreign #${i}`;
@@ -1470,7 +1610,7 @@ describe("records addressed by id", () => {
       const client = callers[probe.who];
       const res = await send(client, probe.spec);
       await expectRefused(res, { route, actor, status: probe.expect, secrets: probe.who === "B" ? SECRETS_A : SECRETS_A1 });
-      if (probe.twin) await expectSame({ route, actor }, res, probe.spec, await send(client, probe.twin), probe.twin);
+      if (probe.twin) await expectSame({ route, actor }, route, res, probe.spec, await send(client, probe.twin), probe.twin);
       else expect({ route, actor, body: res.body }).toEqual({ route, actor, body: probe.body });
     }
 
@@ -1481,7 +1621,7 @@ describe("records addressed by id", () => {
       const scoped = await send(C.other, real);
       await expectRefused(scoped, { route, actor: "A at A2 only", status: row.scoped, secrets: SECRETS_A1 });
       // C3: an out-of-scope record of the caller's own company reads like a missing one too.
-      if (row.scoped === 404) await expectSame({ route, actor: "A at A2 only" }, scoped, real, await send(C.other, missingSpec), missingSpec);
+      if (row.scoped === 404) await expectSame({ route, actor: "A at A2 only" }, route, scoped, real, await send(C.other, missingSpec), missingSpec);
     }
 
     // Company A, right hotel, everything but the route's permission.
@@ -1489,7 +1629,7 @@ describe("records addressed by id", () => {
     const noPerm = await send(C.noPerm, real);
     await expectRefused(noPerm, { route, actor: `A without ${row.perm}`, status: row.noPerm, secrets: [] });
     if (row.noPerm === 404) {
-      await expectSame({ route, actor: `A without ${row.perm}` }, noPerm, real, await send(C.noPerm, missingSpec), missingSpec);
+      await expectSame({ route, actor: `A without ${row.perm}` }, route, noPerm, real, await send(C.noPerm, missingSpec), missingSpec);
     }
 
     // Positive control.
@@ -1555,7 +1695,7 @@ describe("lists and aggregates", () => {
       const itemIds = (Array.isArray(res.body.data) ? res.body.data : []).map((x) => x.invItemId);
       if (p.hasItem) expect({ label, hasItem: itemIds.includes(p.hasItem) }).toEqual({ label, hasItem: true });
       if (p.lacksItem) expect({ label, hasItem: itemIds.includes(p.lacksItem) }).toEqual({ label, hasItem: false });
-      if (p.sameAs) await expectSame({ label }, res, p.req, await send(client[p.who], p.sameAs), p.sameAs);
+      if (p.sameAs) await expectSame({ label }, route, res, p.req, await send(client[p.who], p.sameAs), p.sameAs);
     }
   });
 
@@ -1572,7 +1712,7 @@ describe("lists and aggregates", () => {
       expect({ key, status: named.status, total: named.body?.data?.total_rows, leaks: leaksIn(named.body) })
         .toEqual({ key, status: 200, total: 0, leaks: [] });
       const bogusSpec = preview({ ...WIDE, hotel_ids: [BOGUS] });
-      await expectSame({ key }, named, namedSpec, await send(C.bAll, bogusSpec), bogusSpec);
+      await expectSame({ key }, "POST /api/v1/reports/:key/preview", named, namedSpec, await send(C.bAll, bogusSpec), bogusSpec);
     }
     // The control: A's own stock report does carry A's rows.
     const mine = await C.aAll.post("/api/v1/reports/stock_on_hand/preview").send(WIDE);
@@ -1637,7 +1777,7 @@ describe("company-level routes", () => {
     const bogusSpec = row.req(BOGUS, v());
     const named = await send(C.bAll, namedSpec);
     await expectRefused(named, { route, actor: "B naming A", status: 403 });
-    await expectSame({ route, actor: "B naming A" }, named, namedSpec, await send(C.bAll, bogusSpec), bogusSpec);
+    await expectSame({ route, actor: "B naming A" }, route, named, namedSpec, await send(C.bAll, bogusSpec), bogusSpec);
 
     // B on its own: B's company, nothing of A's.
     if (!row.mutates) {
@@ -1673,14 +1813,14 @@ describe("vendor routes", () => {
     const other = await send(C.otherVendor, real);
     await expectRefused(other, { route, actor: "another vendor", status: 404 });
     const missingSpec = row.req({ ...ids, [row.idKey]: BOGUS });
-    await expectSame({ route, actor: "another vendor" }, other, real, await send(C.otherVendor, missingSpec), missingSpec);
+    await expectSame({ route, actor: "another vendor" }, route, other, real, await send(C.otherVendor, missingSpec), missingSpec);
 
     for (const [i, probe] of (row.ownerForeign?.() ?? []).entries()) {
       const actor = `PO owner foreign #${i}`;
       const res = await send(C.vendor, probe.spec);
       expect({ route, actor, status: res.status, leaks: leaksIn(res.body, ["ISO-B"]) })
         .toEqual({ route, actor, status: probe.expect, leaks: [] });
-      await expectSame({ route, actor }, res, probe.spec, await send(C.vendor, probe.twin), probe.twin);
+      await expectSame({ route, actor }, route, res, probe.spec, await send(C.vendor, probe.twin), probe.twin);
     }
 
     const good = await send(C.vendor, real);
