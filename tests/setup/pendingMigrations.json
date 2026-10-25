@@ -46,6 +46,7 @@
     "migrations/20261019100200_arc_commercial_evaluator_round_approval.sql",
     "migrations/20261022100000_po_send_backs.sql",
     "migrations/20261023100000_negotiation_round_creator_remarks.sql",
+    "migrations/20261024120000_user_mapping_nulls_not_distinct.sql",
     "migrations/20261024100000_inventory_resource_enums.sql",
     "migrations/20261024100100_inventory_core.sql",
     "migrations/20261024100200_po_delivery_receiving.sql",

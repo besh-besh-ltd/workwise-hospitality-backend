@@ -401,10 +401,23 @@ const hospitalityModel = {
     );
   },
 
-  insertUserMappings: async (rows) => {
-    if (!rows?.length) {
+  // A repeat grant updates the existing row (the unique key is NULLS NOT
+  // DISTINCT, so this holds for company-level grants too). One INSERT may not
+  // name the same grant twice — ON CONFLICT DO UPDATE refuses to touch a row a
+  // second time — so a batch is reduced to one row per grant first, the last
+  // occurrence winning.
+  insertUserMappings: async (inputRows) => {
+    if (!inputRows?.length) {
       return [];
     }
+    const byGrant = new Map();
+    for (const row of inputRows) {
+      byGrant.set(
+        [row.user_id, row.mapping_type, row.hospitality_company_id, row.hospitality_hotel_id ?? null].join(':'),
+        row
+      );
+    }
+    const rows = [...byGrant.values()];
     const columnSet = new pgp.helpers.ColumnSet(
       [
         'user_id',
@@ -996,40 +1009,26 @@ const hospitalityModel = {
     );
   },
 
+  // A company-level grant covers every hotel of the company; a hotel-level
+  // grant covers that hotel only. EXISTS, not a single-row read: a user can
+  // hold the same grant more than once (legacy rows from before the unique
+  // key was NULLS NOT DISTINCT), and oneOrNone threw on them, which 500'd
+  // the RFQ draft save for that user.
   userHasContext: async (userId, companyId, hotelId = null) => {
-    const params = [userId, companyId];
-    let condition = '';
-    if (hotelId) {
-      params.push(hotelId);
-      condition = `AND hum.hospitality_hotel_id = $3 AND hum.mapping_type = 1`;
-    } else {
-      condition = `AND hum.mapping_type = 0 AND hum.hospitality_hotel_id IS NULL`;
-    }
-
-    const row = await db.oneOrNone(
-      `SELECT 1
-       FROM tbl_hospitality_user_mappings hum
-       WHERE hum.user_id = $1
-         AND hum.hospitality_company_id = $2
-         ${condition}`,
-      params
+    const row = await db.one(
+      `SELECT EXISTS (
+         SELECT 1
+           FROM tbl_hospitality_user_mappings hum
+          WHERE hum.user_id = $1
+            AND hum.hospitality_company_id = $2
+            AND (
+                 (hum.mapping_type = 0 AND hum.hospitality_hotel_id IS NULL)
+              OR ($3::int IS NOT NULL AND hum.mapping_type = 1 AND hum.hospitality_hotel_id = $3::int)
+            )
+       ) AS ok`,
+      [userId, companyId, hotelId || null]
     );
-
-    if (!row && hotelId) {
-      // allow company level access to cover hotels
-      const companyLevelAccess = await db.oneOrNone(
-        `SELECT 1
-         FROM tbl_hospitality_user_mappings hum
-         WHERE hum.user_id = $1
-           AND hum.hospitality_company_id = $2
-           AND hum.mapping_type = 0
-           AND hum.hospitality_hotel_id IS NULL`,
-        [userId, companyId]
-      );
-      return Boolean(companyLevelAccess);
-    }
-
-    return Boolean(row);
+    return row.ok;
   },
 
   saveCompanyDocument: async (companyId, documentType, documentUrl, documentNumber = null) => {

@@ -7031,6 +7031,13 @@ const rfqController = {
     } catch (error) {
       logError(error);
 
+      // Typed errors from authorizationService (a missing rfq.create role, no
+      // approval policy) carry their own 4xx and a message the buyer can act
+      // on — same as POST /rfq/create.
+      if (error instanceof AuthorizationError || error instanceof NoApprovalPolicyError) {
+        return sendScopeError(res, error);
+      }
+
       // F-DRAFT-500: saveRfqDraft signals business-logic rejections by
       // throwing `new Error(JSON.stringify({message, status, ...}))`.
       // Translate the structured-error shape to a sensible HTTP code so
@@ -7055,14 +7062,24 @@ const rfqController = {
         }
       }
 
+      // An unexpected failure: its cause is in the log (logError above). The
+      // client toasts every value under `errors`, so a database message sent
+      // there reached the buyer verbatim ("Multiple rows were not expected.")
+      // and an empty `details` array became a blank toast. Send neither.
+      if (httpCode === 500) {
+        return res.status(500).json({
+          status: 3,
+          message: 'An error occurred while saving the draft',
+        });
+      }
+
+      const details = parsedError?.details || [];
       res.status(httpCode).json({
         status: 3,
-        message: httpCode === 500
-          ? 'An error occurred while saving the draft'
-          : (innerMessage || 'An error occurred while saving the draft'),
+        message: innerMessage || 'An error occurred while saving the draft',
         errors: {
           rfq: innerMessage || 'An error occurred while saving the draft',
-          details: parsedError?.details || [],
+          ...(details.length ? { details } : {}),
         }
       });
     }
