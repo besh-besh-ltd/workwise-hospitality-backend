@@ -419,8 +419,13 @@ const fmtDate = (v) => {
   return Number.isNaN(d.getTime()) ? null : IST_DATE.format(d);
 };
 
-/** The link the site rep opens; the page lifts the token out of the URL on load. */
-export const siteRepReceiveLink = (token) => toAbsoluteUrl(`/receive/token?t=${encodeURIComponent(token)}`);
+/**
+ * The link the site rep opens; the page lifts the token out of the URL on load.
+ * The token rides in the fragment (#t=), which the browser never sends, so it
+ * stays out of frontend, proxy and load-balancer access logs. The page still
+ * reads the older ?t= links already in inboxes.
+ */
+export const siteRepReceiveLink = (token) => toAbsoluteUrl(`/receive/token#t=${encodeURIComponent(token)}`);
 
 /**
  * Email a site representative their receiving link.

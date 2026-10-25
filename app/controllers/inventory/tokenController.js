@@ -61,7 +61,8 @@ export const getTokenReceiveContext = async (req, res) => {
 
 /**
  * POST /token/grn: record and post a receipt at the link's hotel. 201 for a
- * new GRN; 200 with the original for a replayed clientEventId.
+ * new GRN; 200 with the original plus {replayed:true, no_op:true} for a
+ * replayed clientEventId.
  */
 export const postTokenGrn = async (req, res) => {
   const input = bodyOf(req);
@@ -88,7 +89,7 @@ export const postTokenGrn = async (req, res) => {
   res.status(replayed ? 200 : 201).json({
     status: 1,
     message: replayed ? 'GRN already recorded' : 'GRN posted',
-    data: grn,
+    data: replayed ? { ...grn, replayed: true, no_op: true } : grn,
   });
   if (!replayed) await afterPost(activity.grnId);
   return undefined;
