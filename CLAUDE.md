@@ -224,8 +224,10 @@ Company + Hotel + Department > Company + Hotel > Company only
 `tbl_hospitality_company_documents`, `tbl_hospitality_hotel_documents`.
 
 `tbl_hospitality_user_mappings` carries `mapping_type` (0 = company-level, 1 = hotel-level) with a
-CHECK tying `hospitality_hotel_id` null-ness to it, and is UNIQUE on
-`(user_id, mapping_type, hospitality_company_id, hospitality_hotel_id)`.
+CHECK tying `hospitality_hotel_id` null-ness to it, and is UNIQUE NULLS NOT DISTINCT on
+`(user_id, mapping_type, hospitality_company_id, hospitality_hotel_id)` — so a company-level
+grant (hotel NULL) can exist once per user per company. Before migration 20261024120000 the key
+was plain UNIQUE and let duplicates in (RFQ 1527); `tbl_hospitality_project_mappings` got the same fix.
 
 ---
 
