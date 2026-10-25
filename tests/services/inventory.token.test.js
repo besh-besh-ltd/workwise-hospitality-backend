@@ -657,6 +657,62 @@ describe("token refusals", () => {
 });
 
 // ---------------------------------------------------------------------------
+// count freeze (spec §8.5)
+// ---------------------------------------------------------------------------
+
+describe("token receipts during a count freeze", () => {
+  it("a link cannot post while a count freezes its hotel; its replay still answers, flagged", async () => {
+    const { poId, lineIds: [l1], variants: [v] } = await makePo();
+    const { token } = await issueToken(poId, { hotelId: A1 });
+    const body = receipt([line(l1, 4)]);
+    const first = await postReceipt(token, body);
+    expect(first.status).toBe(201);
+    expect(first.body.data).not.toHaveProperty("replayed");
+
+    let count = null;
+    const priorSettings = await db.oneOrNone(
+      `SELECT count_freeze FROM tbl_inv_company_settings WHERE hospitality_company_id = $1`, [CO]
+    );
+    try {
+      await db.none(
+        `INSERT INTO tbl_inv_company_settings (hospitality_company_id, count_freeze) VALUES ($1, true)
+         ON CONFLICT (hospitality_company_id) DO UPDATE SET count_freeze = true`,
+        [CO]
+      );
+      const started = await ctrlClient.post("/api/v1/inventory/counts").send({ hotelId: A1, scope: "FULL", isBlind: false });
+      expect(started.status).toBe(201);
+      count = started.body.data;
+
+      const refused = await postReceipt(token, receipt([line(l1, 2)]));
+      expect(refused.status).toBe(409);
+      expect(refused.body).toMatchObject({
+        status: 0, code: "LOCKED", details: { countId: count.id, countNumber: count.countNumber },
+      });
+
+      // The dropped-connection retry of the receipt already posted still answers.
+      const replay = await postReceipt(token, body);
+      expect(replay.status).toBe(200);
+      expect(replay.body.data).toMatchObject({ id: first.body.data.id, status: "posted", replayed: true, no_op: true });
+      expectNoPrices(replay.body);
+      expect(await grnRows(poId)).toHaveLength(1);
+      expect(await balanceOf(A1, v)).toBe(4);
+    } finally {
+      if (count) await ctrlClient.post(`/api/v1/inventory/counts/${count.id}/cancel`).send({});
+      if (priorSettings) {
+        await db.none(`UPDATE tbl_inv_company_settings SET count_freeze = $2 WHERE hospitality_company_id = $1`, [CO, priorSettings.count_freeze]);
+      } else {
+        await db.none(`DELETE FROM tbl_inv_company_settings WHERE hospitality_company_id = $1`, [CO]);
+      }
+    }
+
+    // The count is closed: the link receives again.
+    const after = await postReceipt(token, receipt([line(l1, 2)]));
+    expect(after.status).toBe(201);
+    expect(await balanceOf(A1, v)).toBe(6);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // rate limit
 // ---------------------------------------------------------------------------
 

@@ -589,14 +589,18 @@ describe("concurrency and replay", () => {
 
     const first = await recv.post("/api/v1/inventory/grn").send(body);
     expect(first.status).toBe(201);
+    expect(first.body.data).not.toHaveProperty("replayed");
     const replay = await recv.post("/api/v1/inventory/grn").send(body);
     expect(replay.status).toBe(200);
-    expect(replay.body.data).toMatchObject({ id: first.body.data.id, grnNumber: first.body.data.grnNumber });
+    // Flagged like the stock routes' replays (/out, /adjustments, counts).
+    expect(replay.body.data).toMatchObject({
+      id: first.body.data.id, grnNumber: first.body.data.grnNumber, replayed: true, no_op: true,
+    });
 
     // Posting the same GRN again is a replay too.
     const repost = await recv.post(`/api/v1/inventory/grn/${first.body.data.id}/post`).send({ clientEventId: body.clientEventId });
     expect(repost.status).toBe(200);
-    expect(repost.body.data.id).toBe(first.body.data.id);
+    expect(repost.body.data).toMatchObject({ id: first.body.data.id, replayed: true, no_op: true });
 
     // Another tenant cannot fish for the document with its key.
     const fished = await foreign.post("/api/v1/inventory/grn").send({ ...body, poId, hotelId: A1 });
@@ -604,6 +608,16 @@ describe("concurrency and replay", () => {
 
     expect(await grnCount(poId)).toBe(1);
     expect(await balanceOf(A1, v)).toMatchObject({ qty: 3 });
+
+    // A draft saved twice with one key is a replay too.
+    const draftBody = { ...grnInput(poId, A1, [grnLine(line, 1)]), post: false };
+    const draft = await recv.post("/api/v1/inventory/grn").send(draftBody);
+    expect(draft.status).toBe(201);
+    expect(draft.body.data).not.toHaveProperty("replayed");
+    const draftAgain = await recv.post("/api/v1/inventory/grn").send(draftBody);
+    expect(draftAgain.status).toBe(200);
+    expect(draftAgain.body.data).toMatchObject({ id: draft.body.data.id, status: "draft", replayed: true, no_op: true });
+    expect((await recv.delete(`/api/v1/inventory/grn/${draft.body.data.id}`)).status).toBe(200);
   });
 
   it("same-hotel receipts on an unsplit multi-hotel PO serialise on the PO row", async () => {
@@ -1405,3 +1419,97 @@ describe("activity trail", () => {
     }
   });
 });
+
+// ---------------------------------------------------------------------------
+// count freeze (spec §8.5): posting moves stock, so it waits for the count
+// ---------------------------------------------------------------------------
+
+describe("count freeze", () => {
+  let priorSettings = null; // company A's settings row before the test (other suites insert their own)
+
+  /** Company A's count_freeze on, and a FULL count opened at `hotelId` by the controller. */
+  async function freeze(hotelId) {
+    priorSettings = await db.oneOrNone(
+      `SELECT count_freeze FROM tbl_inv_company_settings WHERE hospitality_company_id = $1`, [CO]
+    );
+    await db.none(
+      `INSERT INTO tbl_inv_company_settings (hospitality_company_id, count_freeze) VALUES ($1, true)
+       ON CONFLICT (hospitality_company_id) DO UPDATE SET count_freeze = true`,
+      [CO]
+    );
+    const res = await ctrl.post("/api/v1/inventory/counts").send({ hotelId, scope: "FULL", isBlind: false });
+    expect(res.status).toBe(201);
+    return res.body.data;
+  }
+  async function thaw(count) {
+    if (count) expect((await ctrl.post(`/api/v1/inventory/counts/${count.id}/cancel`).send({})).status).toBe(200);
+    if (priorSettings) {
+      await db.none(`UPDATE tbl_inv_company_settings SET count_freeze = $2 WHERE hospitality_company_id = $1`, [CO, priorSettings.count_freeze]);
+    } else {
+      await db.none(`DELETE FROM tbl_inv_company_settings WHERE hospitality_company_id = $1`, [CO]);
+    }
+  }
+
+  it("blocks posting a receipt or a reversal at the hotel, not saving a draft; replays still answer", async () => {
+    const { poId, lineIds: [line], variants: [v] } = await makePo({ lines: [{ qty: 10 }] });
+    const firstBody = grnInput(poId, A1, [grnLine(line, 3)]);
+    const first = await recv.post("/api/v1/inventory/grn").send(firstBody);
+    expect(first.status).toBe(201);
+    let count = null;
+    let draftId = null;
+    let draftKey = null;
+    try {
+      count = await freeze(A1);
+      const locked = { status: 0, code: "LOCKED", details: { countId: count.id, countNumber: count.countNumber } };
+
+      const fresh = await recv.post("/api/v1/inventory/grn").send(grnInput(poId, A1, [grnLine(line, 2)]));
+      expect(fresh.status).toBe(409);
+      expect(fresh.body).toMatchObject(locked);
+
+      // A draft moves no stock, so it saves; posting it is refused.
+      const draftBody = { ...grnInput(poId, A1, [grnLine(line, 2)]), post: false };
+      draftKey = draftBody.clientEventId;
+      const draft = await recv.post("/api/v1/inventory/grn").send(draftBody);
+      expect(draft.status).toBe(201);
+      draftId = draft.body.data.id;
+      const posting = await recv.post(`/api/v1/inventory/grn/${draftId}/post`).send({ clientEventId: draftKey });
+      expect(posting.status).toBe(409);
+      expect(posting.body).toMatchObject(locked);
+      const putPost = await recv.put(`/api/v1/inventory/grn/${draftId}`).send({ hotelId: A1, lines: [grnLine(line, 2)], post: true });
+      expect(putPost.status).toBe(409);
+      expect(putPost.body).toMatchObject(locked);
+
+      const reversal = await ctrl.post(`/api/v1/inventory/grn/${first.body.data.id}/reverse`).send({ reason: "Counted wrong", lines: "all" });
+      expect(reversal.status).toBe(409);
+      expect(reversal.body).toMatchObject(locked);
+
+      // The legacy one-click receipt posts too.
+      const legacy = await buyer.post("/api/v1/po/markGRN").send({ po_id: poId, grn_document_url: "", remarks: "x" });
+      expect(legacy.status).toBe(409);
+      expect(legacy.body).toMatchObject(locked);
+
+      // A retry of what was already posted still gets the original back.
+      const replay = await recv.post("/api/v1/inventory/grn").send(firstBody);
+      expect(replay.status).toBe(200);
+      expect(replay.body.data).toMatchObject({ id: first.body.data.id, status: "posted", replayed: true, no_op: true });
+      const repost = await recv.post(`/api/v1/inventory/grn/${first.body.data.id}/post`).send({ clientEventId: firstBody.clientEventId });
+      expect(repost.status).toBe(200);
+      expect(repost.body.data).toMatchObject({ id: first.body.data.id, replayed: true, no_op: true });
+
+      expect(await balanceOf(A1, v)).toMatchObject({ qty: 3 });
+      expect((await getGrnRow(first.body.data.id)).status).toBe("posted");
+    } finally {
+      await thaw(count);
+    }
+
+    // Once the count is closed, the draft posts.
+    const later = await recv.post(`/api/v1/inventory/grn/${draftId}/post`).send({ clientEventId: draftKey });
+    expect(later.status).toBe(200);
+    expect(later.body.data).toMatchObject({ id: draftId, status: "posted" });
+    expect(await balanceOf(A1, v)).toMatchObject({ qty: 5 });
+  });
+});
+
+async function getGrnRow(id) {
+  return db.one(`SELECT status FROM tbl_grn WHERE id = $1`, [id]);
+}

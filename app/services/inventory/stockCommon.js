@@ -136,21 +136,37 @@ export async function loadCompanyItems(t, companyId, ids) {
 }
 
 /**
- * Count freeze (spec §8.5): when the company's count_freeze is on and a count
- * is open at the hotel, stock may not move. LOCKED names the count.
+ * The count that freezes the hotel's stock right now (spec §8.5): the
+ * company's count_freeze is on AND a count is open at the hotel. Null when
+ * stock may move.
+ * @returns {Promise<{countId:number, countNumber:string|null}|null>}
  */
-export async function assertNotFrozen(t, { companyId, hotelId }) {
+export async function freezingCount(t, { companyId, hotelId }) {
   const settings = await getEffectiveSettings(t, { companyId, hotelId });
-  if (!settings.countFreeze) return;
+  if (!settings.countFreeze) return null;
   const open = await t.oneOrNone(
     `SELECT id, count_number FROM tbl_inv_count WHERE hotel_id = $1 AND status = 'open' ORDER BY id LIMIT 1`,
     [hotelId]
   );
+  return open ? { countId: Number(open.id), countNumber: open.count_number } : null;
+}
+
+/**
+ * Count freeze (spec §8.5): when the company's count_freeze is on and a count
+ * is open at the hotel, stock may not move. LOCKED names the count.
+ * Every poster calls it inside its transaction, before its movements post:
+ * mark out / return, adjustments (create and approve), opening import, GRN
+ * post (buyer, draft, site-rep link, legacy markGRN), GRN reversal and RTV
+ * dispatch. Saving a draft moves nothing and is not checked. A replay of an
+ * already-posted document is answered before this check.
+ */
+export async function assertNotFrozen(t, { companyId, hotelId }) {
+  const open = await freezingCount(t, { companyId, hotelId });
   if (open) {
     throw new InventoryError(
       'LOCKED',
-      `Stock is frozen while count ${open.count_number ?? `#${open.id}`} is open at this hotel`,
-      { countId: Number(open.id), countNumber: open.count_number }
+      `Stock is frozen while count ${open.countNumber ?? `#${open.countId}`} is open at this hotel`,
+      open
     );
   }
 }

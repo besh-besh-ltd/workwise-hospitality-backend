@@ -79,6 +79,53 @@ export const negotiationReadScopeSql = (alias, userParam) =>
           AND (_urs.process_id IS NULL OR _urs.process_id = ${alias}.process_id)
      ))`;
 
+// The caller holds a live seat on the approval of any negotiation round of the
+// ARC whose id is `arcIdExpr`. A REMOVED seat does not count.
+export const arcNegotiationSeatSql = (arcIdExpr, userParam) =>
+  `EXISTS (
+       SELECT 1
+         FROM tbl_negotiation_rounds _snr
+         JOIN tbl_approval_instances _sai
+           ON _sai.entity_type = 'ARC_NEGOTIATION' AND _sai.entity_id = _snr.id
+         JOIN tbl_approval_instance_steps _sas ON _sas.approval_instance_id = _sai.id
+         JOIN tbl_approval_step_approvers _ssa ON _ssa.approval_instance_step_id = _sas.id
+        WHERE _snr.source_type = 'ARC'
+          AND _snr.source_id = ${arcIdExpr}
+          AND _ssa.approver_user_id = ${userParam}::int
+          AND _ssa.removed_at IS NULL
+     )`;
+
+// Read scope for ARC rounds on the shared negotiation screens (`alias` is a
+// tbl_arc row). The people who work an ARC negotiation are ARC users, and most
+// hold no negotiation role: the commercial evaluators who open the rounds have
+// arc-comm.*, and the approvers come from the ARC_NEGOTIATION policy, which may
+// name someone with no module role at all (see arcPermission.js). So on top of
+// negotiation.read this admits arc-comm read/evaluate/approve and arc.admin in
+// the ARC's own four-axis scope — exactly what the /arc-v2 evaluation endpoints
+// already let them read — and anyone seated on one of the ARC's round approvals.
+// The listings keep negotiationReadScopeSql.
+export const arcNegotiationReadScopeSql = (alias, userParam) =>
+  `(${userParam}::int IS NULL OR EXISTS (
+       SELECT 1
+         FROM tbl_user_role_scopes _urs
+         JOIN tbl_role_permissions _rp ON _rp.role_id = _urs.role_id
+         JOIN tbl_permissions _p       ON _p.id = _rp.permission_id
+        WHERE _urs.user_id = ${userParam}::int
+          AND (
+            (_p.resource = 'negotiation'::resource_type AND _p.action = 'read')
+            OR (_p.resource = 'arc-comm'::resource_type AND _p.action IN ('read', 'evaluate', 'approve'))
+            OR (_p.resource = 'arc'::resource_type AND _p.action::text = 'admin')
+          )
+          AND _urs.company_id = ${alias}.hospitality_company_id
+          AND (_urs.hotel_id IS NULL OR _urs.hotel_id = ${alias}.hotel_id)
+          AND (
+            ${alias}.department_id IS NULL
+            OR _urs.department_id IS NULL
+            OR _urs.department_id = ${alias}.department_id
+          )
+          AND (_urs.process_id IS NULL OR _urs.process_id = ${alias}.process_id)
+     ) OR ${arcNegotiationSeatSql(`${alias}.id`, userParam)})`;
+
 // ============= MULTI-PRODUCT ROUND HELPERS =============
 // A round either targets a single product (legacy: rfq_product_id NOT NULL,
 // per-vendor fields in vendor_approvals[].negotiation_fields) or multiple
@@ -209,11 +256,14 @@ export const applyLineDecisions = (products, decisions, actorUserId) => {
 };
 
 // Per-vendor negotiation fields for one product (or 'RFQ_LEVEL') of a round.
+// ARC rounds key their entries by arc_item_id / is_arc_level instead, so an id
+// matches either key and 'RFQ_LEVEL' covers both whole-parent flags.
 export const getVendorFieldsForProduct = (round, vendorId, rfqProductId) => {
   if (Array.isArray(round?.products) && round.products.length > 0) {
     const entry = round.products.find(p => rfqProductId === 'RFQ_LEVEL'
-      ? p?.is_rfq_level === true
-      : Number(p?.rfq_product_id) === Number(rfqProductId));
+      ? p?.is_rfq_level === true || p?.is_arc_level === true
+      : Number(p?.rfq_product_id) === Number(rfqProductId)
+        || (p?.arc_item_id != null && Number(p.arc_item_id) === Number(rfqProductId)));
     const vt = (entry?.vendor_targets || []).find(v => Number(v?.vendor_id) === Number(vendorId));
     return vt?.fields || [];
   }
@@ -1060,6 +1110,190 @@ export const summariseVendors = (lines) => {
     .sort((a, b) => String(a.vendor_name || '').localeCompare(String(b.vendor_name || '')));
 };
 
+// Approval instances of the given entity types and ids, each assembled with
+// its steps, approvers, action history and the caller's can_user_approve —
+// the getApprovalInstanceDetails contract, in four queries for any number of
+// instances. Newest instance first. Shared by the RFQ and ARC approval bundles.
+export const assembleApprovalInstances = async (entityTypes, entityIds, userId) => {
+  if (!entityIds || entityIds.length === 0) return [];
+  const [instances, allSteps, allApprovers, allActions] = await Promise.all([
+    db.any(
+      `SELECT
+         i.*,
+         p.entity_type as policy_entity_type,
+         p.hospitality_company_id as policy_company_id,
+         p.hotel_id as policy_hotel_id,
+         p.department_id as policy_department_id,
+         hc.name as company_name,
+         hh.name as hotel_name,
+         d.title as department_name,
+         initiator.name as initiated_by_name,
+         initiator.email as initiated_by_email,
+         initiator.designation as initiated_by_designation
+       FROM tbl_approval_instances i
+       JOIN tbl_approval_policies p ON i.approval_policy_id = p.id
+       LEFT JOIN tbl_hospitality_companies hc ON i.hospitality_company_id = hc.id
+       LEFT JOIN tbl_hospitality_company_hotels hh ON i.hotel_id = hh.id
+       LEFT JOIN tbl_department d ON i.department_id = d.id
+       LEFT JOIN tbl_users initiator ON i.initiated_by = initiator.id
+       WHERE i.entity_type = ANY($2::text[])
+         AND i.entity_id = ANY($1::int[])
+       ORDER BY i.created_at DESC`,
+      [entityIds, entityTypes]
+    ),
+    // All steps for those instances
+    db.any(
+      `SELECT s.*, ps.approval_type, ps.approver_source_type, ps.approver_source_id
+       FROM tbl_approval_instance_steps s
+       LEFT JOIN tbl_approval_policy_steps ps ON s.policy_step_id = ps.id
+       WHERE s.approval_instance_id IN (
+         SELECT id FROM tbl_approval_instances
+         WHERE entity_type = ANY($2::text[])
+           AND entity_id = ANY($1::int[])
+       )
+       ORDER BY s.step_order ASC`,
+      [entityIds, entityTypes]
+    ),
+    // All approvers for those steps
+    db.any(
+      `SELECT
+         sa.*,
+         u.name as user_name,
+         u.email as user_email,
+         u.designation as user_designation,
+         (
+           SELECT d.title
+           FROM tbl_user_department ud
+           JOIN tbl_department d ON d.id = ud.department_id
+           WHERE ud.user_id = u.id
+           ORDER BY ud.id DESC
+           LIMIT 1
+         ) AS user_department
+       FROM tbl_approval_step_approvers sa
+       JOIN tbl_users u ON sa.approver_user_id = u.id
+       WHERE sa.approval_instance_step_id IN (
+         SELECT s.id FROM tbl_approval_instance_steps s
+         WHERE s.approval_instance_id IN (
+           SELECT id FROM tbl_approval_instances
+           WHERE entity_type = ANY($2::text[])
+             AND entity_id = ANY($1::int[])
+         )
+       )`,
+      [entityIds, entityTypes]
+    ),
+    // All actions for those instances
+    db.any(
+      `SELECT
+         a.id, a.approval_instance_id, a.approval_instance_step_id,
+         a.approver_user_id, a.action, a.comment,
+         a.created_at AT TIME ZONE 'UTC' AS created_at,
+         u.name as actor_name,
+         u.email as actor_email
+       FROM tbl_approval_actions a
+       JOIN tbl_users u ON a.approver_user_id = u.id
+       WHERE a.approval_instance_id IN (
+         SELECT id FROM tbl_approval_instances
+         WHERE entity_type = ANY($2::text[])
+           AND entity_id = ANY($1::int[])
+       )
+       ORDER BY a.created_at ASC`,
+      [entityIds, entityTypes]
+    )
+  ]);
+
+  // Index steps and approvers by instance/step
+  const stepsByInstance = {};
+  for (const step of allSteps) {
+    if (!stepsByInstance[step.approval_instance_id]) {
+      stepsByInstance[step.approval_instance_id] = [];
+    }
+    stepsByInstance[step.approval_instance_id].push(step);
+  }
+
+  const approversByStep = {};
+  for (const approver of allApprovers) {
+    if (!approversByStep[approver.approval_instance_step_id]) {
+      approversByStep[approver.approval_instance_step_id] = [];
+    }
+    approversByStep[approver.approval_instance_step_id].push(approver);
+  }
+
+  const actionsByInstance = {};
+  for (const action of allActions) {
+    if (!actionsByInstance[action.approval_instance_id]) {
+      actionsByInstance[action.approval_instance_id] = [];
+    }
+    actionsByInstance[action.approval_instance_id].push(action);
+  }
+
+  // Assemble full instance details (matching getApprovalInstanceDetails contract)
+  return instances.map((inst) => {
+    const steps = (stepsByInstance[inst.id] || []).map(step => {
+      const approvers = approversByStep[step.id] || [];
+      return { ...step, approvers };
+    });
+
+    // Compute can_user_approve
+    let canUserApprove = false;
+    let userApprovalStepId = null;
+    if (userId) {
+      for (const step of steps) {
+        if (step.step_order === inst.current_step && inst.status === 'PENDING') {
+          const userApprover = step.approvers.find(
+            ap => ap.approver_user_id === userId && ap.status === 'PENDING'
+          );
+          if (userApprover) {
+            canUserApprove = true;
+            userApprovalStepId = step.id;
+            break;
+          }
+        }
+      }
+    }
+
+    // Compute total_steps
+    const totalSteps = steps.length;
+
+    const assembled = {
+      id: inst.id,
+      entity_type: inst.entity_type,
+      entity_id: inst.entity_id,
+      status: inst.status,
+      current_step: inst.current_step,
+      total_steps: totalSteps,
+      created_at: inst.created_at,
+      completed_at: inst.completed_at,
+      metadata: inst.metadata,
+      initiated_by: {
+        user_id: inst.initiated_by,
+        name: inst.initiated_by_name,
+        email: inst.initiated_by_email,
+        designation: inst.initiated_by_designation
+      },
+      policy: {
+        id: inst.approval_policy_id,
+        hospitality_company_id: inst.policy_company_id,
+        hotel_id: inst.policy_hotel_id,
+        department_id: inst.policy_department_id
+      },
+      scope: {
+        hospitality_company_id: inst.hospitality_company_id,
+        company_name: inst.company_name,
+        hotel_id: inst.hotel_id,
+        hotel_name: inst.hotel_name,
+        department_id: inst.department_id,
+        department_name: inst.department_name
+      },
+      can_user_approve: canUserApprove,
+      user_approval_step_id: userApprovalStepId,
+      steps,
+      action_history: actionsByInstance[inst.id] || []
+    };
+
+    return assembled;
+  });
+};
+
 const negotiationModel = {
   // ============= NEGOTIATION ROUNDS =============
 
@@ -1186,7 +1420,7 @@ const negotiationModel = {
         WHERE nr.id = $2::int
           AND (
             (rfq.id IS NOT NULL AND ${negotiationReadScopeSql('rfq', '$1')})
-            OR (a.id IS NOT NULL AND ${negotiationReadScopeSql('a', '$1')})
+            OR (a.id IS NOT NULL AND ${arcNegotiationReadScopeSql('a', '$1')})
           )`,
       [Number(userId), Number(roundId)]
     );
@@ -1246,7 +1480,7 @@ const negotiationModel = {
         WHERE nr.id = ANY($2::int[])
           AND (
             (rfq.id IS NOT NULL AND ${negotiationReadScopeSql('rfq', '$1')})
-            OR (a.id IS NOT NULL AND ${negotiationReadScopeSql('a', '$1')})
+            OR (a.id IS NOT NULL AND ${arcNegotiationReadScopeSql('a', '$1')})
           )
         ORDER BY nr.round_number ASC, nr.id ASC`,
       [userId == null ? null : Number(userId), ids]
@@ -1348,7 +1582,7 @@ const negotiationModel = {
           )
           AND (
             (rfq.id IS NOT NULL AND ${negotiationReadScopeSql('rfq', '$5')})
-            OR (a.id IS NOT NULL AND ${negotiationReadScopeSql('a', '$5')})
+            OR (a.id IS NOT NULL AND ${arcNegotiationReadScopeSql('a', '$5')})
           )
         ORDER BY nr.round_number ASC, nr.id ASC`,
       [sourceType, Number(sourceId), products, items, userId == null ? null : Number(userId)]
@@ -1388,7 +1622,7 @@ const negotiationModel = {
           AND nr.source_id = $2::int
           AND (
             (rfq.id IS NOT NULL AND ${negotiationReadScopeSql('rfq', '$3')})
-            OR (a.id IS NOT NULL AND ${negotiationReadScopeSql('a', '$3')})
+            OR (a.id IS NOT NULL AND ${arcNegotiationReadScopeSql('a', '$3')})
           )`,
       [sourceType, Number(sourceId), userId == null ? null : Number(userId)]
     );
@@ -1451,7 +1685,7 @@ const negotiationModel = {
           AND nr.source_id = $2::int
           AND (
             (rfq.id IS NOT NULL AND ${negotiationReadScopeSql('rfq', '$3')})
-            OR (a.id IS NOT NULL AND ${negotiationReadScopeSql('a', '$3')})
+            OR (a.id IS NOT NULL AND ${arcNegotiationReadScopeSql('a', '$3')})
           )`,
       [sourceType, Number(sourceId), userId == null ? null : Number(userId)]
     );
@@ -1730,34 +1964,32 @@ const negotiationModel = {
   /**
    * The caller's negotiation.* permissions IN THE SCOPE OF one round's parent.
    * Same 4-axis matrix as the read gate, just not pinned to action='read'.
+   * ARC rounds answer from the ARC grants instead (see the ARC variant below).
    * `userId` null = super admin → everything.
    */
   getNegotiationPermissionsForRound: async (userId, roundId) => {
     const all = { read: true, create: true, update: true, approve: true, delete: true };
     if (userId == null) return all;
+    const source = await db.oneOrNone(
+      `SELECT source_type FROM tbl_negotiation_rounds WHERE id = $1::int`,
+      [Number(roundId)]
+    );
+    if (source?.source_type === 'ARC') {
+      return negotiationModel.getArcNegotiationPermissionsForRound(userId, roundId);
+    }
     const rows = await db.any(
       `SELECT DISTINCT _p.action::text AS action
          FROM tbl_negotiation_rounds nr
-         LEFT JOIN tbl_rfq rfq ON rfq.id = nr.rfq_id
-         LEFT JOIN tbl_arc a   ON a.id = nr.source_id AND nr.source_type = 'ARC'
+         JOIN tbl_rfq rfq ON rfq.id = nr.rfq_id
          JOIN tbl_user_role_scopes _urs ON _urs.user_id = $1::int
          JOIN tbl_role_permissions _rp  ON _rp.role_id = _urs.role_id
          JOIN tbl_permissions _p        ON _p.id = _rp.permission_id
         WHERE nr.id = $2::int
           AND _p.resource = 'negotiation'::resource_type
-          AND (
-            (rfq.id IS NOT NULL
-             AND _urs.company_id = rfq.hospitality_company_id
-             AND (_urs.hotel_id IS NULL OR _urs.hotel_id = rfq.hotel_id)
-             AND (rfq.department_id IS NULL OR _urs.department_id IS NULL OR _urs.department_id = rfq.department_id)
-             AND (_urs.process_id IS NULL OR _urs.process_id = rfq.process_id))
-            OR
-            (a.id IS NOT NULL
-             AND _urs.company_id = a.hospitality_company_id
-             AND (_urs.hotel_id IS NULL OR _urs.hotel_id = a.hotel_id)
-             AND (a.department_id IS NULL OR _urs.department_id IS NULL OR _urs.department_id = a.department_id)
-             AND (_urs.process_id IS NULL OR _urs.process_id = a.process_id))
-          )`,
+          AND _urs.company_id = rfq.hospitality_company_id
+          AND (_urs.hotel_id IS NULL OR _urs.hotel_id = rfq.hotel_id)
+          AND (rfq.department_id IS NULL OR _urs.department_id IS NULL OR _urs.department_id = rfq.department_id)
+          AND (_urs.process_id IS NULL OR _urs.process_id = rfq.process_id)`,
       [Number(userId), Number(roundId)]
     );
     const granted = new Set(rows.map((r) => r.action));
@@ -1767,6 +1999,56 @@ const negotiationModel = {
       update: granted.has('update'),
       approve: granted.has('approve'),
       delete: granted.has('delete'),
+    };
+  },
+
+  /**
+   * The same five flags for an ARC round, read off the ARC grants in the ARC's
+   * own 4-axis scope — the people who work these rounds are ARC users and
+   * mostly hold no negotiation role (see arcNegotiationReadScopeSql).
+   *
+   *   read            negotiation.read, arc-comm read|evaluate|approve,
+   *                   arc.admin, or a live seat on one of the ARC's round
+   *                   approvals
+   *   create, update  arc-comm.evaluate | arc.admin — the ARC round API's own
+   *                   write gate (COMM_WRITE in routes/arc_v2/evaluationRoutes.js)
+   *   approve         arc-comm.approve | negotiation.approve. Informational:
+   *                   the ARC approve API is decided by the approval engine
+   *                   alone, so the page gates approval on the caller's pending
+   *                   seat, not on this flag.
+   *   delete          never — nothing deletes an ARC round.
+   */
+  getArcNegotiationPermissionsForRound: async (userId, roundId) => {
+    const row = await db.oneOrNone(
+      `SELECT ARRAY(
+                SELECT DISTINCT _p.resource::text || '.' || _p.action::text
+                  FROM tbl_user_role_scopes _urs
+                  JOIN tbl_role_permissions _rp ON _rp.role_id = _urs.role_id
+                  JOIN tbl_permissions _p       ON _p.id = _rp.permission_id
+                 WHERE _urs.user_id = $1::int
+                   AND _p.resource IN ('negotiation'::resource_type, 'arc-comm'::resource_type, 'arc'::resource_type)
+                   AND _urs.company_id = a.hospitality_company_id
+                   AND (_urs.hotel_id IS NULL OR _urs.hotel_id = a.hotel_id)
+                   AND (a.department_id IS NULL OR _urs.department_id IS NULL OR _urs.department_id = a.department_id)
+                   AND (_urs.process_id IS NULL OR _urs.process_id = a.process_id)
+              ) AS grants,
+              ${arcNegotiationSeatSql('a.id', '$1')} AS seated
+         FROM tbl_negotiation_rounds nr
+         JOIN tbl_arc a ON a.id = nr.source_id
+        WHERE nr.id = $2::int
+          AND nr.source_type = 'ARC'`,
+      [Number(userId), Number(roundId)]
+    );
+    const g = new Set(row?.grants || []);
+    const evaluate = g.has('arc-comm.evaluate') || g.has('arc.admin');
+    return {
+      read:
+        g.has('negotiation.read') || g.has('arc-comm.read') || g.has('arc-comm.evaluate') ||
+        g.has('arc-comm.approve') || g.has('arc.admin') || row?.seated === true,
+      create: evaluate,
+      update: evaluate,
+      approve: g.has('arc-comm.approve') || g.has('negotiation.approve'),
+      delete: false,
     };
   },
 
@@ -3823,8 +4105,9 @@ const negotiationModel = {
     // Combine both ID sets for querying (NEGOTIATION uses roundIds, NEGOTIATION_QUOTE uses productIds)
     const allEntityIds = [...new Set([...productIds, ...roundIds])];
 
-    // 2. Fetch rounds history, approval instances, steps, approvers, and actions in parallel
-    const [roundsHistory, instances, allSteps, allApprovers, allActions] = await Promise.all([
+    // 2. Rounds history and the approval instances — NEGOTIATION is keyed by
+    //    round_id, NEGOTIATION_QUOTE by product_id — fetched in parallel.
+    const [roundsHistory, assembledInstances] = await Promise.all([
       // Full rounds history for the RFQ
       db.any(
         `SELECT nr.*, u.name as created_by_name, u.email as created_by_email,
@@ -3840,193 +4123,22 @@ const negotiationModel = {
          ORDER BY nr.rfq_product_id NULLS LAST, nr.round_number ASC, nr.created_at DESC`,
         [rfqId]
       ),
-      // All approval instances for NEGOTIATION (entity_id = round_id) and NEGOTIATION_QUOTE (entity_id = product_id)
-      db.any(
-        `SELECT
-           i.*,
-           p.entity_type as policy_entity_type,
-           p.hospitality_company_id as policy_company_id,
-           p.hotel_id as policy_hotel_id,
-           p.department_id as policy_department_id,
-           hc.name as company_name,
-           hh.name as hotel_name,
-           d.title as department_name,
-           initiator.name as initiated_by_name,
-           initiator.email as initiated_by_email,
-           initiator.designation as initiated_by_designation
-         FROM tbl_approval_instances i
-         JOIN tbl_approval_policies p ON i.approval_policy_id = p.id
-         LEFT JOIN tbl_hospitality_companies hc ON i.hospitality_company_id = hc.id
-         LEFT JOIN tbl_hospitality_company_hotels hh ON i.hotel_id = hh.id
-         LEFT JOIN tbl_department d ON i.department_id = d.id
-         LEFT JOIN tbl_users initiator ON i.initiated_by = initiator.id
-         WHERE i.entity_type IN ('NEGOTIATION', 'NEGOTIATION_QUOTE')
-           AND i.entity_id = ANY($1::int[])
-         ORDER BY i.created_at DESC`,
-        [allEntityIds]
-      ),
-      // All steps for those instances
-      db.any(
-        `SELECT s.*, ps.approval_type, ps.approver_source_type, ps.approver_source_id
-         FROM tbl_approval_instance_steps s
-         LEFT JOIN tbl_approval_policy_steps ps ON s.policy_step_id = ps.id
-         WHERE s.approval_instance_id IN (
-           SELECT id FROM tbl_approval_instances
-           WHERE entity_type IN ('NEGOTIATION', 'NEGOTIATION_QUOTE')
-             AND entity_id = ANY($1::int[])
-         )
-         ORDER BY s.step_order ASC`,
-        [allEntityIds]
-      ),
-      // All approvers for those steps
-      db.any(
-        `SELECT
-           sa.*,
-           u.name as user_name,
-           u.email as user_email,
-           u.designation as user_designation,
-           (
-             SELECT d.title
-             FROM tbl_user_department ud
-             JOIN tbl_department d ON d.id = ud.department_id
-             WHERE ud.user_id = u.id
-             ORDER BY ud.id DESC
-             LIMIT 1
-           ) AS user_department
-         FROM tbl_approval_step_approvers sa
-         JOIN tbl_users u ON sa.approver_user_id = u.id
-         WHERE sa.approval_instance_step_id IN (
-           SELECT s.id FROM tbl_approval_instance_steps s
-           WHERE s.approval_instance_id IN (
-             SELECT id FROM tbl_approval_instances
-             WHERE entity_type IN ('NEGOTIATION', 'NEGOTIATION_QUOTE')
-               AND entity_id = ANY($1::int[])
-           )
-         )`,
-        [allEntityIds]
-      ),
-      // All actions for those instances
-      db.any(
-        `SELECT
-           a.id, a.approval_instance_id, a.approval_instance_step_id,
-           a.approver_user_id, a.action, a.comment,
-           a.created_at AT TIME ZONE 'UTC' AS created_at,
-           u.name as actor_name,
-           u.email as actor_email
-         FROM tbl_approval_actions a
-         JOIN tbl_users u ON a.approver_user_id = u.id
-         WHERE a.approval_instance_id IN (
-           SELECT id FROM tbl_approval_instances
-           WHERE entity_type IN ('NEGOTIATION', 'NEGOTIATION_QUOTE')
-             AND entity_id = ANY($1::int[])
-         )
-         ORDER BY a.created_at ASC`,
-        [allEntityIds]
-      )
+      assembleApprovalInstances(['NEGOTIATION', 'NEGOTIATION_QUOTE'], allEntityIds, userId),
     ]);
 
-    // 3. Index steps and approvers by instance/step
-    const stepsByInstance = {};
-    for (const step of allSteps) {
-      if (!stepsByInstance[step.approval_instance_id]) {
-        stepsByInstance[step.approval_instance_id] = [];
-      }
-      stepsByInstance[step.approval_instance_id].push(step);
-    }
-
-    const approversByStep = {};
-    for (const approver of allApprovers) {
-      if (!approversByStep[approver.approval_instance_step_id]) {
-        approversByStep[approver.approval_instance_step_id] = [];
-      }
-      approversByStep[approver.approval_instance_step_id].push(approver);
-    }
-
-    const actionsByInstance = {};
-    for (const action of allActions) {
-      if (!actionsByInstance[action.approval_instance_id]) {
-        actionsByInstance[action.approval_instance_id] = [];
-      }
-      actionsByInstance[action.approval_instance_id].push(action);
-    }
-
-    // 4. Assemble full instance details (matching getApprovalInstanceDetails contract)
+    // 3. Group by entity_type and entity_id
     const negotiationInstances = {};
     const negotiationQuoteInstances = {};
-
-    for (const inst of instances) {
-      const steps = (stepsByInstance[inst.id] || []).map(step => {
-        const approvers = approversByStep[step.id] || [];
-        return { ...step, approvers };
-      });
-
-      // Compute can_user_approve
-      let canUserApprove = false;
-      let userApprovalStepId = null;
-      if (userId) {
-        for (const step of steps) {
-          if (step.step_order === inst.current_step && inst.status === 'PENDING') {
-            const userApprover = step.approvers.find(
-              ap => ap.approver_user_id === userId && ap.status === 'PENDING'
-            );
-            if (userApprover) {
-              canUserApprove = true;
-              userApprovalStepId = step.id;
-              break;
-            }
-          }
-        }
-      }
-
-      // Compute total_steps
-      const totalSteps = steps.length;
-
-      const assembled = {
-        id: inst.id,
-        entity_type: inst.entity_type,
-        entity_id: inst.entity_id,
-        status: inst.status,
-        current_step: inst.current_step,
-        total_steps: totalSteps,
-        created_at: inst.created_at,
-        completed_at: inst.completed_at,
-        metadata: inst.metadata,
-        initiated_by: {
-          user_id: inst.initiated_by,
-          name: inst.initiated_by_name,
-          email: inst.initiated_by_email,
-          designation: inst.initiated_by_designation
-        },
-        policy: {
-          id: inst.approval_policy_id,
-          hospitality_company_id: inst.policy_company_id,
-          hotel_id: inst.policy_hotel_id,
-          department_id: inst.policy_department_id
-        },
-        scope: {
-          hospitality_company_id: inst.hospitality_company_id,
-          company_name: inst.company_name,
-          hotel_id: inst.hotel_id,
-          hotel_name: inst.hotel_name,
-          department_id: inst.department_id,
-          department_name: inst.department_name
-        },
-        can_user_approve: canUserApprove,
-        user_approval_step_id: userApprovalStepId,
-        steps,
-        action_history: actionsByInstance[inst.id] || []
-      };
-
-      // Group by entity_type and entity_id
-      const targetMap = inst.entity_type === 'NEGOTIATION' ? negotiationInstances : negotiationQuoteInstances;
-      const entityId = String(inst.entity_id);
+    for (const assembled of assembledInstances) {
+      const targetMap = assembled.entity_type === 'NEGOTIATION' ? negotiationInstances : negotiationQuoteInstances;
+      const entityId = String(assembled.entity_id);
       if (!targetMap[entityId]) {
         targetMap[entityId] = [];
       }
       targetMap[entityId].push(assembled);
     }
 
-    // 5. Attach round-level approvals to rounds_history
+    // 4. Attach round-level approvals to rounds_history
     // New rounds use entity_id = round.id; old rounds used entity_id = rfq_product_id.
     // Try round.id first, then fall back to matching via metadata.round_id from the product bucket.
     const enrichedRounds = roundsHistory.map(round => {

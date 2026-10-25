@@ -15,7 +15,61 @@ const buildVendorPoActionUrl = (po_id) => vendorPoDetail(po_id) || vendorPoList(
 // that, so every entry point normalises before it iterates.
 const toRecipientList = (userList) => (Array.isArray(userList) ? userList.filter(Boolean) : []);
 
-export const sendInvoiceEmail = async (purchase_order, invoice_url, userList = []) => {
+const escapeHtml = (value) => String(value)
+  .replace(/&/g, "&amp;")
+  .replace(/</g, "&lt;")
+  .replace(/>/g, "&gt;")
+  .replace(/"/g, "&quot;")
+  .replace(/'/g, "&#39;");
+
+const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+
+/** "2026-10-24" -> "24 Oct 2026" (a calendar day: no time zone shift). */
+const dayText = (day) => {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(day ?? ""));
+  return m ? `${Number(m[3])} ${MONTHS[Number(m[2]) - 1]} ${m[1]}` : null;
+};
+
+/** "4500.00" -> "₹4,500.00". */
+const amountText = (amount) => {
+  if (amount == null || amount === "") return null;
+  const n = Number(amount);
+  return Number.isFinite(n) ? `₹${n.toLocaleString("en-IN", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}` : null;
+};
+
+/**
+ * The "Invoice Details" list of the invoice-raised email: the vendor's
+ * invoice number, date and amount, and the dispatch note it bills. Empty for
+ * a file-only invoice (the legacy body names none of them).
+ *
+ * @param {{invoiceNumber?:string|null, invoiceDate?:string|null,
+ *   invoiceAmount?:string|number|null, dispatchNumber?:string|null}|null} invoice
+ * @returns {string} HTML ('' when there is nothing to show)
+ */
+export const invoiceDetailsHtml = (invoice) => {
+  if (!invoice?.invoiceNumber) return "";
+  const rows = [
+    ["Invoice Number", invoice.invoiceNumber],
+    ["Invoice Date", dayText(invoice.invoiceDate)],
+    ["Invoice Amount", amountText(invoice.invoiceAmount)],
+    ["Dispatch Note", invoice.dispatchNumber || null],
+  ].filter(([, value]) => value != null && value !== "");
+  return `
+        <h4>Invoice Details</h4>
+        <ul>
+          ${rows.map(([label, value]) => `<li><strong>${label}:</strong> ${escapeHtml(value)}</li>`).join("\n          ")}
+        </ul>`;
+};
+
+/**
+ * Tells the PO's buyer team that the vendor raised an invoice.
+ * @param {object} purchase_order the PO row + finalized_vendor_name/email
+ * @param {string} invoice_url
+ * @param {number[]} userList recipients
+ * @param {object|null} [invoice] {invoiceNumber, invoiceDate, invoiceAmount,
+ *   dispatchNumber} (invoiceDetailsHtml); null for a file-only invoice
+ */
+export const sendInvoiceEmail = async (purchase_order, invoice_url, userList = [], invoice = null) => {
   return new Promise(async (resolve, reject) => {
     try {
       const list = toRecipientList(userList);
@@ -48,6 +102,7 @@ export const sendInvoiceEmail = async (purchase_order, invoice_url, userList = [
           <li><strong>RFQ ID:</strong> ${rfq_id ?? "N/A"}</li>
           <li><strong>Vendor Email:</strong> ${finalized_vendor_email || "N/A"}</li>
         </ul>
+        ${invoiceDetailsHtml(invoice)}
 
         <p style="margin-top:16px;">
           This email is for your information and records that the vendor has submitted an invoice
@@ -80,7 +135,9 @@ export const sendInvoiceEmail = async (purchase_order, invoice_url, userList = [
 
       let recipients = {
         from: config.webmasterMail,
-        subject: `Invoice raised by ${vendorName} for PO #${po_number}`,
+        subject: invoice?.invoiceNumber
+          ? `Invoice ${invoice.invoiceNumber} raised by ${vendorName} for PO #${po_number}`
+          : `Invoice raised by ${vendorName} for PO #${po_number}`,
         html: htmlContent,
       };
 
@@ -109,7 +166,7 @@ export const sendInvoiceEmail = async (purchase_order, invoice_url, userList = [
           type: 'invoice_raised',
           title: `Invoice raised for PO #${po_number}`,
           body: `${vendorName} has submitted an invoice for your review.`,
-          data: { po_id, rfq_id, invoice_url: invoice_url || null },
+          data: { po_id, rfq_id, invoice_url: invoice_url || null, invoice_number: invoice?.invoiceNumber || null },
           actionUrl: linkPath
         });
       } catch (notifyErr) {
@@ -419,8 +476,13 @@ const fmtDate = (v) => {
   return Number.isNaN(d.getTime()) ? null : IST_DATE.format(d);
 };
 
-/** The link the site rep opens; the page lifts the token out of the URL on load. */
-export const siteRepReceiveLink = (token) => toAbsoluteUrl(`/receive/token?t=${encodeURIComponent(token)}`);
+/**
+ * The link the site rep opens; the page lifts the token out of the URL on load.
+ * The token rides in the fragment (#t=), which the browser never sends, so it
+ * stays out of frontend, proxy and load-balancer access logs. The page still
+ * reads the older ?t= links already in inboxes.
+ */
+export const siteRepReceiveLink = (token) => toAbsoluteUrl(`/receive/token#t=${encodeURIComponent(token)}`);
 
 /**
  * Email a site representative their receiving link.

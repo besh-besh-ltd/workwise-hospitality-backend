@@ -24,6 +24,7 @@ import { loadRtvDocument, buildRtvHtml, formatDateTimeIst } from "../../app/serv
 import { shortUrl } from "../../app/services/inventory/shortUrl.js";
 import { InventoryError } from "../../app/services/inventory/errors.js";
 import { resolveItemForVariant } from "../../app/services/inventory/items.js";
+import { startCount, cancelCount } from "../../app/services/inventory/countService.js";
 import {
   CO, A1, makeRfqPo, setPlan, postReceiptGrn, deliveryLinesOf, markOut, balanceOf,
 } from "../helpers/invReceiptFixtures.js";
@@ -581,6 +582,54 @@ describe("RTV and GRN document over HTTP", () => {
     const conflict = await (await httpClient(STORES.id)).get(`/api/v1/inventory/grn/${draft.grnId}/pdf`);
     expect(conflict.status).toBe(409);
     expect(conflict.body).toMatchObject({ status: 0, code: "CONFLICT" });
+  });
+
+  it("dispatch is refused while a count freezes the GRN's hotel; raising a draft is not", async () => {
+    const { grnId, grnLineId } = await committedGrn();
+    const client = await httpClient(STORES.id);
+    let count = null;
+    const priorSettings = await db.oneOrNone(
+      `SELECT count_freeze FROM tbl_inv_company_settings WHERE hospitality_company_id = $1`, [CO]
+    );
+    try {
+      await db.none(
+        `INSERT INTO tbl_inv_company_settings (hospitality_company_id, count_freeze) VALUES ($1, true)
+         ON CONFLICT (hospitality_company_id) DO UPDATE SET count_freeze = true`,
+        [CO]
+      );
+      count = await db.tx((t) => startCount(t, STORES, { hotelId: A1, scope: "SELECTED", invItemIds: [stockItem.id] }));
+
+      const created = await client.post("/api/v1/inventory/rtv").send({
+        grnId, disposition: "REPLACE", lines: [{ grnLineId, qty: 2, reason: "Dented cans" }],
+      });
+      expect(created.status).toBe(200);
+      const rtvId = created.body.data.id;
+
+      const sent = await client.post(`/api/v1/inventory/rtv/${rtvId}/dispatch`).send({ challanNo: "GP-1" });
+      expect(sent.status).toBe(409);
+      expect(sent.body).toMatchObject({
+        status: 0, code: "LOCKED", details: { countId: count.id, countNumber: count.countNumber },
+      });
+      const read = await client.get(`/api/v1/inventory/rtv/${rtvId}`);
+      expect(read.body.data).toMatchObject({ status: "draft", rtvNumber: null });
+    } finally {
+      // The count names the shared stock item, which afterAll may delete: remove it.
+      if (count) {
+        await db.tx((t) => cancelCount(t, STORES, count.id));
+        await db.none(
+          `DELETE FROM tbl_inv_count_line_event WHERE count_line_id IN (SELECT id FROM tbl_inv_count_line WHERE count_id = $1)`,
+          [count.id]
+        );
+        await db.none(`DELETE FROM tbl_inv_count_line WHERE count_id = $1`, [count.id]);
+        await db.none(`DELETE FROM tbl_inv_count WHERE id = $1`, [count.id]);
+      }
+      await db.none(`DELETE FROM tbl_inv_doc_sequence WHERE hotel_id = $1 AND doc_type = 'CNT'`, [A1]);
+      if (priorSettings) {
+        await db.none(`UPDATE tbl_inv_company_settings SET count_freeze = $2 WHERE hospitality_company_id = $1`, [CO, priorSettings.count_freeze]);
+      } else {
+        await db.none(`DELETE FROM tbl_inv_company_settings WHERE hospitality_company_id = $1`, [CO]);
+      }
+    }
   });
 
   it("creates, reads and cancels an RTV; the trail files it under the GRN's hotel", async () => {

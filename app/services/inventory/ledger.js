@@ -564,6 +564,13 @@ export async function postMovements(t, movements) {
   if (locked.length !== sorted.length) {
     throw new Error(`postMovements: locked ${locked.length} of ${sorted.length} balance rows`);
   }
+  // One stamp for the whole call (a document's movements share it), read only
+  // now that the balance rows are locked: per (hotel, item), posted_at order is
+  // then lock order, and id order. now() is the transaction START: a
+  // transaction that opened earlier but locked later would be stamped before
+  // movements it was applied after, and "last movement before a cut-off" would
+  // read a stale qty_after. As text, so no precision is lost on the way back.
+  const { stamp } = await t.one(`SELECT clock_timestamp()::text AS stamp`);
 
   const state = new Map(
     locked.map((b) => [
@@ -632,11 +639,11 @@ export async function postMovements(t, movements) {
        (hospitality_company_id, hotel_id, inv_item_id, product_variant_id, movement_type,
         qty, unit_cost, value, qty_after, avg_cost_after,
         department_id, batch_no, expiry_date, source_type, source_id, source_line_id,
-        reason_code, posted_by)
+        reason_code, posted_by, posted_at)
      SELECT m.company_id, m.hotel_id, m.inv_item_id, m.product_variant_id, m.movement_type,
             m.qty, m.unit_cost, m.value, m.qty_after, m.avg_cost_after,
             m.department_id, m.batch_no, m.expiry_date, m.source_type, m.source_id, m.source_line_id,
-            m.reason_code, m.posted_by
+            m.reason_code, m.posted_by, $19::timestamptz
        FROM unnest($1::int[], $2::int[], $3::int[], $4::int[], $5::text[],
                    $6::numeric[], $7::numeric[], $8::numeric[], $9::numeric[], $10::numeric[],
                    $11::int[], $12::text[], $13::date[], $14::text[], $15::bigint[], $16::bigint[],
@@ -671,6 +678,7 @@ export async function postMovements(t, movements) {
       col((p) => p.sourceLineId),
       col((p) => p.reasonCode),
       col((p) => p.postedBy),
+      stamp,
     ]
   );
 
@@ -678,7 +686,7 @@ export async function postMovements(t, movements) {
   await t.none(
     `UPDATE tbl_inv_balance b
         SET qty = u.qty, avg_cost = u.avg_cost, value = u.value,
-            last_movement_at = now(), updated_at = now()
+            last_movement_at = $6::timestamptz, updated_at = now()
        FROM unnest($1::int[], $2::int[], $3::numeric[], $4::numeric[], $5::numeric[])
             AS u(hotel_id, inv_item_id, qty, avg_cost, value)
       WHERE b.hotel_id = u.hotel_id AND b.inv_item_id = u.inv_item_id`,
@@ -688,6 +696,7 @@ export async function postMovements(t, movements) {
       finals.map((s) => toDecimalString(s.qty)),
       finals.map((s) => toDecimalString(s.avg)),
       finals.map((s) => toDecimalString(s.value)),
+      stamp,
     ]
   );
   await saveBatchSets(t, batchSets);

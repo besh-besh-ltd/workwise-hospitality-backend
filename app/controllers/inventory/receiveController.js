@@ -41,6 +41,9 @@ const bodyOf = (req) => req.value?.body ?? req.body ?? {};
 /** Unique violation on tbl_grn.client_event_id: a concurrent request with the same key won. */
 const isClientEventRace = (err) => err?.code === '23505' && err?.constraint === 'ux_grn_client_event';
 
+/** Replays carry the original document, flagged as the stock routes flag theirs. */
+const replayData = (doc) => ({ ...doc, replayed: true, no_op: true });
+
 /** Activity trail scope for a GRN (company + hotel + label). */
 function grnActivity(res, grn, extra = {}) {
   if (!grn) return;
@@ -105,8 +108,9 @@ export const getReceiveContext = async (req, res) => {
 
 /**
  * POST /grn: save a draft (post:false) or record and post a receipt
- * (post:true). A clientEventId that already produced a posted GRN answers 200
- * with that GRN (nothing is posted twice); a new document answers 201.
+ * (post:true). A clientEventId that already produced a GRN answers 200 with
+ * that GRN plus {replayed:true, no_op:true} (nothing is posted twice); a new
+ * document answers 201.
  */
 export const createGrn = async (req, res) => {
   const input = bodyOf(req);
@@ -130,7 +134,7 @@ export const createGrn = async (req, res) => {
   res.status(replayed ? 200 : 201).json({
     status: 1,
     message: replayed ? 'GRN already recorded' : grn.status === 'draft' ? 'GRN draft saved' : 'GRN posted',
-    data: grn,
+    data: replayed ? replayData(grn) : grn,
   });
   if (!replayed) await afterPost(grn);
   return undefined;
@@ -194,7 +198,7 @@ export const postGrn = async (req, res) => {
   }
   const { grn, replayed } = result;
   if (!replayed) grnActivity(res, grn);
-  res.status(200).json({ status: 1, message: replayed ? 'GRN already posted' : 'GRN posted', data: grn });
+  res.status(200).json({ status: 1, message: replayed ? 'GRN already posted' : 'GRN posted', data: replayed ? replayData(grn) : grn });
   if (!replayed) await afterPost(grn);
   return undefined;
 };
