@@ -2,7 +2,8 @@
 
 A seeded, fully local environment for clicking through the inventory module end to end:
 receiving against a delivery plan, vendor dispatch, RTV, short-close, mark-out, adjustments,
-counts, reports, the site-rep link and the vendor view.
+counts, batches and expiry, reorder to an MR draft, the low-stock digest, reports, the site-rep
+link and the vendor view.
 
 Everything runs on this machine. Nothing reaches the stage database, Brevo or S3.
 
@@ -19,7 +20,10 @@ Files in `scripts/inventory_e2e/`:
 | File | What it does |
 |---|---|
 | `e2e_server.sh` | The launcher: rebuilds the DB, seeds, then serves on port 8092. |
+| `e2e_env.sh` | The environment every local process runs under, and its guards. Sourced by the launcher and the digest script, never run directly. |
 | `seed.mjs` | The idempotent seed. It writes `/tmp/inv-e2e/seed.json`. |
+| `api_scenario.mjs` | Runs the whole scenario below through the API and asserts every number in this runbook (80 checks). Needs a freshly seeded world. |
+| `low_stock_digest.sh` | Runs the daily low-stock digest now, instead of waiting for the 07:30 IST cron. |
 | `e2e_egress_guard.mjs` | Loopback-only network guard. |
 
 The launcher also reuses `scripts/vendor_networks/e2e_mail_sink.mjs`, `e2e_aws_sink.mjs` and `e2e_prepare_db.mjs` unchanged.
@@ -42,6 +46,8 @@ scripts/inventory_e2e/e2e_server.sh  # rebuild DB + seed + serve (about 30 s)
 The banner prints the API base (`http://localhost:8092/api/v1`), the mail-sink dir, the logins, the site-rep link and the backend PID. Stop the backend with Ctrl-C, or `kill <pid>`. Stop it before running the seed on its own, because the seed takes a table lock on the ledger.
 
 Run the seed by itself, against an already-built DB, with `node scripts/inventory_e2e/seed.mjs`. It is safe to rerun.
+
+**API run.** With the backend up on a fresh seed, `node scripts/inventory_e2e/api_scenario.mjs` plays steps 1–13 (including 9b and 10) through the API and prints PASS/FAIL per check. It exits 1 on any failure, and refuses to start if PO 96801 already has a plan or receipts. It changes the seeded world, so re-seed before a browser run: stop the backend, then `E2E_RESET=seed scripts/inventory_e2e/e2e_server.sh`.
 
 ## 2. Start the frontend
 
@@ -78,7 +84,7 @@ The vendor's email is `vendor.freshkart@inv-e2e.example.invalid`. The login rout
 
 Departments are the global fixtures: Procurement 10201, Engineering 10202, F&B 10203, Housekeeping 10204.
 
-**Stock** is not started at any hotel and there are no movements. Receiving (step 3) puts stock in. An opening import or a FULL count approval would stamp `stock_started_at`, but none of these scenarios needs that. The overview lists both hotels under "stock not started", which is expected.
+**Stock** is not started at any hotel and there are no movements or batches. Receiving (step 3) puts stock in. Approving a FULL count, or an opening import, stamps `stock_started_at`. Step 9 is a FULL count, so it starts stock at A1, and the low-stock digest only looks at hotels whose stock has started. Until then, the overview lists both hotels under "stock not started", which is expected. The reorder worklist does not need stock started.
 
 **Company A settings:** over-receipt tolerance 0%, no negative stock, GST not in cost, an auto-approve limit of 0 (so every adjustment needs approval), no count freeze.
 
@@ -103,6 +109,16 @@ Company B has its own "Paneer (Indigo)" item (96811) carrying the **same** barco
 | **96801 `E2E-INV-PO-1001`** | Multi-hotel RFQ PO (RFQ 96801, delivers to A1 + A2). It has no delivery plan yet: the first read creates one unallocated delivery, due vendor acceptance + 3 days. | Paneer 40 kg @ ₹380 (5%); Rice 10 Bag @ ₹2,250 (5%); Caps 500 pc @ ₹4 (18%). Line ids 96801–96803. | ₹41,945 |
 | **96802 `E2E-INV-CO-1002`** | Call-off PO for **A1** only, from the active ARC `ARC-E2E-INV-0001` (contract 96801, F&B) via MR `MR-E2E-INV-0001`. Its due date is the MR's required-by date, today + 2. | Paneer 15 kg @ ₹360 (5%); Caps 300 pc @ ₹3.80 (18%). Line ids 96811–96812. | ₹7,015.20 |
 
+**Rate contract.** ARC `ARC-E2E-INV-0001` (96801) is active, single-hotel A1, department F&B (contract 96801). Reorder's MR draft matches against its lines. Remaining = committed − what the call-off PO 96802 already consumed.
+
+| Item | Contract line | Rate (what the MR stores) | Unit | Committed | Remaining |
+|---|---|---|---|---|---|
+| Paneer | 96801 | ₹360 | kg | 600 | 585 |
+| Basmati Rice | 96802 | ₹2,200 | Bag (= 25 kg) | 120 | 120 |
+| Shower Cap | 96803 | ₹3.80 | pc | 10,000 | 9,700 |
+
+There is no contract in any other department, so a reorder MR draft for Housekeeping is refused as NOT_CONTRACTED.
+
 **Site-rep link.** One live link exists, for PO 96802 at A1, and it lasts 14 days:
 
 ```
@@ -119,7 +135,9 @@ To mint another link, use the buyer's PO page → Deliveries → Site representa
 
 Dates below are relative to the day you run it. "P1" means today + 2 and "P2" means today + 9.
 
-The expected numbers were checked through the API on the seeded world (see `task-E3prep-report.md`).
+Every expected number below comes from `api_scenario.mjs` on a fresh seed: 80 of 80 checks passed on 2026-10-25, against backend integration with D3. In the examples, today is 2026-10-25, so the paneer batch `PNR-E2E-01` expires 2026-11-04 (today + 10) and the expired lot `PNR-E2E-OLD` expired 2026-10-24 (yesterday).
+
+The UI steps have not been run in a browser against D1 and D3 yet. The frontend integration branch now has D1 (`9a927aba`) and a Reorder page, so the page names and button labels below may need small corrections after that run. The API equivalents are verified.
 
 Routes (frontend):
 
@@ -177,7 +195,7 @@ Expected:
 
 Expected:
 - `GRN/A1/<FY>/00001` is posted.
-- Stock at A1. The Stock page needs D1, so until then check it on Inventory → Overview, where A1's stock value is ₹11,150, or with `GET /inventory/stock?hotelId=96801`:
+- Stock at A1, on Inventory → Stock (A1 value ₹11,150) or with `GET /inventory/stock?hotelId=96801`:
 
   | Item | Qty | Avg cost | Value |
   |---|---|---|---|
@@ -186,6 +204,7 @@ Expected:
   | Caps | 150 pc | ₹4 | ₹600 |
 
   All three are below their reorder level. Cost excludes GST.
+- The paneer item card (Inventory → Stock → Paneer, or `GET /inventory/stock/96801/items/96801`) lists one batch: `PNR-E2E-01`, expiry today + 10, 10 kg.
 - The A1 P1 phase is "Partly received": paneer has 2 open, because a rejected quantity stays owed.
 - The dispatch shows as "received".
 - The mail "GRN/A1/…: goods received against PO E2E-INV-PO-1001" goes to the buyer and to the vendor. The vendor's copy names the rejection.
@@ -216,10 +235,10 @@ Expected:
 
 ### 6. Mark out paneer to F&B by scan (`INVE2E-STORE`)
 
-Needs D1. On the integration frontend at `2ef367ca`, Inventory → Mark out is still a placeholder.
-
-1. When D1 is merged: go to Inventory → Mark out, choose department **F&B**, scan `8901234500019`, enter `6` kg, then post.
-2. Expected: `OUT/A1/<FY>/00001`, ₹2,280; paneer goes to **4** kg.
+1. Go to Inventory → Mark out, choose department **F&B**, scan `8901234500019`, enter `6` kg, then post.
+2. Expected:
+   - `OUT/A1/<FY>/00001`, ₹2,280; paneer goes to **4** kg.
+   - FEFO takes the 6 kg from `PNR-E2E-01`, which drops to 4 kg.
 3. API equivalent (`POST /inventory/out`):
 
    ```json
@@ -228,64 +247,126 @@ Needs D1. On the integration frontend at `2ef367ca`, Inventory → Mark out is s
 
 ### 7. Return 2 kg (`INVE2E-STORE`)
 
-Needs D1.
-
 1. Same page, choose Return, F&B, paneer `2` kg.
-2. Expected: `RET/A1/<FY>/00001`, ₹760; paneer goes to **6** kg.
+2. Expected:
+   - `RET/A1/<FY>/00001`, ₹760; paneer goes to **6** kg.
+   - A return with no batch goes to the **undated bucket**. The paneer card now lists two rows: undated 2 kg first (FEFO treats an unknown expiry as the soonest), then `PNR-E2E-01` 4 kg.
 3. API: as step 6 with `"docType":"RETURN"` and qty 2.
 
 ### 8. Wastage adjustment, then approve
-
-Needs D1 for the UI.
 
 1. As `INVE2E-STORE`: go to Inventory → Adjustments → new. Reason **Wastage**, paneer `-0.5` kg, remarks "Paneer soured in chiller". Submit.
    - It goes to "pending approval", because the auto-approve limit is 0.
    - The Storekeeper cannot approve it (HTTP 403 "You don't have permission to do this at this hotel").
 2. As `INVE2E-CTRL`: approve it.
-3. Expected: `ADJ/A1/<FY>/00001` is posted, −₹190; paneer goes to **5.5** kg.
+3. Expected:
+   - `ADJ/A1/<FY>/00001` is posted, −₹190; paneer goes to **5.5** kg.
+   - FEFO draws the undated bucket: undated 1.5 kg, `PNR-E2E-01` 4 kg.
 4. API:
    - `POST /inventory/adjustments` with `{"hotelId":96801,"reasonCode":"WASTAGE","remarks":"…","submit":true,"clientEventId":"<uuid>","lines":[{"invItemId":96801,"qty":-0.5}]}`
    - then `POST /inventory/adjustments/<id>/approve` as the Controller.
 
-### 9. Count with a variance, then approve
+### 9. FULL count with a variance, then approve (starts stock at A1)
 
 1. As `INVE2E-STORE`: go to Inventory → Counts → **Start count**.
-   - Hotel A1; **Selected items**; tick Paneer.
+   - Hotel A1; **Full count** (all 3 items).
    - Leave **Blind count** on.
-   - Click **Start count of 1 item**.
-2. Scan or find Paneer and enter `5`. Click **Submit for approval**. The blind count hides the system quantity from the storekeeper.
+2. Enter Paneer `5`, Basmati Rice `75`, Shower Cap `140`. A FULL count needs every line counted before it can be submitted. Click **Submit for approval**. The blind count hides the system quantity from the storekeeper.
 3. As `INVE2E-CTRL`: open `CNT/A1/<FY>/00001`.
-   - Expected review: Counted 5, System 5.5, Variance −0.5, Value −₹190, "Reason needed".
-   - Enter a reason (e.g. "Trim loss while portioning") → **Approve and post**.
+   - Expected review: Paneer counted 5, system 5.5, variance −0.5, value −₹190, "Reason needed". Rice and caps have no variance.
+   - Enter a reason on paneer (e.g. "Trim loss while portioning") → **Approve and post**.
 4. Expected:
    - Paneer at A1 is **5** kg (₹1,900).
    - A1 stock total is ₹9,210 (rice ₹6,750 + caps ₹560 + paneer ₹1,900).
+   - **Stock is started at A1** (`stockStartedAt` is set on `GET /inventory/stock?hotelId=96801`). A2 stays not started.
+   - The count loss also draws FEFO, from the undated bucket: undated 1 kg, `PNR-E2E-01` 4 kg.
+5. API:
+   - `POST /inventory/counts {"hotelId":96801,"scope":"FULL","isBlind":true}`
+   - `PUT /inventory/counts/<id>/lines {"lines":[{"invItemId":96801,"countedQty":5,"clientEventId":"<uuid>"}, …one per item, each with its own uuid]}`
+   - `POST /inventory/counts/<id>/submit`
+   - then, as the Controller, `POST /inventory/counts/<id>/approve {"reasons":{"<paneer line id>":"Trim loss while portioning"}}`
+
+### 9b. An already-expired lot, written off as EXPIRY (expired lots go first)
+
+This shows the one exception to FEFO. An adjustment with reason **Expiry** draws expired lots first, earliest expiry first. Every other outbound movement takes the undated bucket first, then the earliest expiry.
+
+1. As `INVE2E-STORE`: Inventory → Receive → `E2E-INV-PO-1001` · A1. Receive paneer only: received 3, accepted 3, batch `PNR-E2E-OLD`, expiry **yesterday**, challan `FK-DC-1009`. Post it.
+   - Expected: the GRN posts, with an **EXPIRED** warning ("Paneer expired on <yesterday>; consider rejecting it (short shelf life)"). An expired date warns but does not block.
+   - The paneer card, in FEFO order: undated 1 kg; `PNR-E2E-OLD` (yesterday) 3 kg; `PNR-E2E-01` (today + 10) 4 kg. Paneer is 8 kg.
+2. Reports → **7.7 Near expiry**, business unit A1:
+
+   | Batch | Days to expiry | Status | Qty |
+   |---|---|---|---|
+   | PNR-E2E-OLD | −1 | Expired | 3 |
+   | PNR-E2E-01 | 10 | Expiring | 4 |
+
+   The report lists batches expiring within 30 days, expired ones included. The undated bucket never appears.
+3. As `INVE2E-STORE`: Inventory → Adjustments → new. Reason **Expiry**, paneer `-3` kg, remarks "Expired lot PNR-E2E-OLD". Submit. Then, as `INVE2E-CTRL`, approve it.
+4. Expected:
+   - The second adjustment is posted, −₹1,140; paneer goes back to **5** kg.
+   - The ledger (`GET /inventory/stock/96801/items/96801/ledger`) has **one** ADJUST_OUT row for it: batch `PNR-E2E-OLD`, expiry yesterday, −3 kg, −₹1,140.
+   - The card: undated 1 kg, `PNR-E2E-01` 4 kg. `PNR-E2E-OLD` is gone and the undated bucket is untouched. Plain FEFO would have taken the undated 1 kg first and then 2 kg of the old lot.
+5. API:
+   - `POST /inventory/grn {"poId":96801,"hotelId":96801,"receivedAt":"<today YYYY-MM-DD>","vendorChallanNo":"FK-DC-1009","post":true,"clientEventId":"<uuid>","lines":[{"poLineId":96801,"receivedQty":3,"acceptedQty":3,"rejectedQty":0,"batchNo":"PNR-E2E-OLD","expiryDate":"<yesterday>"}]}`
+   - `POST /inventory/adjustments {"hotelId":96801,"reasonCode":"EXPIRY","remarks":"Expired lot PNR-E2E-OLD","submit":true,"clientEventId":"<uuid>","lines":[{"invItemId":96801,"qty":-3}]}`, then approve as the Controller.
+
+This receipt also counts against the plan: A1's open paneer on PO 96801 drops from 14 kg (2 still owed on P1 + 12 on P2) to 11 kg, which is part of step 10's "on order".
 
 ### 10. Reorder to an MR draft (`INVE2E-CTRL`)
 
-Needs D3, backend and frontend. On this backend `GET /inventory/reorder` returns **501 "not implemented"**, and the Reorder page is a placeholder.
+The Controller can create the draft: user type buyer, `inventory.update` at A1 (Inventory Controller), and a role scope covering A1 / F&B (MR Raiser, any department). Those three are what `can.createMrDraft` and the server-side gate check.
 
-- Once D3 is merged: go to Inventory → Reorder, hotel A1.
-  - Paneer, rice and caps are listed below reorder. The worklist does not require stock started.
-  - Paneer and caps should show a contracted rate from ARC 96801. The contract is single-hotel A1 / F&B and has headroom: paneer 585 kg, caps 9,700 pc.
-- Select them, choose department **F&B** and create the MR draft.
-- Expected: a new MR draft at A1 / F&B, raised by the Controller (MR Raiser at A1). The MR policy names `INVE2E-BUYER` as approver.
+1. Go to Inventory → Reorder, hotel A1. Expected worklist (after steps 1–9b):
+
+   | Item | On hand | Reorder at | Max | On order | Suggested | Contract |
+   |---|---|---|---|---|---|---|
+   | Basmati Rice | 75 kg | 100 | 300 | 75 | **150** | line 96802, ₹2,200/Bag, 120 Bag left |
+   | Paneer | 5 kg | 10 | 30 | 26 | 0 | line 96801, ₹360/kg, 585 kg left |
+   | Shower Cap | 140 pc | 200 | 600 | 460 | 0 | line 96803, ₹3.80/pc, 9,700 pc left |
+
+   How the numbers come out:
+   - **On order** is the open quantity on A1's plan rows of live POs, plus approved MRs, in stock units:
+     - rice: 3 Bag on A1 P2 = 75 kg;
+     - paneer: 11 kg open on PO 96801 plus 15 kg on the call-off PO 96802 = 26;
+     - caps: 10 (the RTV replacement still owed on P1) + 150 on P2 + 300 on PO 96802 = 460.
+   - **Suggested** = max − on hand − on order, rounded up to the smallest pack above 1. Rice: 300 − 75 − 75 = 150, already a multiple of the 25 kg bag. Paneer and caps are covered by what is on order, so they get 0.
+   - Unallocated group orders: none, because step 1 split PO 96801 by hotel.
+2. Department (MR): **F&B**. Select Basmati Rice (order qty 150, the suggestion) and Paneer, and type order qty `10` for Paneer. Click **Create MR draft (2)**.
+3. Expected:
+   - "Draft requisition MR-… created with 2 items".
+   - The MR is a draft at A1 / F&B, raised by the Controller. The lines are in the **contract's unit** at the contract rate: rice **6 Bag** @ ₹2,200 (150 kg ÷ 25), paneer **10 kg** @ ₹360.
+   - Reload: rice now shows open MR 150 kg and paneer 10 kg (drafts and pending MRs count as "open MR").
+4. API, with the checks `api_scenario.mjs` makes:
+
+   | Request | Expected |
+   |---|---|
+   | `GET /inventory/reorder?hotelId=96801` | 200, the rows above, `can.createMrDraft: true`, F&B among `departments` |
+   | `POST /inventory/reorder/mr-draft {"hotelId":96801,"departmentId":10203,"clientEventId":"<uuid>","items":[{"invItemId":96802,"qty":150},{"invItemId":96801,"qty":10}]}` | **201** `status: "draft"`, items `[96802, 6, "Bag", 2200]` and `[96801, 10, "kg", 360]` (line, quantity, unit, rate) |
+   | The same body again, same `clientEventId` | **200** `replayed: true, no_op: true`, the same `mrId`. No second MR. |
+   | rice `qty: 3100` (124 Bag), new `clientEventId` | **400** VALIDATION "Basmati Rice: 124 Bag is more than the contract has left (120 Bag)", `details.reason: "EXCEEDS_CONTRACT_REMAINING"`, `quantity: 124`, `remaining: 120` |
+   | caps in department Housekeeping (10204) | **400** `details.reason: "NOT_CONTRACTED"` |
+   | `INVE2E-BBUYER` (company B), `GET /inventory/reorder?hotelId=96801` | **404** |
+
+   `items[].qty` is in **stock units**. The server converts it to the contract's unit with the item's UOM factor and rounds up to 0.01. `arcContractLineId` per item is optional: without it, the cheapest eligible line is used.
+
+Note: the **Storekeeper** gets `can.createMrDraft: true` too, with all 4 departments, and can create a reorder MR draft at A1 / F&B (201), even though the Storekeeper role has no `mr.*` permission at all. The gate is `inventory.update` plus any role scope at the hotel and department, not `mr.create`. This was observed on the run and is reported to the D3 owner. It is not changed here.
 
 ### 11. Reports (`INVE2E-CTRL`, or the buyer)
 
 1. Go to Insights → Reports. The Inventory family (7.1–7.7) and Receiving & Deliveries (8.1–8.3) are all ready.
 2. Run with FY 2026-27, business unit A1:
 
-   | Report | Expected after steps 1–9 |
+   | Report | Expected after steps 1–10 |
    |---|---|
-   | 7.1 Stock on Hand | 3 rows matching step 9 |
+   | 7.1 Stock on Hand | Basmati Rice 75 kg ₹6,750; Paneer 5 kg ₹1,900; Shower Cap 140 pc ₹560 |
    | 7.3 Consumption by Department | F&B / PANEER: out ₹2,280, returns ₹760, net ₹1,520 |
-   | 7.4 Wastage & Adjustments | ADJ −0.5 kg, −₹190 |
-   | 7.5 Count Variance | −0.5 kg, −₹190 |
+   | 7.4 Wastage & Adjustments | Wastage −0.5 kg, −₹190; Expiry −3 kg, −₹1,140 |
+   | 7.5 Count Variance | Paneer −0.5 kg, −₹190 |
+   | 7.7 Near expiry | One row: `PNR-E2E-01`, 10 days, Expiring, 4 kg. The expired lot was written off in 9b. |
    | 8.1 GRN register | |
    | 8.2 Pending deliveries | |
 
-   7.7 Near expiry stays empty until D3 is merged, because batches are written by D3's ledger.
+   API: `POST /reports/<key>/preview {"filters":{"fy":"2026-27","hotel_ids":[96801]}}`. Keys: `stock_on_hand`, `consumption_by_department`, `stock_adjustments`, `count_variance`, `near_expiry`. Near expiry takes `hotel_ids` only.
 
 ### 12. Token receive page, prices hidden (no login)
 
@@ -295,6 +376,7 @@ Needs D3, backend and frontend. On this backend `GET /inventory/reorder` returns
 2. Scan `(01)…PNR-E2E-01` → `15`. Scan `8901234500057` ×3 (300 pc). Attach a photo if you want. Click **Post receipt**.
 3. Expected:
    - `GRN/A1/<FY>/0000n` is posted.
+   - The GS1 code carries the same batch and expiry as step 3, so the 15 kg join that batch: the paneer card shows undated 1 kg and `PNR-E2E-01` **19** kg (paneer 20 kg).
    - Mails go to the buyer and the vendor.
    - The link keeps working until it expires or is revoked: Deliveries → Site representatives → **Revoke** on the buyer's call-off PO.
    - An unknown or garbled token gets HTTP 401.
@@ -305,7 +387,7 @@ Needs D3, backend and frontend. On this backend `GET /inventory/reorder` returns
 2. Expected:
    - The plan shows four phases with accepted / rejected / returned / short-closed / open columns.
    - **Dispatch notes**: `DSP/A1/…` received.
-   - **Received at the hotel**: `GRN/A1/…/00001`, paneer 10 accepted / 2 rejected, reason quality.
+   - **Received at the hotel**: two GRNs. `GRN/A1/…/00001`: paneer 10 accepted / 2 rejected, reason quality. The 9b receipt: paneer 3 accepted.
    - **Returned to you**: `RTV/A1/…` Replacement, dispatched, challan RTV-DC-01.
    - **Short-closed**: three rows at A2 P2, "No longer needed".
    - No prices in this section.
@@ -318,6 +400,26 @@ Needs D3, backend and frontend. On this backend `GET /inventory/reorder` returns
 | `INVE2E-BBUYER` | `GET /inventory/po/96801/deliveries` | 404 |
 | `INVE2E-BBUYER` | `GET /inventory/receive/po/96801?hotelId=96801` | 404 "Hotel not found" |
 | `INVE2E-BBUYER` | scans `8901234500019` (hotel B1) | resolves to Paneer (Indigo) 96811, never company A's item |
+
+---
+
+## 5b. Low-stock digest (in-app, daily)
+
+Every day at 07:30 IST a cron (`startLowStockSweeper`, registered in `server.js`) runs the low-stock sweep. To run it now instead of waiting, with the backend up or down:
+
+```bash
+scripts/inventory_e2e/low_stock_digest.sh                              # today (IST)
+E2E_DIGEST_DATE=2026-10-26 scripts/inventory_e2e/low_stock_digest.sh   # as if it were another day
+```
+
+It calls the app's own `runLowStockSweep()` in a separate node process, under `e2e_env.sh` and with the egress guard and the mail sink preloaded. It refuses to run unless it is connected to the local E2E database on loopback. It prints the sweep result and one `bell -> <employee code>` line per notification written.
+
+What it does, and what to expect after step 12:
+- Only hotels whose **stock has started** are swept. On a fresh seed that is none, so the digest is empty until step 9's FULL count is approved.
+- Per hotel, the active items at or below their reorder level become **one** notification per user who holds `inventory.update` there, vendors excluded.
+- After step 12: `{"hotels":1,"digests":1,"alreadyDigested":0}`. A1 has one item below reorder: "1 item at or below reorder level at Saffron Grand Mumbai (A1) | Basmati Rice (75 of 100 kg)", linking to `/dashboard/buyer/inventory/reorder?hotelId=96801`. Paneer (20) and caps (440) were topped up by the call-off receipt. The bells go to `INVE2E-STORE` and `INVE2E-CTRL`.
+- Once per hotel per IST day: a second run the same day returns `{"digests":0,"alreadyDigested":1}`.
+- **It is not an email.** The digest goes through `notificationService.dispatch`: an in-app bell row (`tbl_notifications`, type `inventory_low_stock_digest`), a socket event and web push. Nothing lands in the mail sink; the run checks the mail count is unchanged. To see it in the UI, log in as `INVE2E-STORE` or `INVE2E-CTRL` and open the bell.
 
 ---
 
@@ -352,7 +454,8 @@ Expected `ALLOW` destinations:
 | `inv-e2e-local.localhost:9592` | The S3 stand-in |
 | A high `127.0.0.1` port | Puppeteer's DevTools socket to its own Chromium |
 
-Two caveats:
+Three caveats:
+- **Web push.** The app sends web push to a browser subscription, if one is registered. The push service is on the internet (for Chrome, `fcm.googleapis.com`), so the egress guard refuses it and logs a `BLOCKED` line. That BLOCKED line means the guard worked, not that something leaked. It only happens after you allow notifications in the browser; the API run registers no subscription and has no BLOCKED lines.
 - Log lines may mention `https://inv-e2e-local.s3.ap-south-1.amazonaws.com/...`. That is only the URL string the app stores for an uploaded PDF; the upload itself went to the sink. **Do not click PDF links in the UI.** Open the file under `/tmp/inv-e2e/aws-sink/` instead, because a click would make the *browser* fetch from real S3.
 - Chromium (puppeteer, used for PDFs) is a child process outside the guard. The templates are self-contained, and puppeteer starts it with background networking disabled.
 
@@ -364,5 +467,9 @@ Two caveats:
 | The seed hangs | The backend is running and holds a lock on `tbl_inv_movement`. Stop it first. |
 | `SEED FAILED …` after manual SQL | `E2E_RESET=full scripts/inventory_e2e/e2e_server.sh` rebuilds from scratch. |
 | Login 400 "Email must be a valid email" | Use the employee code, not the `.invalid` email. |
-| Mark out / Adjustments / Stock / Stock item / Setup / Labels / Scan pages say "Coming soon" | D1 is not merged into the frontend yet. Use the API calls in steps 6–8 and `GET /inventory/stock?hotelId=…`. |
-| Reorder 501 | D3 is not merged into the backend yet. |
+| Mark out / Adjustments / Stock / Stock item / Setup / Labels / Scan pages say "Coming soon" | The frontend checkout does not have D1. It is in the frontend integration branch from `9a927aba`. Use the API calls in steps 6–9b meanwhile. |
+| `GET /inventory/reorder` returns 501 | The backend does not have D3 (in backend integration from `88a6db42`). |
+| Reorder shows no "Create MR draft" button | The user lacks `inventory.update` at the hotel, or has no role scope at any department there. |
+| `api_scenario.mjs` says "ABORT: the world is not freshly seeded" | It ran before, or you clicked through. Stop the backend and start it with `E2E_RESET=seed`. |
+| `low_stock_digest.sh` prints "no digest rows for that date" | Stock has not started at any hotel (approve step 9's FULL count), or nothing is at or below its reorder level. |
+| The digest prints `alreadyDigested: 1` | It already ran today for that hotel. Use `E2E_DIGEST_DATE=<another day>`, or re-seed. |
