@@ -32,6 +32,7 @@ import { recomputePoReceipt } from './receiptRollup.js';
 import { hotelIdsWithPermission } from './scope.js';
 import { listGrnSummariesForPo } from './grnRead.js';
 import { listShortCloses } from './shortCloseService.js';
+import { loadInvoices } from './invoiceService.js';
 import { LEGACY_PO_STATUS_ORDER } from './poStatus.js';
 import { notifyPlanChanged } from './notices/planNotices.js';
 import { RECEIVABLE_PO_STATUSES } from './grnCommon.js';
@@ -591,13 +592,14 @@ async function loadSiteReps(t, poId) {
 
 async function buyerPayload(t, user, poId, tenancy) {
   const ctx = await getPoContext(t, poId);
-  const [hotels, deliveries, poLines, grns, dispatches, rtvs, shortCloses, siteReps, can, active] = await Promise.all([
+  const [hotels, deliveries, poLines, grns, dispatches, rtvs, invoices, shortCloses, siteReps, can, active] = await Promise.all([
     loadHotels(t, ctx.hotelIds),
     loadDeliveries(t, ctx),
     loadPoLineRolls(t, poId),
     listGrnSummariesForPo(t, poId),
     loadDispatches(t, poId),
     loadRtvSummaries(t, poId),
+    loadInvoices(t, poId),
     listShortCloses(t, poId),
     loadSiteReps(t, poId),
     canFlags(t, user, tenancy, ctx),
@@ -618,6 +620,7 @@ async function buyerPayload(t, user, poId, tenancy) {
     grns,
     dispatches,
     rtvs,
+    invoices,
     shortCloses,
     siteReps,
     can,

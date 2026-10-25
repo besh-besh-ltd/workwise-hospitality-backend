@@ -175,6 +175,15 @@ describe("invoices per delivery", () => {
       expect.objectContaining({ invoiceNumber: "INV-1003", invoiceAmount: 99.9, dispatchId: null, dispatchNumber: null }),
     ]);
 
+    // The buyer's Deliveries tab carries the same invoices, against their dispatch notes.
+    const buyerView = await (await httpClient(fx.BUYER)).get(`/api/v1/inventory/po/${po.poId}/deliveries`);
+    expect(buyerView.status).toBe(200);
+    expect(buyerView.body.data.invoices.map((i) => [i.invoiceNumber, i.dispatchId, i.invoiceAmount])).toEqual([
+      ["INV-1001", toA1.id, 11800.5],
+      ["INV-1002", toA2.id, 4500],
+      ["INV-1003", null, 99.9],
+    ]);
+
     // The trail records each invoice with what was billed (the capture writes
     // after the response, so wait for it).
     // Each is filed under the hotel it bills: its dispatch's, and, for the one
