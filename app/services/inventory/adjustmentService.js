@@ -159,7 +159,7 @@ async function loadHeaderForAccess(t, adjustmentId) {
 /** GET /adjustments/:id: inventory.read at its hotel, else NOT_FOUND. */
 export async function getAdjustment(t, user, adjustmentId) {
   const { id, hotelId } = await loadHeaderForAccess(t, adjustmentId);
-  await assertDocAccess(t, user, hotelId, 'read');
+  await assertDocAccess(t, user, hotelId, 'read', { missing: 'Adjustment not found' });
   return payloadFor(t, user, id);
 }
 
@@ -424,7 +424,7 @@ export async function createAdjustment(t, user, input = {}) {
 /** Load, gate (visible → NOT_FOUND, approve → FORBIDDEN) and lock a pending adjustment. */
 async function lockForDecision(t, user, adjustmentId) {
   const { id, hotelId } = await loadHeaderForAccess(t, adjustmentId);
-  const { companyId } = await assertDocAccess(t, user, hotelId, 'approve');
+  const { companyId } = await assertDocAccess(t, user, hotelId, 'approve', { missing: 'Adjustment not found' });
   const row = await t.one(
     `SELECT id, hotel_id, hospitality_company_id, reason_code, status, created_by
        FROM tbl_inv_adjustment WHERE id = $1 FOR UPDATE`,

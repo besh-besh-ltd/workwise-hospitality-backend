@@ -86,15 +86,23 @@ export function optionalDay(v, field) {
  * Gate an action on an existing document at `hotelId`.
  * The caller must be able to see it (inventory.read, or the action itself),
  * else NOT_FOUND; then hold the action, else FORBIDDEN.
+ *
+ * `missing` is the document's own not-found message. With it, every
+ * visibility refusal (another company's hotel included) answers exactly as a
+ * missing id does, so the refusal cannot be used to probe which ids exist.
+ * Without it (the hotel itself is what was named) an out-of-scope hotel reads
+ * like a missing hotel: 'Hotel not found', as assertHotelPermission says
+ * outside the company.
  * @returns {Promise<{companyId:number}>}
  */
-export async function assertDocAccess(t, user, hotelId, action = 'read') {
+export async function assertDocAccess(t, user, hotelId, action = 'read', { missing = null } = {}) {
   const visible = action === 'read' ? 'read' : ['read', action];
   let scope;
   try {
     scope = await assertHotelPermission(t, user, { resource: 'inventory', action: visible, hotelId });
   } catch (err) {
-    if (err instanceof InventoryError && err.code === 'FORBIDDEN') throw notFound();
+    if (err instanceof InventoryError && err.code === 'FORBIDDEN') throw notFound(missing ?? 'Hotel not found');
+    if (missing && err instanceof InventoryError && err.code === 'NOT_FOUND') throw notFound(missing);
     throw err;
   }
   if (action === 'read') return scope;

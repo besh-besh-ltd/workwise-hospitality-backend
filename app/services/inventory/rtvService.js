@@ -101,12 +101,18 @@ async function loadRtvRow(t, rtvId, { forUpdate = false } = {}) {
   return row;
 }
 
-/** Gate on the RTV's (or GRN's) hotel; a refusal outside the company reads as "not found". */
-async function gate(t, user, hotelId, action) {
+/**
+ * Gate on the RTV's (or GRN's) hotel; a refusal outside the company reads as
+ * "not found", in the words a missing id of that record gets (`missing`), so
+ * it cannot be used to probe which ids exist.
+ */
+async function gate(t, user, hotelId, action, missing = null) {
   try {
     return await assertHotelPermission(t, user, { resource: 'grn', action, hotelId });
   } catch (err) {
-    if (err instanceof InventoryError && err.code === 'NOT_FOUND') throw notFound();
+    if (err instanceof InventoryError && err.code === 'NOT_FOUND') {
+      throw missing ? new InventoryError('NOT_FOUND', missing) : notFound();
+    }
     throw err;
   }
 }
@@ -264,7 +270,7 @@ export async function createRtv(t, user, { grnId, disposition, remarks, lines } 
     )
     : null;
   if (!grn) throw new InventoryError('NOT_FOUND', 'Goods receipt not found');
-  const { companyId } = await gate(t, user, grn.hotel_id, 'approve');
+  const { companyId } = await gate(t, user, grn.hotel_id, 'approve', 'Goods receipt not found');
   if (Number(grn.hospitality_company_id) !== companyId) throw new InventoryError('NOT_FOUND', 'Goods receipt not found');
 
   if (!RTV_DISPOSITIONS.includes(disposition)) {
