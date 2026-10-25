@@ -29,6 +29,9 @@ BEGIN
   END IF;
 END $$;
 
+DROP INDEX IF EXISTS public.ux_material_requisition_client_event;
+ALTER TABLE IF EXISTS public.tbl_material_requisition DROP COLUMN IF EXISTS client_event_id;
+
 DROP TABLE IF EXISTS public.tbl_inv_count_line_event;
 DROP TABLE IF EXISTS public.tbl_inv_count_line;
 DROP TABLE IF EXISTS public.tbl_inv_count;

@@ -85,9 +85,13 @@ export async function loadAdjustment(t, adjustmentId) {
             b.avg_cost::text AS avg_cost
        FROM tbl_inv_adjustment_line l
        JOIN tbl_inv_item i ON i.id = l.inv_item_id
-       LEFT JOIN tbl_inv_movement m
-         ON m.source_type = 'ADJ' AND m.source_id = l.adjustment_id AND m.source_line_id = l.id
-        AND m.hospitality_company_id = l.hospitality_company_id
+       -- one row per batch for a track_expiry item split across batches (ledger FEFO)
+       LEFT JOIN LATERAL (
+         SELECT min(mm.unit_cost) AS unit_cost, sum(mm.value) AS value
+           FROM tbl_inv_movement mm
+          WHERE mm.source_type = 'ADJ' AND mm.source_id = l.adjustment_id AND mm.source_line_id = l.id
+            AND mm.hospitality_company_id = l.hospitality_company_id
+       ) m ON true
        LEFT JOIN tbl_inv_balance b ON b.hotel_id = $2 AND b.inv_item_id = l.inv_item_id
       WHERE l.adjustment_id = $1
       ORDER BY l.id`,
@@ -193,9 +197,12 @@ export async function listAdjustments(t, user, { hotelId, status, page } = {}) {
                              ELSE l.qty * COALESCE(b.avg_cost, 0) END))::text AS value
            FROM tbl_inv_adjustment_line l
            JOIN tbl_inv_adjustment a ON a.id = l.adjustment_id
-           LEFT JOIN tbl_inv_movement m
-             ON m.source_type = 'ADJ' AND m.source_id = l.adjustment_id AND m.source_line_id = l.id
-            AND m.hospitality_company_id = l.hospitality_company_id
+           LEFT JOIN LATERAL (
+             SELECT sum(mm.value) AS value
+               FROM tbl_inv_movement mm
+              WHERE mm.source_type = 'ADJ' AND mm.source_id = l.adjustment_id AND mm.source_line_id = l.id
+                AND mm.hospitality_company_id = l.hospitality_company_id
+           ) m ON true
            LEFT JOIN tbl_inv_balance b ON b.hotel_id = a.hotel_id AND b.inv_item_id = l.inv_item_id
           WHERE l.adjustment_id = ANY($1::int[])
           GROUP BY l.adjustment_id`,
