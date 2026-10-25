@@ -554,6 +554,62 @@ describe("concurrency", () => {
     ]);
   });
 
+  it("posted_at follows lock order: a transaction that opened first but posts last is stamped last", async () => {
+    const item = await committedItem("Stamp soap");
+    const towel = await committedItem("Stamp towel");
+    await db.tx((t) => postMovements(t, [mv(item, "GRN_IN", 10, { unitCost: 10, sourceId: 100 })]));
+
+    // T1 (a receipt) opens first and waits. T2 (a mark-out) opens later,
+    // takes the balance lock, posts and commits. Then T1 posts.
+    let opened;
+    let go;
+    const t1Open = new Promise((resolve) => {
+      opened = resolve;
+    });
+    const t1Go = new Promise((resolve) => {
+      go = resolve;
+    });
+    const t1 = db.tx(async (t) => {
+      await t.one("SELECT now()");
+      opened();
+      await t1Go;
+      return postMovements(t, [
+        mv(item, "GRN_IN", 50, { unitCost: 10, sourceId: 1 }),
+        mv(towel, "GRN_IN", 5, { unitCost: 10, sourceId: 1 }),
+      ]);
+    });
+    await t1Open;
+    await db.tx((t) => postMovements(t, [mv(item, "MARK_OUT", -1, { departmentId: DEPT, sourceId: 2 })]));
+    go();
+    await t1;
+
+    const ordered = (by) => db.any(
+      `SELECT source_id::int AS src, qty_after::float AS qty_after FROM tbl_inv_movement
+        WHERE hotel_id = $1 AND inv_item_id = $2 ORDER BY ${by}`,
+      [HOTEL, item]
+    );
+    // The movement committed second is stamped later: time order = lock order = id order.
+    expect(await ordered("posted_at, id")).toEqual([
+      { src: 100, qty_after: 10 },
+      { src: 2, qty_after: 9 },
+      { src: 1, qty_after: 59 },
+    ]);
+    expect(await ordered("id")).toEqual(await ordered("posted_at, id"));
+
+    // What the reports read ("last movement before the cut-off") is the real balance.
+    const [last] = await ordered("posted_at DESC, id DESC LIMIT 1");
+    expect(last.qty_after).toBe((await balanceOf(db, item)).qty);
+    expect(last.qty_after).toBe(59);
+
+    // One stamp per call: T1's movements share it, and it is each balance's last_movement_at.
+    expect(await db.one(
+      `SELECT count(DISTINCT m.posted_at)::int AS stamps, bool_and(b.last_movement_at = m.posted_at) AS on_balance
+         FROM tbl_inv_movement m
+         JOIN tbl_inv_balance b ON b.hotel_id = m.hotel_id AND b.inv_item_id = m.inv_item_id
+        WHERE m.source_type = 'TEST' AND m.source_id = 1`
+    )).toEqual({ stamps: 1, on_balance: true });
+  });
+
   it("first receipts of a new item from two transactions both land", async () => {
     const item = await committedItem("Concurrent new item");
 

@@ -13,6 +13,7 @@ import {
   loadGrnRow, insertGrnLine, afterReceiptChange,
 } from './grnCommon.js';
 import { getGrnPayload } from './grnRead.js';
+import { assertNotFrozen } from './stockCommon.js';
 
 // ---------------------------------------------------------------------------
 // reversal
@@ -45,6 +46,8 @@ export async function reverseGrn(t, user, { grnId, reason, lines } = {}) {
   if (grn.doc_type !== 'RECEIPT' || !['posted', 'partially_reversed'].includes(grn.status)) {
     throw new InventoryError('CONFLICT', 'Only a posted receipt can be reversed', { grnId: grn.id, status: grn.status });
   }
+  // A reversal moves stock: a count freeze at the hotel refuses it (LOCKED).
+  await assertNotFrozen(t, { companyId: Number(grn.hospitality_company_id), hotelId: Number(grn.hotel_id) });
 
   const original = await t.any(
     `SELECT gl.id, gl.po_line_id, gl.product_variant_id, gl.inv_item_id, gl.po_uom,

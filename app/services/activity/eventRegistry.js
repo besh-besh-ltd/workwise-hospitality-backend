@@ -329,10 +329,12 @@ export const EVENTS = [
     entity: { type: 'PO', id: B('po_id') }, scope: SCOPE.entity('PO'),
     summary: (c) => `${c.actor} recorded goods receipt against purchase order ${c.entityLabel}`,
   }),
+  // The controller hands over the hotel the invoice bills (its dispatch's, else
+  // the PO's own), so an invoice for a second hotel files under that hotel.
   e({
     method: 'POST', path: '/po/raiseInvoice', key: 'po_invoice_raised',
     category: CATEGORIES.ORDERS, severity: 'notable',
-    entity: { type: 'PO', id: B('po_id') }, scope: SCOPE.entity('PO'),
+    entity: { type: 'PO', id: B('po_id') }, scope: [SCOPE.detail(), SCOPE.entity('PO')],
     summary: (c) => `${c.actor} raised an invoice against purchase order ${c.entityLabel}`,
   }),
   // Site rep link issued: a receiving link minted for, and emailed to, someone
@@ -930,7 +932,7 @@ export const EVENTS = [
   e({
     method: 'POST', path: '/inventory/token/grn', key: 'inventory_token_grn_created',
     category: CATEGORIES.RECEIPT, severity: 'notable',
-    entity: { type: 'GRN', id: R() }, scope: SCOPE.detail(),
+    entity: { type: 'GRN', id: R() }, scope: SCOPE.detail(), requireDetail: true, // none on a replay
     summary: (c) => `${c.actor} recorded a goods receipt through a site link${c.entityLabel ? ` ${c.entityLabel}` : ''}`,
   }),
   e({

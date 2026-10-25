@@ -16,28 +16,11 @@
 import { describe, it, expect, afterAll } from "@jest/globals";
 import { db, closeDb } from "../setup/db.js";
 import { allReports } from "../../app/services/reports/definitions/index.js";
+import { INVENTORY_REPORT_FAMILIES } from "../../app/services/reports/inventoryReportKit.js";
 
 afterAll(async () => {
   await closeDb();
 });
-
-// The ten inventory report keys are seeded by 20261024100400_inventory_permissions
-// AHEAD of their report definitions, which land with the inventory reports task
-// (D4 of docs/superpowers/plans/2026-10-24-inventory-management.md). Until then
-// they are the only permissions allowed without a registry entry. Once D4
-// registers them the allowance is a no-op: delete it then.
-const INVENTORY_REPORT_KEYS = [
-  "stock_on_hand",
-  "stock_ledger",
-  "grn_register",
-  "pending_deliveries",
-  "consumption_by_department",
-  "stock_adjustments",
-  "count_variance",
-  "slow_moving",
-  "near_expiry",
-  "vendor_delivery_performance",
-];
 
 /** Permission strings carried by a role, by title. */
 async function permissionsOf(roleTitle) {
@@ -64,9 +47,7 @@ describe("reports permission catalogue", () => {
     // A report in the registry with no permission can never be granted; a
     // permission with no report is an orphan in the admin picker.
     expect([...registryKeys].filter((k) => !seededKeys.has(k))).toEqual([]);
-    expect(
-      [...seededKeys].filter((k) => !registryKeys.has(k) && !INVENTORY_REPORT_KEYS.includes(k))
-    ).toEqual([]);
+    expect([...seededKeys].filter((k) => !registryKeys.has(k))).toEqual([]);
     expect(seededKeys.size).toBe(26);
   });
 
@@ -130,7 +111,11 @@ describe("who the migrations grant it to", () => {
       "Inventory Controller",
       "Report Download",
     ]);
+    const inventoryKeys = allReports()
+      .filter((d) => INVENTORY_REPORT_FAMILIES.includes(d.family))
+      .map((d) => d.key);
+    expect(inventoryKeys).toHaveLength(10);
     const controller = await permissionsOf("Inventory Controller");
-    expect([...controller].sort()).toEqual([...INVENTORY_REPORT_KEYS].sort());
+    expect([...controller].sort()).toEqual(inventoryKeys.sort());
   });
 });

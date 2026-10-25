@@ -3347,87 +3347,64 @@ export const resolvePoNotificationRecipients = async (po, t = db) => {
   return [...ids];
 };
 
-export const handleRaiseInvoice = async (po_id, invoice_url_input, vendor_id) => {
+/**
+ * POST /po/raiseInvoice: the vendor raises an invoice against their PO
+ * (inventory spec §5.2, task C4). The work is invoiceService.raiseInvoice:
+ * invoice number, date and amount, an optional dispatch note it bills, as
+ * many invoices per PO as there are deliveries, and po.status moved forward
+ * to invoice_raised (never back). The legacy body (po_id + invoice_url only)
+ * still raises one file-only invoice.
+ *
+ * The buyer-team email goes out after COMMIT, and its failure never undoes
+ * the invoice.
+ *
+ * @param {number} po_id
+ * @param {string} invoice_url_input must be one of our own S3 objects
+ * @param {number} vendor_id req.user.id
+ * @param {object} [details] the request body's invoice_number, invoice_date,
+ *   invoice_amount, dispatch_id
+ * @param {object|null} [user] req.user; defaults to the vendor {id: vendor_id, user_type: 3}
+ * @returns {Promise<{document:object, invoice:object, scope:object, details:object}>}
+ * @throws InventoryError (VALIDATION / NOT_FOUND / CONFLICT)
+ */
+export const handleRaiseInvoice = async (po_id, invoice_url_input, vendor_id, details = {}, user = null) => {
   // Only our own S3 objects, stored in normalized (WHATWG href) form.
   const invoice_url = normalizeOwnS3Url(invoice_url_input);
   if (!invoice_url) {
     throw new InventoryError('VALIDATION', 'Please upload the invoice again: the file link is not one of ours.', { field: 'invoice_url' });
   }
-  return await db.tx(async t => {
-    const po = await t.oneOrNone(
-      `SELECT * FROM tbl_rfq_purchase_order
-      WHERE id = $1`,
-      [po_id]
-    );
+  // Lazy: the inventory services import this model (resolvePoTenancy).
+  const { raiseInvoice } = await import('../services/inventory/invoiceService.js');
+  const actor = user ?? { id: vendor_id, user_type: 3 };
 
-    if(!po) throw new Error('PO does not exist with given id')
-    else if (po && po.finalized_vendor_id != vendor_id) throw new Error('PO does not belong to you!')
+  const raised = await db.tx((t) => raiseInvoice(t, actor, po_id, { invoiceUrl: invoice_url, body: details }));
 
-    const existing = await t.oneOrNone(
-      `SELECT id FROM tbl_purchase_order_document WHERE purchase_order_id = $1 AND document_type = 'invoice'`,
-      [po_id]
-    );
-
-    if(existing) {
-      throw new Error("Invoice is already raised for this PO!")
-    }
-
-    const result = await t.one(
-      `INSERT INTO tbl_purchase_order_document
-      (purchase_order_id, document_type, document_url, uploaded_by)
-      VALUES($1, 'invoice', $2, $3)
-      
-      RETURNING *`,
-      [po_id, invoice_url, vendor_id]
-    );
-
-    await t.none(
-      `UPDATE tbl_rfq_purchase_order
-      SET status = 'invoice_raised'
-      WHERE id = $1`,
-      [po_id]
-    );
-
-    const formattedPOData = await t.one(
+  // After COMMIT: an undeliverable mail must not undo an invoice the vendor already filed.
+  try {
+    const formattedPOData = await db.oneOrNone(
       `SELECT PO.*,
       TC.company_name AS finalized_vendor_name,
       TU.email AS finalized_vendor_email
 
       FROM tbl_rfq_purchase_order PO
       JOIN tbl_users TU ON PO.finalized_vendor_id = TU.id
-      JOIN tbl_company TC ON TU.company_id = TC.id
+      LEFT JOIN tbl_company TC ON TU.company_id = TC.id
 
       WHERE PO.id = $1`,
       [po_id]
     );
-
-    const reminderUsers = await resolvePoNotificationRecipients(po, t);
-
-    const txn = await t.oneOrNone(
-      `SELECT id FROM tbl_approval_hierarchy_transactions
-      WHERE hierarchy_type = 'po'
-      AND target_entity_id = $1`,
-      [po_id]
-    );
-
-    if (txn) {
-      await t.none(
-        `INSERT INTO tbl_approval_hierarchy_history
-        (approval_transaction_id, approved_by, action)
-        VALUES ($1, $2, $3)`,
-        [txn.id, vendor_id, 'invoice']
-      );
+    if (formattedPOData) {
+      const reminderUsers = await resolvePoNotificationRecipients(formattedPOData, db);
+      const { invoiceNumber, invoiceDate, invoiceAmount } = raised.details;
+      await sendInvoiceEmail(formattedPOData, invoice_url, reminderUsers, {
+        invoiceNumber, invoiceDate, invoiceAmount, dispatchNumber: raised.invoice?.dispatchNumber ?? null,
+      });
     }
+  } catch (err) {
+    logError(`[po ${po_id}] invoice notification failed`, err);
+  }
 
-    // An undeliverable mail must not undo an invoice the vendor already filed.
-    try {
-      await sendInvoiceEmail(formattedPOData, invoice_url, reminderUsers);
-    } catch (err) {
-      logError(`[po ${po_id}] invoice notification failed`, err);
-    }
-
-    return result;
-  })
+  return raised;
 };
 
 /**

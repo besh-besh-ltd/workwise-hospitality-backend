@@ -11,6 +11,11 @@
  * buyerPoApproval fell back) under a subject naming the RFQ number. For a PO
  * the identifier is the PO number and the link carries the PO id — the
  * instance's entity_id IS the PO id, so it backs up a missing metadata.po_id.
+ *
+ * ARC_NEGOTIATION instances name the ROUND, not the ARC. Without
+ * metadata.arc_id the link resolver read the round id as an ARC id and sent
+ * the approver to another rate contract, so arc_id and round_id are carried
+ * through when the metadata has them.
  */
 export const approvalStepEmailContext = (entityType, entityId, metadata) => {
   const isPo = entityType === 'PO';
@@ -18,5 +23,7 @@ export const approvalStepEmailContext = (entityType, entityId, metadata) => {
     || metadata?.rfq_number || metadata?.rfq_no || metadata?.po_number || `ID-${entityId}`;
   const extraContext = { rfq_id: metadata?.rfq_id || entityId, rfq_title: metadata?.rfq_title || '', end_date: metadata?.end_date || null, product_name: metadata?.product_name || '', company_name: metadata?.company_name || '', hotel_name: metadata?.hotel_name || '', creator_remarks: metadata?.creator_remarks || null };
   if (isPo) extraContext.po_id = metadata?.po_id || entityId;
+  if (metadata?.arc_id) extraContext.arc_id = metadata.arc_id;
+  if (metadata?.round_id) extraContext.round_id = metadata.round_id;
   return { entityIdentifier, extraContext };
 };

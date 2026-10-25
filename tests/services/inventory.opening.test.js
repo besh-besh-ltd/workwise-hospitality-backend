@@ -3,7 +3,7 @@
 // in-test with exceljs. Everything runs in withTx (rolled back) except the
 // HTTP upload case, which cleans up after itself.
 
-import { describe, it, expect, afterAll } from "@jest/globals";
+import { describe, it, expect, beforeAll, afterAll, afterEach } from "@jest/globals";
 import ExcelJS from "exceljs";
 import { randomUUID } from "crypto";
 import { db, withTx, closeDb } from "../setup/db.js";
@@ -13,6 +13,7 @@ import { grantRoleScope, revokeRoleScopes } from "../helpers/roleScope.js";
 import { previewOpeningStock, postOpeningStock } from "../../app/services/inventory/openingImport.js";
 import { postMovements } from "../../app/services/inventory/ledger.js";
 import { setUomFactor } from "../../app/services/inventory/uom.js";
+import { startCount, cancelCount } from "../../app/services/inventory/countService.js";
 import * as setup from "../../app/services/inventory/setupService.js";
 
 const A = IDS.hospitality.A;
@@ -381,5 +382,287 @@ describe("hotel and opening routes are tenant-scoped", () => {
       await revokeRoleScopes(db, [scopeId]);
       await db.none(`UPDATE tbl_users SET user_type = NULL WHERE id = $1`, [USER.id]);
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// FX1: once a hotel's stock has started, an import never resets live stock
+// (an item that moved since the start is refused), and a count freeze blocks it
+// ---------------------------------------------------------------------------
+
+const activityError = (day) => `Has stock activity since stock started on ${day}: use a count or an adjustment`;
+
+/** The hotel's stock start as an IST day ("25 Oct 2026"), straight from Postgres. */
+async function startedDay(conn) {
+  const row = await conn.one(
+    `SELECT to_char(stock_started_at AT TIME ZONE 'Asia/Kolkata', 'FMDD Mon YYYY') AS d, stock_started_at
+       FROM tbl_inv_hotel_settings WHERE hotel_id = $1`,
+    [HOTEL]
+  );
+  return { day: row.d, iso: new Date(row.stock_started_at).toISOString() };
+}
+
+const markOutRice = (invItemId, qty) => ({
+  companyId: A, hotelId: HOTEL, invItemId, type: "MARK_OUT", qty: -qty, departmentId: IDS.departments.fb,
+  sourceType: "OUT", sourceId: 1, postedBy: USER.id,
+});
+
+describe("opening import after stock has started", () => {
+  it("refuses an item that moved since the start, in preview and post; untouched items still import", async () => {
+    await withTx(async (t) => {
+      await grantAdmin(t);
+      const rice = await makeItem(t, { name: "Rice" });
+      const oil = await makeItem(t, { name: "Oil", uom: "ltr" });
+      const soap = await makeItem(t, { name: "Soap", uom: "pc" });
+      const fullSheet = await sheet([
+        [null, null, "Rice", 50, "kg", 80, null],
+        [null, null, "Oil", 20, "ltr", 150, null],
+        [null, null, "Soap", 7, "pc", 30, null],
+      ]);
+
+      // Before the start there is nothing to protect.
+      expect(await previewOpeningStock(t, USER, HOTEL, fullSheet)).toMatchObject({
+        stockStartedAt: null, countFreeze: false, errorCount: 0, okCount: 3,
+      });
+
+      // The F&B sheet starts stock; then F&B uses 5 kg of rice.
+      await postOpeningStock(t, USER, HOTEL, [
+        { invItemId: rice, stockQty: 50, unitCost: 80 },
+        { invItemId: oil, stockQty: 20, unitCost: 150 },
+      ], randomUUID());
+      await postMovements(t, [markOutRice(rice, 5)]);
+      const { day, iso } = await startedDay(t);
+
+      const preview = await previewOpeningStock(t, USER, HOTEL, fullSheet);
+      expect(preview.rows.map((r) => r.error)).toEqual([activityError(day), null, null]);
+      expect(preview.rows[0]).toMatchObject({ invItemId: rice, stockQty: 50 });
+      expect(preview).toMatchObject({ okCount: 2, errorCount: 1, stockStartedAt: iso, countFreeze: false });
+
+      // Re-posting last week's sheet would wipe the mark-out: refused, row by row.
+      const refused = await thrownBy(t, (sp) => postOpeningStock(sp, USER, HOTEL, [
+        { invItemId: oil, stockQty: 20, unitCost: 150 },
+        { invItemId: rice, stockQty: 50, unitCost: 80 },
+      ], randomUUID()));
+      expect([refused.code, refused.httpStatus]).toEqual(["VALIDATION", 400]);
+      expect(refused.details).toEqual({ field: "rows", rows: [{ index: 1, invItemId: rice, error: activityError(day) }] });
+      expect((await balance(t, rice)).qty).toBe(45);
+
+      // The housekeeping sheet a few days later: a new item imports, and an
+      // item with no activity since the start re-sent unchanged posts a zero delta.
+      const { result } = await postOpeningStock(t, USER, HOTEL, [
+        { invItemId: oil, stockQty: 20, unitCost: 150 },
+        { invItemId: soap, stockQty: 7, unitCost: 30 },
+      ], randomUUID());
+      const moved = await t.any(
+        `SELECT inv_item_id, qty::float AS qty FROM tbl_inv_movement WHERE source_type = 'ADJ' AND source_id = $1 ORDER BY inv_item_id`,
+        [result.adjustmentId]
+      );
+      expect(moved).toEqual([{ inv_item_id: soap, qty: 7 }]);
+      expect((await balance(t, rice)).qty).toBe(45);
+      expect((await balance(t, oil)).qty).toBe(20);
+      expect((await balance(t, soap)).qty).toBe(7);
+    });
+  });
+
+  it("a count freeze shows in preview and refuses the post; a replay still answers", async () => {
+    await withTx(async (t) => {
+      await grantAdmin(t);
+      const rice = await makeItem(t, { name: "Rice" });
+      const key = randomUUID();
+      const first = await postOpeningStock(t, USER, HOTEL, [{ invItemId: rice, stockQty: 10, unitCost: 80 }], key);
+      const buf = await sheet([[null, null, "Rice", 10, "kg", 80, null]]);
+
+      // An open count alone freezes nothing (the setting is off by default) ...
+      const count = await startCount(t, USER, { hotelId: HOTEL, scope: "SELECTED", invItemIds: [rice] });
+      expect((await previewOpeningStock(t, USER, HOTEL, buf)).countFreeze).toBe(false);
+      // ... with the company's count_freeze on, it does.
+      await t.none(
+        `INSERT INTO tbl_inv_company_settings (hospitality_company_id, count_freeze) VALUES ($1, true)
+         ON CONFLICT (hospitality_company_id) DO UPDATE SET count_freeze = true`,
+        [A]
+      );
+      expect((await previewOpeningStock(t, USER, HOTEL, buf)).countFreeze).toBe(true);
+
+      const locked = await thrownBy(t, (sp) =>
+        postOpeningStock(sp, USER, HOTEL, [{ invItemId: rice, stockQty: 12, unitCost: 80 }], randomUUID()));
+      expect([locked.code, locked.httpStatus]).toEqual(["LOCKED", 409]);
+      expect(locked.details).toEqual({ countId: count.id, countNumber: count.countNumber });
+
+      // A replay of the posted import answers with the original document.
+      const again = await postOpeningStock(t, USER, HOTEL, [{ invItemId: rice, stockQty: 99, unitCost: 1 }], key);
+      expect(again.result).toEqual(first.result);
+      expect((await balance(t, rice)).qty).toBe(10);
+
+      // The setting alone (no open count) freezes nothing either.
+      await cancelCount(t, USER, count.id);
+      expect((await previewOpeningStock(t, USER, HOTEL, buf)).countFreeze).toBe(false);
+    });
+  });
+});
+
+describe("opening import after stock has started (committed, over HTTP)", () => {
+  // Every step commits, so the start stamp, receipts and mark-outs each carry
+  // their own transaction time, as in production.
+  let scopeId;
+  let prevUserType;
+  let made = [];
+
+  beforeAll(async () => {
+    const role = await db.one(`SELECT id FROM tbl_roles WHERE title = 'Inventory Controller' AND created_by IS NULL`);
+    scopeId = await grantRoleScope(db, { userId: USER.id, roleId: role.id, companyId: A });
+    prevUserType = (await db.one(`SELECT user_type FROM tbl_users WHERE id = $1`, [USER.id])).user_type;
+    await db.none(`UPDATE tbl_users SET user_type = 2 WHERE id = $1`, [USER.id]);
+  });
+
+  afterEach(async () => {
+    await db.none(
+      `TRUNCATE tbl_inv_movement, tbl_inv_balance, tbl_inv_adjustment_line, tbl_inv_adjustment, tbl_inv_out_line, tbl_inv_out,
+                tbl_inv_doc_sequence, tbl_inv_hotel_item, tbl_inv_hotel_settings CASCADE`
+    );
+    if (made.length) await db.none(`DELETE FROM tbl_inv_item WHERE id = ANY($1::int[])`, [made]);
+    made = [];
+  });
+
+  afterAll(async () => {
+    await revokeRoleScopes(db, [scopeId]);
+    await db.none(`UPDATE tbl_users SET user_type = $2 WHERE id = $1`, [USER.id, prevUserType]);
+  });
+
+  async function committedItem(prefix, uom = "kg") {
+    const name = `${prefix} ${tag()}`;
+    const id = Number(
+      (await db.one(`INSERT INTO tbl_inv_item (hospitality_company_id, display_name, stock_uom) VALUES ($1, $2, $3) RETURNING id`, [A, name, uom])).id
+    );
+    made.push(id);
+    return { id, name };
+  }
+
+  /** Run `work` in a transaction that stays open (its row locks held) until release(). */
+  async function holdOpen(work) {
+    let release;
+    let opened;
+    const isOpen = new Promise((resolve) => {
+      opened = resolve;
+    });
+    const gate = new Promise((resolve) => {
+      release = resolve;
+    });
+    const done = db.tx(async (t) => {
+      await work(t);
+      opened();
+      await gate;
+    });
+    await Promise.race([isOpen, done]);
+    return { release, done };
+  }
+
+  /** Wait until some session is blocked on a lock. */
+  async function untilBlocked() {
+    const deadline = Date.now() + 15000;
+    for (;;) {
+      const { n } = await db.one(
+        `SELECT count(*)::int AS n FROM pg_stat_activity WHERE datname = current_database() AND wait_event_type = 'Lock'`
+      );
+      if (n >= 1) return;
+      if (Date.now() > deadline) throw new Error("the import never waited for the balance lock");
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+  }
+
+  const importRows = (rows) =>
+    db.tx((t) => postOpeningStock(t, USER, HOTEL, rows, randomUUID())).then(() => null, (err) => err);
+
+  it("receipts before the start never block; after it, only items that moved are refused and keep their stock", async () => {
+    const c = await httpClient(USER.id);
+    const rice = await committedItem("Rice");
+    const oil = await committedItem("Oil", "ltr");
+    const buf = await sheet([[null, null, rice.name, 50, "kg", 80, null], [null, null, oil.name, 20, "ltr", 150, null]]);
+    const preview = () => c.post(`/api/v1/inventory/opening/${HOTEL}/preview`).attach("file", buf, "opening.xlsx");
+    const post = () => c.post(`/api/v1/inventory/opening/${HOTEL}/post`).send({
+      rows: [{ invItemId: rice.id, stockQty: 50, unitCost: 80 }, { invItemId: oil.id, stockQty: 20, unitCost: 150 }],
+      clientEventId: randomUUID(),
+    });
+
+    // An R1 receipt of 10 kg rice, before the hotel's stock starts.
+    await db.tx((t) => postMovements(t, [{
+      companyId: A, hotelId: HOTEL, invItemId: rice.id, type: "GRN_IN", qty: 10, unitCost: 60,
+      sourceType: "GRN", sourceId: 1, postedBy: USER.id,
+    }]));
+    let res = await preview();
+    expect(res.status).toBe(200);
+    expect(res.body.data).toMatchObject({ errorCount: 0, okCount: 2, stockStartedAt: null, countFreeze: false });
+    const started = await post();
+    expect(started.status).toBe(200);
+    expect(await balance(db, rice.id)).toMatchObject({ qty: 50 }); // the receipt's 10 plus a delta of 40
+
+    // The same sheet again the same day, nothing moved since: no error, zero deltas.
+    const { iso } = await startedDay(db);
+    res = await preview();
+    expect(res.body.data).toMatchObject({ errorCount: 0, stockStartedAt: iso, countFreeze: false });
+    const same = await post();
+    expect(same.status).toBe(200);
+    expect(await db.any(`SELECT 1 FROM tbl_inv_movement WHERE source_type = 'ADJ' AND source_id = $1`, [same.body.data.adjustmentId]))
+      .toEqual([]);
+
+    // F&B takes 5 kg of rice.
+    const out = await c.post("/api/v1/inventory/out").send({
+      hotelId: HOTEL, docType: "OUT", departmentId: IDS.departments.fb, clientEventId: randomUUID(),
+      lines: [{ invItemId: rice.id, qty: 5 }],
+    });
+    expect(out.status).toBe(201);
+
+    const { day } = await startedDay(db);
+    res = await preview();
+    expect(res.body.data.rows.map((r) => r.error)).toEqual([activityError(day), null]);
+    expect(res.body.data).toMatchObject({ okCount: 1, errorCount: 1, stockStartedAt: iso });
+    const stale = await post();
+    expect(stale.status).toBe(400);
+    expect(stale.body).toMatchObject({
+      status: 0, code: "VALIDATION", details: { field: "rows", rows: [{ index: 0, invItemId: rice.id, error: activityError(day) }] },
+    });
+    expect(await balance(db, rice.id)).toMatchObject({ qty: 45 });
+  });
+
+  it("a mark-out that commits while the import waits for the balance lock is seen, not overwritten", async () => {
+    const rice = await committedItem("Rice");
+    expect(await importRows([{ invItemId: rice.id, stockQty: 50, unitCost: 80 }])).toBeNull();
+
+    // A mark-out holds rice's balance row while the second import starts.
+    const holder = await holdOpen((t) => postMovements(t, [markOutRice(rice.id, 5)]));
+    const importing = importRows([{ invItemId: rice.id, stockQty: 50, unitCost: 80 }]);
+    try {
+      await untilBlocked();
+    } finally {
+      holder.release();
+      await holder.done;
+    }
+    const err = await importing;
+    expect(err?.code).toBe("VALIDATION");
+    expect(err.details.rows).toEqual([{ index: 0, invItemId: rice.id, error: activityError((await startedDay(db)).day) }]);
+    expect(await balance(db, rice.id)).toMatchObject({ qty: 45 });
+  });
+
+  it("an item's first receipt that commits while the import waits is seen, not added to", async () => {
+    const rice = await committedItem("Rice");
+    const soap = await committedItem("Soap", "pc");
+    expect(await importRows([{ invItemId: rice.id, stockQty: 50, unitCost: 80 }])).toBeNull();
+
+    // Soap's first receipt at the hotel, not yet committed: its balance row
+    // exists only inside that transaction.
+    const holder = await holdOpen((t) => postMovements(t, [{
+      companyId: A, hotelId: HOTEL, invItemId: soap.id, type: "GRN_IN", qty: 3, unitCost: 30,
+      sourceType: "GRN", sourceId: 1, postedBy: USER.id,
+    }]));
+    const importing = importRows([{ invItemId: soap.id, stockQty: 7, unitCost: 30 }]);
+    try {
+      await untilBlocked();
+    } finally {
+      holder.release();
+      await holder.done;
+    }
+    const err = await importing;
+    expect(err?.code).toBe("VALIDATION");
+    expect(err.details.rows).toEqual([{ index: 0, invItemId: soap.id, error: activityError((await startedDay(db)).day) }]);
+    expect(await balance(db, soap.id)).toMatchObject({ qty: 3 });
   });
 });

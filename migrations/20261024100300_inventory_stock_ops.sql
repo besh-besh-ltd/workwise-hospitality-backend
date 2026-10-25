@@ -5,13 +5,15 @@
 --   tbl_inv_adjustment / _line        wastage, breakage, expiry, theft/loss,
 --                                     correction, found, and the internal OPENING
 --   tbl_inv_count / _line             stock counts (blind optional), posting deltas
+--   tbl_inv_count_line_event          every count-line save applied, by clientEventId
 --
 -- The stock effect of each document is its tbl_inv_movement rows
 -- (source_type/source_id); these tables hold the document itself.
 --
 -- Idempotency for scan sessions: tbl_inv_out.client_event_id and
--- tbl_inv_adjustment.client_event_id are UNIQUE; count lines are unique on
--- (count_id, client_event_id).
+-- tbl_inv_adjustment.client_event_id are UNIQUE; count-line saves are unique
+-- on (count_id, client_event_id) in tbl_inv_count_line_event, which keeps
+-- every key a count has applied (the line itself only holds the latest).
 --
 -- Conventions as in 20261024100100_inventory_core.sql. Idempotent throughout.
 
@@ -138,6 +140,22 @@ CREATE TABLE IF NOT EXISTS public.tbl_inv_count_line (
   CONSTRAINT ux_inv_count_line_count_item UNIQUE (count_id, inv_item_id),
   CONSTRAINT ux_inv_count_line_count_event UNIQUE (count_id, client_event_id)
 );
+
+-- Every count-line save applied, by its clientEventId. A save whose key the
+-- count has seen before is a replay and a no-op, even when a newer save has
+-- changed the line since: a late retry never overwrites a newer count.
+CREATE TABLE IF NOT EXISTS public.tbl_inv_count_line_event (
+  id                     SERIAL PRIMARY KEY,
+  hospitality_company_id INT NOT NULL REFERENCES public.tbl_hospitality_companies(id),
+  count_id               INT NOT NULL REFERENCES public.tbl_inv_count(id) ON DELETE CASCADE,
+  count_line_id          INT NOT NULL REFERENCES public.tbl_inv_count_line(id) ON DELETE CASCADE,
+  client_event_id        UUID NOT NULL,
+  counted_qty            NUMERIC(18,4) NOT NULL CHECK (counted_qty >= 0),
+  applied_at             TIMESTAMPTZ NOT NULL DEFAULT now(),
+  applied_by             INT REFERENCES public.tbl_users(id),
+  CONSTRAINT ux_inv_count_line_event UNIQUE (count_id, client_event_id)
+);
+CREATE INDEX IF NOT EXISTS ix_inv_count_line_event_line ON public.tbl_inv_count_line_event (count_line_id);
 
 -- ---------------------------------------------------------------------------
 -- Row audit on the headers that change state under approval.

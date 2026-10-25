@@ -32,8 +32,11 @@ import { recomputePoReceipt } from './receiptRollup.js';
 import { hotelIdsWithPermission } from './scope.js';
 import { listGrnSummariesForPo } from './grnRead.js';
 import { listShortCloses } from './shortCloseService.js';
+import { loadInvoices } from './invoiceService.js';
 import { LEGACY_PO_STATUS_ORDER } from './poStatus.js';
 import { notifyPlanChanged } from './notices/planNotices.js';
+import { RECEIVABLE_PO_STATUSES } from './grnCommon.js';
+import { LIVE_TOKEN_SQL, RECEIVE_TOKEN_TTL_DAYS } from '../../helper/receiveToken.js';
 import { assertPoAccess, assertPoInitiateAccess, canInitiateOnTuple } from '../../models/purchaseOrderModel.js';
 import { writePoDocument } from '../poDocumentService.js';
 import { generateCallOffPoPdf } from '../../helper/arc_v2/callOffPoRenderer.js';
@@ -535,27 +538,70 @@ async function canFlags(t, user, tenancy, ctx) {
     hotelIdsWithPermission(t, user, 'grn', 'create'),
     hotelIdsWithPermission(t, user, 'grn', 'approve'),
   ]);
-  const open = !CLOSED_PO_STATUSES.includes(String(ctx.status));
+  const status = String(ctx.status);
+  const open = !CLOSED_PO_STATUSES.includes(status);
   const atPoHotel = (ids) => ids.some((h) => ctx.hotelIds.includes(h));
+  // The PO's hotels where the caller may receive (grn.create): the gate of
+  // receiving, and of site-rep links (siteRepService issues and revokes on
+  // grn.create at the link's hotel).
+  const receiveAt = ctx.hotelIds.filter((h) => receiveHotels.includes(h));
   return {
     editPlan: canInitiate && open,
     shortClose: canInitiate && open,
-    receive: atPoHotel(receiveHotels),
+    receive: receiveAt.length > 0 && RECEIVABLE_PO_STATUSES.includes(status),
     reverse: atPoHotel(reverseHotels),
-    manageSiteRep: canInitiate && open,
+    manageSiteRep: receiveAt.length > 0 && open,
+    siteRepHotelIds: receiveAt,
   };
+}
+
+/**
+ * The PO's site-rep receiving links, newest first, without the token: who,
+ * where, until when. `live` is LIVE_TOKEN_SQL, the predicate token auth uses;
+ * `revoked` means the buyer (or a newer link at that hotel) revoked it.
+ */
+async function loadSiteReps(t, poId) {
+  const rows = await t.any(
+    `SELECT tl.id, tl.name, tl.email, tl.phone, tl.hotel_id, h.name AS hotel_name,
+            COALESCE(tl.expires_at, tl.created_at + interval '${RECEIVE_TOKEN_TTL_DAYS} days') AS expires_at,
+            tl.last_used_at, tl.created_at,
+            (tl.revoked_at IS NOT NULL) AS revoked,
+            (${LIVE_TOKEN_SQL}) AS live
+       FROM tbl_token_login_data tl
+       JOIN tbl_rfq_purchase_order po ON po.id = tl.entity_id
+       LEFT JOIN tbl_hospitality_company_hotels h ON h.id = tl.hotel_id
+      WHERE tl.token_type = 'GRN' AND tl.entity_id = $1
+      ORDER BY tl.id DESC`,
+    [poId]
+  );
+  const iso = (v) => (v ? new Date(v).toISOString() : null);
+  return rows.map((r) => ({
+    tokenId: Number(r.id),
+    name: r.name,
+    email: r.email ?? null,
+    phone: r.phone ?? null,
+    hotelId: r.hotel_id == null ? null : Number(r.hotel_id),
+    hotelName: r.hotel_name ?? null,
+    expiresAt: iso(r.expires_at),
+    lastUsedAt: iso(r.last_used_at),
+    createdAt: iso(r.created_at),
+    revoked: r.revoked === true,
+    live: r.live === true,
+  }));
 }
 
 async function buyerPayload(t, user, poId, tenancy) {
   const ctx = await getPoContext(t, poId);
-  const [hotels, deliveries, poLines, grns, dispatches, rtvs, shortCloses, can, active] = await Promise.all([
+  const [hotels, deliveries, poLines, grns, dispatches, rtvs, invoices, shortCloses, siteReps, can, active] = await Promise.all([
     loadHotels(t, ctx.hotelIds),
     loadDeliveries(t, ctx),
     loadPoLineRolls(t, poId),
     listGrnSummariesForPo(t, poId),
     loadDispatches(t, poId),
     loadRtvSummaries(t, poId),
+    loadInvoices(t, poId),
     listShortCloses(t, poId),
+    loadSiteReps(t, poId),
     canFlags(t, user, tenancy, ctx),
     planHasActivity(t, poId),
   ]);
@@ -574,7 +620,9 @@ async function buyerPayload(t, user, poId, tenancy) {
     grns,
     dispatches,
     rtvs,
+    invoices,
     shortCloses,
+    siteReps,
     can,
   };
 }

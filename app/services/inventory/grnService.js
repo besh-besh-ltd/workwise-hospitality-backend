@@ -32,6 +32,10 @@
 //
 // Services never respond. The caller sends notifyGrnPosted AFTER commit.
 //
+// Count freeze (spec §8.5): posting (here, the site-rep link and the legacy
+// markGRN) and reversal answer LOCKED while a count freezes the hotel; saving
+// a draft does not. A replay of a posted clientEventId is answered first.
+//
 // This file is the public entry (import from here): posting, drafts,
 // attachments and the legacy full receipt live here; the rest is split out
 // and re-exported:
@@ -52,6 +56,7 @@ import { resolveItemForVariant, mapVariantToItem } from './items.js';
 import { resolveUomFactor, setUomFactor, sameUom, normalizeUomLabel } from './uom.js';
 import { resolvePoLineUnitCost } from './cost.js';
 import { loadPlan, capacityFor, makeAllocator } from './allocation.js';
+import { assertNotFrozen } from './stockCommon.js';
 import {
   RECEIVABLE_PO_STATUSES, REJECTION_REASONS, ATTACHMENT_KINDS, SITE_REP_ACTOR, IST_TODAY, positiveInt, toQ,
   qNum, qStr, round4, round6, numOrNull, textOrNull, notFound, invalid, isoDay, dayDiff, clientEventIdOf,
@@ -435,6 +440,9 @@ export async function replayByClientEvent(t, actor, clientEventId, { viaToken = 
 async function postCore(t, actor, { ctx, hotelId, header, lines, grnId = null, clientEventId = null, viaToken = null }) {
   const userId = viaToken ? null : positiveInt(actor?.id);
   const poId = Number(ctx.po.id);
+  // A receipt moves stock, so a count freeze at the hotel refuses it (LOCKED).
+  // Every caller has answered its replay before getting here; drafts never come here.
+  await assertNotFrozen(t, { companyId: ctx.companyId, hotelId });
 
   // Plan rows (lazily created for POs from before the module), then lock them.
   const hasPlan = await t.oneOrNone(`SELECT 1 FROM tbl_po_delivery WHERE po_id = $1 LIMIT 1`, [poId]);

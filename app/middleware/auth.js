@@ -9,6 +9,7 @@ import JWT from 'jsonwebtoken';
 import db from '../config/dbConn.js';
 import { findLiveReceiveToken, tokenRequestUser, RECEIVE_TOKEN_HEADER } from '../helper/receiveToken.js';
 import { receiveTokenAuth } from './receiveTokenAuth.js';
+import { admitReceiveToken, sendTooManyRequests } from './receiveTokenRateLimit.js';
 
 /**
  * RBAC permission middleware
@@ -244,6 +245,10 @@ const auth = {
             message: "Unauthorized: missing authentication or token.",
           });
         }
+
+        // Same per-token budget as /inventory/token/* (60 per 10 minutes).
+        const rate = admitReceiveToken(token);
+        if (!rate.allowed) return sendTooManyRequests(req, res, rate.retryAfterS);
 
         try {
           const tok = await findLiveReceiveToken(token, { poId: po_id });

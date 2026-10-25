@@ -47,6 +47,7 @@ import { recomputePoReceipt } from './receiptRollup.js';
 import { nextDocNumber } from './docNumber.js';
 import { postMovements } from './ledger.js';
 import { closeForCreditReturn } from './shortCloseService.js';
+import { assertNotFrozen } from './stockCommon.js';
 
 export const RTV_DISPOSITIONS = Object.freeze(['REPLACE', 'CREDIT']);
 
@@ -338,11 +339,15 @@ async function deliveryCredits(t, poId) {
  * @throws InventoryError CONFLICT (not a draft; later returns on the same
  *   receipt were dispatched first; a CREDIT on a receipt line booked to no
  *   delivery; nothing written), VALIDATION (returnable
- *   shrank since the draft), NEGATIVE_STOCK (goods already marked out), and the gate's.
+ *   shrank since the draft), NEGATIVE_STOCK (goods already marked out), LOCKED
+ *   {countId, countNumber} (a count freeze at the hotel), and the gate's.
  */
 export async function dispatchRtv(t, user, rtvId, { challanNo } = {}) {
   const { rtv, ctx } = await lockForAction(t, user, rtvId, 'approve');
   if (rtv.status !== 'draft') throw wrongStatus(rtv, 'dispatched');
+  // Dispatch moves stock out: a count freeze at the hotel refuses it (LOCKED).
+  // Raising, cancelling and closing a return move nothing and are not checked.
+  await assertNotFrozen(t, { companyId: Number(rtv.hospitality_company_id), hotelId: Number(rtv.hotel_id) });
   const challan = cleanText(challanNo, 'challanNo', { max: REF_MAX, label: 'The challan number' });
   const rtvIdN = Number(rtv.id);
   const poId = Number(rtv.po_id);
