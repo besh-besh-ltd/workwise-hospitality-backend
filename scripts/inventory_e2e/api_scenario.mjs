@@ -12,6 +12,14 @@
 // Talks to localhost only (refuses any other API base). Reads the seed manifest
 // (/tmp/inv-e2e/seed.json) and the mail sink (/tmp/inv-e2e/mail). At the end it
 // runs scripts/inventory_e2e/low_stock_digest.sh twice (skip: E2E_SKIP_DIGEST=1).
+//
+// PENDING CHECKS (tagged [D3 mr.create gate]): the storekeeper, who holds no mr.*
+// permission, must get can.createMrDraft false and a 403 from POST /reorder/mr-draft.
+// That needs D3's gate (mr.create at the exact hotel/department cell), which is not
+// merged yet. Until then these print PENDING and do not fail the run. Once D3's gate
+// is merged, run with E2E_REQUIRE_MR_GATE=1: they then count as ordinary checks
+// (FAIL = exit 1). When the gate is in, make that the default by deleting the
+// pendingCheck() indirection.
 
 import fs from "fs";
 import path from "path";
@@ -41,6 +49,8 @@ const uuid = () => crypto.randomUUID();
 const tokens = {};
 let failures = 0;
 let checks = 0;
+const REQUIRE_MR_GATE = process.env.E2E_REQUIRE_MR_GATE === "1";
+const pending = { total: 0, passed: 0 };
 
 async function api(who, method, url, body, headers = {}) {
   const res = await fetch(BASE + url, {
@@ -68,6 +78,18 @@ function check(label, actual, expected) {
   const ok = a === e;
   if (!ok) failures += 1;
   console.log(`  ${ok ? "PASS" : "FAIL"}  ${label}: ${a}${ok ? "" : `   (expected ${e})`}`);
+  return ok;
+}
+/** A check that only holds once D3's mr.create gate is merged (see the header). */
+function pendingCheck(label, actual, expected) {
+  const tagged = `[D3 mr.create gate] ${label}`;
+  if (REQUIRE_MR_GATE) return check(tagged, actual, expected);
+  pending.total += 1;
+  const a = JSON.stringify(actual);
+  const e = JSON.stringify(expected);
+  const ok = a === e;
+  if (ok) pending.passed += 1;
+  console.log(`  ${ok ? "PASS   " : "PENDING"}  ${tagged}: ${a}${ok ? "" : `   (expected ${e} once D3's gate is merged)`}`);
   return ok;
 }
 const step = (title) => console.log(`\n== ${title}`);
@@ -305,8 +327,15 @@ check("no contract in Housekeeping is refused", [r.status, r.json?.details?.reas
 r = await api(CTRL, "GET", `/inventory/reorder?hotelId=${A1}`);
 check("open MR qty now shown (rice kg, paneer kg)", [r.data?.rows?.find((x) => x.invItemId === I.rice)?.openMrQty, r.data?.rows?.find((x) => x.invItemId === I.paneer)?.openMrQty], [150, 10]);
 check("company B buyer cannot read A1's list", (await api(BBUYER, "GET", `/inventory/reorder?hotelId=${A1}`)).status, 404);
+// The storekeeper (Storekeeper @ A1: inventory.update, no mr.* permission) can read the
+// worklist but must not draft an MR. PENDING until D3's mr.create gate is merged.
 r = await api(STORE, "GET", `/inventory/reorder?hotelId=${A1}`);
-console.log(`  INFO  storekeeper's worklist: HTTP ${r.status}, can.createMrDraft=${r.data?.can?.createMrDraft}, departments=${(r.data?.departments || []).length}`);
+pendingCheck("storekeeper reads the worklist but cannot draft [status, can.createMrDraft]", [r.status, r.data?.can?.createMrDraft], [200, false]);
+r = await api(STORE, "POST", "/inventory/reorder/mr-draft", {
+  hotelId: A1, departmentId: FB, clientEventId: uuid(), items: [{ invItemId: I.rice, qty: 25 }],
+});
+pendingCheck("storekeeper's MR draft is refused", r.status, 403);
+console.log(`        storekeeper's draft: HTTP ${r.status} ${r.json?.code ?? ""} ${r.data?.mrNumber ? `created ${r.data.mrNumber}` : r.json?.message ?? ""}`);
 
 step("11. Reports at A1");
 const fy = (() => {
@@ -394,4 +423,10 @@ if (process.env.E2E_SKIP_DIGEST !== "1") {
 }
 
 console.log(`\n${failures ? "FAILED" : "ALL PASSED"}: ${checks - failures}/${checks} checks`);
+if (pending.total) {
+  console.log(
+    `PENDING [D3 mr.create gate]: ${pending.passed}/${pending.total} already hold. Not counted above; ` +
+      "after D3's gate merges, rerun on a fresh seed with E2E_REQUIRE_MR_GATE=1."
+  );
+}
 process.exit(failures ? 1 : 0);

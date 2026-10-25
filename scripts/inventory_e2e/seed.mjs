@@ -33,7 +33,7 @@
 //   Company B "Indigo Resorts (E2E)": hotel B1 Panaji (96803), for isolation checks
 //   users (password E2e@12345; buyers log in with an employee code):
 //     96801 Storekeeper @ A1            INVE2E-STORE
-//     96802 Inventory Controller @ A1+A2 (+ MR Raiser @ A1+A2) INVE2E-CTRL
+//     96802 Inventory Controller @ A1+A2 (+ MR Raiser @ A1 F&B, A1 Housekeeping, A2) INVE2E-CTRL
 //     96803 PO initiator / buyer, company A (awarding.create, MR raise/approve) INVE2E-BUYER
 //     96804 Company B buyer + Inventory Controller (company B) INVE2E-BBUYER
 //     96811 vendor FreshKart (hospitality vendor, active subscription) INVE2E-VENDOR
@@ -441,11 +441,19 @@ async function seedBuyerSide(t, hash, roles) {
 
   // Role scopes, as the admin screens write them (tbl_user_role_scopes.company_id is the
   // HOSPITALITY company; hotel NULL = every hotel; department/process NULL = all).
+  // [user, role, hospitality company, hotel, department (optional, NULL = all)]
+  //
+  // Reorder's MR draft needs mr.create at the exact hotel/department cell (D3's gate).
+  // MR Raiser is the platform role that carries mr.create, so the controller holds it
+  // pinned to A1 / F&B (where ARC 96801 is) and A1 / Housekeeping (no contract there, so
+  // a draft is refused NOT_CONTRACTED rather than FORBIDDEN). The storekeeper holds no
+  // mr.* permission and must not be able to draft an MR.
   const scopes = [
     [ID.storekeeper, roles["Storekeeper"], ID.hospA, ID.A1],
     [ID.controller, roles["Inventory Controller"], ID.hospA, ID.A1],
     [ID.controller, roles["Inventory Controller"], ID.hospA, ID.A2],
-    [ID.controller, roles["MR Raiser"], ID.hospA, ID.A1],
+    [ID.controller, roles["MR Raiser"], ID.hospA, ID.A1, DEPT.FB],
+    [ID.controller, roles["MR Raiser"], ID.hospA, ID.A1, DEPT.HOUSEKEEPING],
     [ID.controller, roles["MR Raiser"], ID.hospA, ID.A2],
     [ID.buyer, roles["Final Awarding P1"], ID.hospA, null],
     [ID.buyer, roles["RFQ Observer"], ID.hospA, null],
@@ -454,11 +462,11 @@ async function seedBuyerSide(t, hash, roles) {
     [ID.buyerB, roles["Final Awarding P1"], ID.hospB, null],
     [ID.buyerB, roles["Inventory Controller"], ID.hospB, null],
   ];
-  for (const [userId, roleId, hosp, hotelId] of scopes) {
+  for (const [userId, roleId, hosp, hotelId, departmentId = null] of scopes) {
     await t.none(
       `INSERT INTO tbl_user_role_scopes (user_id, role_id, company_id, hotel_id, department_id, process_id)
-       VALUES ($1, $2, $3, $4, NULL, NULL)`,
-      [userId, roleId, hosp, hotelId]
+       VALUES ($1, $2, $3, $4, $5, NULL)`,
+      [userId, roleId, hosp, hotelId, departmentId]
     );
   }
 
@@ -808,7 +816,7 @@ async function main() {
     password: PASSWORD,
     logins: {
       storekeeper: { employee_code: "INVE2E-STORE", userId: ID.storekeeper, scope: "Storekeeper @ A1" },
-      controller: { employee_code: "INVE2E-CTRL", userId: ID.controller, scope: "Inventory Controller + MR Raiser @ A1, A2" },
+      controller: { employee_code: "INVE2E-CTRL", userId: ID.controller, scope: "Inventory Controller @ A1, A2; MR Raiser (mr.create) @ A1 F&B, A1 Housekeeping, A2" },
       buyer: { employee_code: "INVE2E-BUYER", userId: ID.buyer, scope: "Final Awarding P1 (awarding.create), RFQ Observer, MR Raiser/Approver, company A" },
       buyerB: { employee_code: "INVE2E-BBUYER", userId: ID.buyerB, scope: "Final Awarding P1 + Inventory Controller, company B" },
       vendor: { employee_code: "INVE2E-VENDOR", email: "vendor.freshkart@inv-e2e.example.invalid", userId: ID.vendor },

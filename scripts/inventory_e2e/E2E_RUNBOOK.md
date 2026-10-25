@@ -22,7 +22,7 @@ Files in `scripts/inventory_e2e/`:
 | `e2e_server.sh` | The launcher: rebuilds the DB, seeds, then serves on port 8092. |
 | `e2e_env.sh` | The environment every local process runs under, and its guards. Sourced by the launcher and the digest script, never run directly. |
 | `seed.mjs` | The idempotent seed. It writes `/tmp/inv-e2e/seed.json`. |
-| `api_scenario.mjs` | Runs the whole scenario below through the API and asserts every number in this runbook (80 checks). Needs a freshly seeded world. |
+| `api_scenario.mjs` | Runs the whole scenario below through the API and asserts every number in this runbook (80 checks, plus 2 checks pending D3's `mr.create` gate). Needs a freshly seeded world. |
 | `low_stock_digest.sh` | Runs the daily low-stock digest now, instead of waiting for the 07:30 IST cron. |
 | `e2e_egress_guard.mjs` | Loopback-only network guard. |
 
@@ -49,6 +49,8 @@ Run the seed by itself, against an already-built DB, with `node scripts/inventor
 
 **API run.** With the backend up on a fresh seed, `node scripts/inventory_e2e/api_scenario.mjs` plays steps 1–13 (including 9b and 10) through the API and prints PASS/FAIL per check. It exits 1 on any failure, and refuses to start if PO 96801 already has a plan or receipts. It changes the seeded world, so re-seed before a browser run: stop the backend, then `E2E_RESET=seed scripts/inventory_e2e/e2e_server.sh`.
 
+Two checks are tagged **`[D3 mr.create gate]`**: the Storekeeper must get `can.createMrDraft: false` on the reorder worklist and a 403 from `POST /inventory/reorder/mr-draft`. They need D3's gate (reorder MR drafts require `mr.create` at the exact hotel/department cell), which is not merged yet. Until then they print `PENDING`, are reported on a separate summary line, and do not fail the run. After D3's gate merges, re-seed and run `E2E_REQUIRE_MR_GATE=1 node scripts/inventory_e2e/api_scenario.mjs`: they then count as ordinary checks. On the current backend that mode fails exactly those two (76/78 with `E2E_SKIP_DIGEST=1`), which is the expected result before the merge.
+
 ## 2. Start the frontend
 
 ```bash
@@ -65,7 +67,7 @@ Every password is `E2e@12345`. On the login form, type the **employee code** in 
 | Code | Who | Scope |
 |---|---|---|
 | `INVE2E-STORE` | Sunita Rao, Storekeeper | Storekeeper at **A1 only** (grn read/create/update, inventory read/create/update) |
-| `INVE2E-CTRL` | Vikram Shah, Inventory Controller | Inventory Controller at A1 and A2 (approves adjustments and counts), plus MR Raiser at A1 and A2 |
+| `INVE2E-CTRL` | Vikram Shah, Inventory Controller | Inventory Controller at A1 and A2 (approves adjustments and counts). MR Raiser (`mr.create`) pinned to A1 / F&B and A1 / Housekeeping, and at A2 for every department. |
 | `INVE2E-BUYER` | Priya Nair, Purchase Manager | Company A, all hotels: Final Awarding P1 (`awarding.create`, so this is the PO initiator), RFQ Observer, MR Raiser, MR Approver |
 | `INVE2E-BBUYER` | Arjun Desai, buyer at company B | Final Awarding P1 + Inventory Controller at company B. Use it for isolation checks. |
 | `INVE2E-VENDOR` | FreshKart Foods & Supplies | Hospitality vendor with an active subscription. Admin-assigned, so there is no payment. |
@@ -135,9 +137,9 @@ To mint another link, use the buyer's PO page → Deliveries → Site representa
 
 Dates below are relative to the day you run it. "P1" means today + 2 and "P2" means today + 9.
 
-Every expected number below comes from `api_scenario.mjs` on a fresh seed: 80 of 80 checks passed on 2026-10-25, against backend integration with D3. In the examples, today is 2026-10-25, so the paneer batch `PNR-E2E-01` expires 2026-11-04 (today + 10) and the expired lot `PNR-E2E-OLD` expired 2026-10-24 (yesterday).
+Every expected number below comes from `api_scenario.mjs` on a fresh seed: 80 of 80 checks passed on 2026-10-25, against backend integration with D3 (`89139f45`). The 2 gate checks were pending. In the examples, today is 2026-10-25, so the paneer batch `PNR-E2E-01` expires 2026-11-04 (today + 10) and the expired lot `PNR-E2E-OLD` expired 2026-10-24 (yesterday).
 
-The UI steps have not been run in a browser against D1 and D3 yet. The frontend integration branch now has D1 (`9a927aba`) and a Reorder page, so the page names and button labels below may need small corrections after that run. The API equivalents are verified.
+The UI steps have not been run in a browser against D1 and D3 yet. The frontend integration branch (`84048339`) now has D1 to D5: Stock, Mark out, Adjustments, Setup, Counts, Reorder, Reports and the token page. The page names and button labels below may need small corrections after the browser run. The API equivalents are verified.
 
 Routes (frontend):
 
@@ -314,7 +316,9 @@ This receipt also counts against the plan: A1's open paneer on PO 96801 drops fr
 
 ### 10. Reorder to an MR draft (`INVE2E-CTRL`)
 
-The Controller can create the draft: user type buyer, `inventory.update` at A1 (Inventory Controller), and a role scope covering A1 / F&B (MR Raiser, any department). Those three are what `can.createMrDraft` and the server-side gate check.
+The Controller can create the draft. It is a buyer-type user holding **MR Raiser**, the platform role that carries `mr.create`, pinned to the exact cells A1 / F&B (where the contract is) and A1 / Housekeeping (no contract, so a draft there is refused as NOT_CONTRACTED rather than FORBIDDEN).
+
+The gate is changing. The ruling: a reorder MR draft requires `mr.create` at the exact company / hotel / department cell, and `inventory.update` is no longer part of it. D3 is implementing this. The current backend still gates on `inventory.update` plus any role scope at the cell. The seed grants `mr.create` at the cells either way, so the Controller passes both gates.
 
 1. Go to Inventory → Reorder, hotel A1. Expected worklist (after steps 1–9b):
 
@@ -349,7 +353,14 @@ The Controller can create the draft: user type buyer, `inventory.update` at A1 (
 
    `items[].qty` is in **stock units**. The server converts it to the contract's unit with the item's UOM factor and rounds up to 0.01. `arcContractLineId` per item is optional: without it, the cheapest eligible line is used.
 
-Note: the **Storekeeper** gets `can.createMrDraft: true` too, with all 4 departments, and can create a reorder MR draft at A1 / F&B (201), even though the Storekeeper role has no `mr.*` permission at all. The gate is `inventory.update` plus any role scope at the hotel and department, not `mr.create`. This was observed on the run and is reported to the D3 owner. It is not changed here.
+**The Storekeeper must not draft MRs.** The Storekeeper role has no `mr.*` permission.
+
+| Request as `INVE2E-STORE` | Once D3's gate is merged | On the current backend |
+|---|---|---|
+| `GET /inventory/reorder?hotelId=96801` | 200, `can.createMrDraft: false` (the worklist stays readable with `inventory.read`) | 200, `can.createMrDraft: true` |
+| `POST /inventory/reorder/mr-draft` at A1 / F&B, rice 25 kg | **403** | 201: a draft is created |
+
+`api_scenario.mjs` runs both as the `[D3 mr.create gate]` checks (see section 1). In the UI, after the merge, the Storekeeper sees the Reorder list with no "Department (MR)" picker and no **Create MR draft** button. Copy to RFQ is still offered.
 
 ### 11. Reports (`INVE2E-CTRL`, or the buyer)
 
@@ -469,7 +480,7 @@ Three caveats:
 | Login 400 "Email must be a valid email" | Use the employee code, not the `.invalid` email. |
 | Mark out / Adjustments / Stock / Stock item / Setup / Labels / Scan pages say "Coming soon" | The frontend checkout does not have D1. It is in the frontend integration branch from `9a927aba`. Use the API calls in steps 6–9b meanwhile. |
 | `GET /inventory/reorder` returns 501 | The backend does not have D3 (in backend integration from `88a6db42`). |
-| Reorder shows no "Create MR draft" button | The user lacks `inventory.update` at the hotel, or has no role scope at any department there. |
+| Reorder shows no "Create MR draft" button | `can.createMrDraft` is false. Once D3's gate is merged, the user needs `mr.create` (MR Raiser) at that hotel and department. Before that, it needs `inventory.update` at the hotel and a role scope at some department there. |
 | `api_scenario.mjs` says "ABORT: the world is not freshly seeded" | It ran before, or you clicked through. Stop the backend and start it with `E2E_RESET=seed`. |
 | `low_stock_digest.sh` prints "no digest rows for that date" | Stock has not started at any hotel (approve step 9's FULL count), or nothing is at or below its reorder level. |
 | The digest prints `alreadyDigested: 1` | It already ran today for that hotel. Use `E2E_DIGEST_DATE=<another day>`, or re-seed. |
