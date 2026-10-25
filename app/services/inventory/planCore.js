@@ -50,7 +50,7 @@ export async function getPoContext(t, poId, { forUpdate = false } = {}) {
     `SELECT * FROM tbl_rfq_purchase_order WHERE id = $1 ${forUpdate ? 'FOR UPDATE' : ''}`,
     [id]
   );
-  if (!po) throw new InventoryError('NOT_FOUND', 'Purchase order not found', { poId: id });
+  if (!po) throw new InventoryError('NOT_FOUND', 'Purchase order not found'); // no details: a refusal elsewhere says exactly this
 
   const tenancy = await resolvePoTenancy(id, t);
   const companyId = positiveInt(tenancy?.hospitality_company_id);
@@ -162,7 +162,7 @@ export async function defaultDueDate(t, po) {
       WHERE po.id = $1`,
     [id]
   );
-  if (!head) throw new InventoryError('NOT_FOUND', 'Purchase order not found', { poId: id });
+  if (!head) throw new InventoryError('NOT_FOUND', 'Purchase order not found');
   if (head.is_call_off) return head.required_by ?? null;
   if (!head.accepted_on) return null;
 

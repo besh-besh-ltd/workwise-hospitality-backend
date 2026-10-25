@@ -39,7 +39,7 @@ export async function advanceLegacyPoStatus(t, poId, target) {
   }
 
   const row = await t.oneOrNone(`SELECT status FROM tbl_rfq_purchase_order WHERE id = $1 FOR UPDATE`, [id]);
-  if (!row) throw new InventoryError('NOT_FOUND', 'Purchase order not found', { poId: id });
+  if (!row) throw new InventoryError('NOT_FOUND', 'Purchase order not found');
 
   const from = row.status;
   const rank = LEGACY_PO_STATUS_ORDER.indexOf(from);

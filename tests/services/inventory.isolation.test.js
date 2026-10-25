@@ -21,18 +21,30 @@
 //   A_ALL     the positive control: 2xx, so every 404 above is isolation and
 //             not a broken fixture.
 //
+// "Exactly as a missing id does" means the whole answer: HTTP status, content
+// type and the full JSON body (status, message, code, details, anything else),
+// with only the ids the request itself carried normalised (see signature()).
+// Every probe naming someone else's record has a twin naming no record at all
+// (a replayed idempotency key has no "missing" form, so its full answer is
+// pinned instead).
+//
 // The first test walks the mounted Express app and fails, naming the routes,
 // when an inventory route has no row here (or a row names a route that is no
-// longer mounted). A route still answering the 501 stub is listed as such and
-// re-checked, so the owner landing it turns this suite red until the stub
-// entry is replaced by a real row.
+// longer mounted). It fails closed: a mount it cannot read is an error, and a
+// route anywhere in the app whose handler is an inventory controller export
+// must be listed too.
 //
 // Users are created by the suite (and removed again) so no fixture role can
 // blur a check. HTTP commits for real: the dynamic tables are truncated before
-// and after.
+// and after, the other rows the suite writes (activity events, the ARC
+// contract, MR drafts) are deleted above a watermark, and afterAll fails if any
+// table's row count differs from what it was before the suite.
 
 import { describe, it, expect, beforeAll, afterAll } from "@jest/globals";
 import crypto, { randomUUID } from "crypto";
+import fs from "fs";
+import path from "path";
+import { fileURLToPath, pathToFileURL } from "url";
 import excelJS from "exceljs";
 import { db, closeDb, truncateDynamic } from "../setup/db.js";
 import { IDS } from "../fixtures/ids.js";
@@ -42,6 +54,12 @@ import { buildTestApp } from "../setup/app.js";
 import { grantRoleScope, revokeRoleScopes } from "../helpers/roleScope.js";
 import { generateReceiveToken } from "../../app/helper/receiveToken.js";
 import { receiveTokenLimiter } from "../../app/middleware/receiveTokenRateLimit.js";
+import { allReports, isRunnable } from "../../app/services/reports/definitions/index.js";
+import { INVENTORY_REPORT_FAMILIES } from "../../app/services/reports/inventoryReportKit.js";
+import { drainReceivingNotices } from "../../app/services/inventory/notices/receivingNotices.js";
+import { drainApprovalNotices } from "../../app/services/inventory/notices/approvalNotices.js";
+
+const CONTROLLERS_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../app/controllers/inventory");
 
 const BASE = "/api/v1/inventory";
 const CO_A = IDS.hospitality.A;
@@ -61,18 +79,19 @@ const U = {
   A_OTHER: 88703,
   A_NOPERM: 88704,
   A_CREATOR: 88705, // raises the adjustments / counts A_ALL decides (no self-approval)
+  SUPER: 88706, // user_type 8: the platform super admin (IDS.users.superAdmin is not one)
 };
 
-const REPORT_KEYS = [
-  "stock_on_hand", "stock_ledger", "grn_register", "pending_deliveries", "consumption_by_department",
-  "stock_adjustments", "count_variance", "slow_moving", "near_expiry", "vendor_delivery_performance",
-];
+// The inventory and receiving reports, from the registry itself.
+const INVENTORY_REPORTS = allReports().filter((d) => INVENTORY_REPORT_FAMILIES.includes(d.family));
+const REPORT_KEYS = INVENTORY_REPORTS.map((d) => d.key);
 const ALL_KEYS = [
   "grn.read", "grn.create", "grn.update", "grn.approve",
   "inventory.read", "inventory.create", "inventory.update", "inventory.approve", "inventory.admin",
   "awarding.read", "awarding.create", // PO_SCOPE_PERMISSIONS / PO_INITIATE_PERMISSIONS
-  ...REPORT_KEYS.map((k) => `reports.${k}`),
+  ...INVENTORY_REPORTS.map((d) => d.permission),
 ];
+const WIDE = { from: "2020-04-01", to: "2031-03-31" }; // every report period the world can touch
 const CREATOR_KEYS = ["grn.read", "grn.create", "grn.update", "inventory.read", "inventory.create", "inventory.update"];
 
 // Strings only Company A's data carries. Every A name and remark holds
@@ -100,15 +119,78 @@ const leaksIn = (body, secrets = SECRETS_A) => {
   return secrets.filter((s) => text.includes(s));
 };
 
-/** What a refusal looks like from outside: status, envelope status, code, message. */
-const signature = (res) => ({
-  status: res.status,
-  bodyStatus: res.body?.status ?? null,
-  code: res.body?.code ?? null,
-  message: res.body?.message ?? null,
-});
-
 const pathOf = (p) => (p.startsWith("/api/") ? p : `${BASE}${p}`);
+
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const isId = (s) => /^\d+$/.test(s) || UUID.test(s);
+/** In free text only a long id (3+ digits) or a UUID counts: a lone "1" is a quantity, not an echo. */
+const textId = (s) => /^\d{3,}$/.test(s) || UUID.test(s);
+/** A key that holds an id (or a list of them): id, poId, hotel_id, deliveryLineIds ... */
+const ID_KEY = /(^id$|Id$|_id$|Ids$|_ids$)/;
+
+/**
+ * Every id a request carries: path segments, query values, body and
+ * multipart-field leaves, and ids inside string values (a scanned short link,
+ * a `hotel:123` context). `whole` holds the query / body strings themselves:
+ * a response string equal to one is that value echoed back (a scanned code).
+ */
+function requestIds(spec) {
+  const out = new Set();
+  out.whole = new Set();
+  const add = (v) => {
+    if (typeof v === "number" && Number.isInteger(v)) v = String(v);
+    if (typeof v !== "string") return;
+    out.whole.add(v);
+    for (const part of v.split(/[^0-9A-Za-z-]+/)) if (isId(part)) out.add(part);
+  };
+  const walk = (v) => {
+    if (Array.isArray(v)) v.forEach(walk);
+    else if (v && typeof v === "object" && !Buffer.isBuffer(v)) Object.values(v).forEach(walk);
+    else add(v);
+  };
+  const [p, query = ""] = pathOf(spec.path).split("?");
+  for (const part of p.split("/")) if (isId(part)) out.add(part);
+  for (const [, v] of new URLSearchParams(query)) add(v);
+  walk(spec.body);
+  walk(spec.fields);
+  return out;
+}
+
+const escapeRe = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+/**
+ * `value` with the ids the request carried replaced by "<echo>": the value of
+ * an id key (id, poId, hotel_id, deliveryLineIds ...), and a long id or UUID
+ * inside any string.
+ */
+function normalized(value, ids, idKey = false) {
+  if (Array.isArray(value)) return value.map((v) => normalized(v, ids, idKey));
+  if (value && typeof value === "object") {
+    return Object.fromEntries(Object.entries(value).map(([k, v]) => [k, normalized(v, ids, ID_KEY.test(k))]));
+  }
+  if ((typeof value === "number" || typeof value === "string") && idKey && ids.has(String(value))) return "<echo>";
+  if (typeof value !== "string") return value;
+  if (ids.whole.has(value)) return "<echo>";
+  let s = value;
+  for (const id of ids) {
+    if (textId(id)) s = s.replace(new RegExp(`(?<![0-9A-Za-z])${escapeRe(id)}(?![0-9A-Za-z])`, "g"), "<echo>");
+  }
+  return s;
+}
+
+/**
+ * What an answer looks like from outside: HTTP status, content type and the
+ * full body, with only the ids echoed back from `spec` (the request that got
+ * it) normalised. Two refusals are indistinguishable iff their signatures are.
+ */
+function signature(res, spec) {
+  const body = Buffer.isBuffer(res.body) ? { binary: res.body.length } : res.body;
+  const empty = body && typeof body === "object" && !Object.keys(body).length;
+  return {
+    status: res.status,
+    type: res.type ?? null,
+    body: normalized(empty && res.text ? res.text : body ?? null, requestIds(spec)),
+  };
+}
 
 /** Send a request spec {method, path, body?, attach?, fields?, headers?} as a client. */
 function send(client, spec) {
@@ -294,6 +376,77 @@ async function newCount(invItemId, { counted = false, submitted = false } = {}) 
   return count;
 }
 
+/** An active ARC contract line at a Company A hotel for F&B, in kg (so reorder can draft an MR). */
+async function makeArcContract({ hotelId, variantId }) {
+  const arc = await db.one(
+    `INSERT INTO tbl_arc
+       (arc_number, title, category_id, hospitality_company_id, hotel_id, department_id, process_id, status,
+        submission_start_at, submission_end_at, contract_start_at, contract_end_at, created_by)
+     VALUES ($1, 'ISO-A-SECRET ARC', (SELECT id FROM tbl_category ORDER BY id LIMIT 1), $2, $3, $4, $5,
+             'contract_active', NOW() - INTERVAL '30 days', NOW() - INTERVAL '20 days',
+             NOW() - INTERVAL '10 days', NOW() + INTERVAL '180 days', $6)
+     RETURNING id`,
+    [`ISO-A-ARC-${process.pid}`, CO_A, hotelId, FB, IDS.processes.A_P1, U.A_ALL]
+  );
+  const contract = await db.one(
+    `INSERT INTO tbl_arc_contract (arc_id, vendor_id, status) VALUES ($1, $2, 'active') RETURNING id`,
+    [arc.id, VENDOR]
+  );
+  const item = await db.one(
+    `INSERT INTO tbl_arc_item (arc_id, product_variant_id, indicative_qty, uom) VALUES ($1, $2, 100, 'kg') RETURNING id`,
+    [arc.id, variantId]
+  );
+  const line = await db.one(
+    `INSERT INTO tbl_arc_contract_line (arc_contract_id, arc_item_id, unit_rate, gst_pct, committed_qty, consumed_qty)
+     VALUES ($1, $2, 90, 5, 1000, 0) RETURNING id`,
+    [contract.id, item.id]
+  );
+  return { arcId: Number(arc.id), contractId: Number(contract.id), lineId: Number(line.id) };
+}
+
+// ---------------------------------------------------------------------------
+// leftovers: what the suite writes outside the truncated tables
+// ---------------------------------------------------------------------------
+
+// Rows above the watermark taken in beforeAll are the suite's own, deleted
+// children first. Activity rows are written after the response (on 'finish'),
+// so the cleanup waits for them to settle first.
+const WATERMARKED = [
+  "tbl_audit_row_changes", // row triggers: deleted last of all, after the cleanup's own deletes
+  "tbl_activity_events",
+  "tbl_material_requisition_item",
+  "tbl_material_requisition",
+  "tbl_arc_contract_line",
+  "tbl_arc_item",
+  "tbl_arc_contract",
+  "tbl_arc",
+];
+const watermark = {};
+
+/** Row count of every table in the test database, by name. */
+async function tableCounts() {
+  const rows = await db.any(
+    `SELECT table_name AS t,
+            (xpath('/row/n/text()', query_to_xml(format('SELECT count(*) AS n FROM public.%I', table_name), false, true, '')))[1]::text::bigint AS n
+       FROM information_schema.tables
+      WHERE table_schema = 'public' AND table_type = 'BASE TABLE'`
+  );
+  return Object.fromEntries(rows.map((r) => [r.t, Number(r.n)]));
+}
+
+/** Wait until no activity row has landed for a moment (they are written after the response). */
+async function activitySettled() {
+  let last = null;
+  for (let i = 0; i < 30; i += 1) {
+    const { n } = await db.one(`SELECT count(*)::text || ':' || COALESCE(max(id), 0)::text AS n FROM tbl_activity_events`);
+    if (n === last) return;
+    last = n;
+    await new Promise((r) => setTimeout(r, 300));
+  }
+}
+
+let countsBefore = null;
+
 // ---------------------------------------------------------------------------
 // the world
 // ---------------------------------------------------------------------------
@@ -305,11 +458,12 @@ async function createUsers() {
     [U.A_OTHER, "E1 A at A2", IDS.companies.A],
     [U.A_NOPERM, "E1 A without", IDS.companies.A],
     [U.A_CREATOR, "E1 A storekeeper", IDS.companies.A],
+    [U.SUPER, "E1 super admin", null, 8], // no mapping, no role: user_type 8 alone
   ];
-  for (const [id, name, company] of users) {
+  for (const [id, name, company, type = 2] of users) {
     await db.none(
-      `INSERT INTO tbl_users (id, name, email, status, user_type, company_id) VALUES ($1, $2, $3, 1, 2, $4)`,
-      [id, name, `e1.iso.${id}@test.local`, company]
+      `INSERT INTO tbl_users (id, name, email, status, user_type, company_id) VALUES ($1, $2, $3, 1, $5, $4)`,
+      [id, name, `e1.iso.${id}@test.local`, company, type]
     );
   }
   const map = (user, hospitality, hotel) => db.none(
@@ -388,6 +542,11 @@ async function buildWorld() {
   }), "A out");
   W.adjA = await newAdjustment();
   W.countA = await newCount(W.countItems[0]);
+  W.arcA = await makeArcContract({ hotelId: A1, variantId: W.variantA1 });
+  const draftKey = randomUUID();
+  W.mrDraftA = { ...(await must(C.aAll.post(`${BASE}/reorder/mr-draft`).send({
+    hotelId: A1, departmentId: FB, clientEventId: draftKey, items: [{ invItemId: W.itemA1, qty: 2 }],
+  }), "A MR draft")), clientEventId: draftKey };
 
   // Company B: a PO at B1 (Beta's), a posted receipt, stock documents, a dispatch.
   W.poB = await makePo({ company: "B", hotel: B1, vendor: OTHER_VENDOR, lines: [{ qty: 10, variant: W.variantB }] });
@@ -420,32 +579,53 @@ async function buildWorld() {
 
 beforeAll(async () => {
   await truncateDynamic();
+  await activitySettled();
+  for (const table of WATERMARKED) {
+    watermark[table] = Number((await db.one(`SELECT COALESCE(max(id), 0)::bigint AS n FROM ${table}`)).n);
+  }
+  countsBefore = await tableCounts();
   for (const id of [VENDOR, OTHER_VENDOR]) {
     prevUser[id] = await db.one(`SELECT user_type, status FROM tbl_users WHERE id = $1`, [id]);
     await db.none(`UPDATE tbl_users SET user_type = 3, status = 1 WHERE id = $1`, [id]);
   }
   await createUsers();
-  [C.aAll, C.bAll, C.other, C.noPerm, C.creator, C.vendor, C.otherVendor, C.anon] = await Promise.all([
+  [C.aAll, C.bAll, C.other, C.noPerm, C.creator, C.vendor, C.otherVendor, C.anon, C.super] = await Promise.all([
     httpClient(U.A_ALL), httpClient(U.B_ALL), httpClient(U.A_OTHER), httpClient(U.A_NOPERM),
-    httpClient(U.A_CREATOR), httpClient(VENDOR), httpClient(OTHER_VENDOR), httpClient(null),
+    httpClient(U.A_CREATOR), httpClient(VENDOR), httpClient(OTHER_VENDOR), httpClient(null), httpClient(U.SUPER),
   ]);
   await buildWorld();
 });
 
 afterAll(async () => {
-  const users = Object.values(U);
-  await revokeRoleScopes(db, [...scopeIds, ...(nopermScope ? [nopermScope] : [])]);
-  await truncateDynamic();
-  await db.none(`DELETE FROM tbl_activity_events WHERE actor_user_id = ANY($1::int[])`, [users]);
-  await db.none(`DELETE FROM tbl_user_role_scopes WHERE user_id = ANY($1::int[])`, [users]);
-  await db.none(`DELETE FROM tbl_hospitality_user_mappings WHERE user_id = ANY($1::int[])`, [users]);
-  await db.none(`DELETE FROM tbl_role_permissions WHERE role_id = ANY($1::int[])`, [madeRoles]);
-  await db.none(`DELETE FROM tbl_roles WHERE id = ANY($1::int[])`, [madeRoles]);
-  await db.none(`DELETE FROM tbl_users WHERE id = ANY($1::int[])`, [users]);
-  for (const [id, row] of Object.entries(prevUser)) {
-    await db.none(`UPDATE tbl_users SET user_type = $2, status = $3 WHERE id = $1`, [id, row.user_type, row.status]);
+  try {
+    const users = Object.values(U);
+    await drainReceivingNotices();
+    await drainApprovalNotices();
+    await activitySettled();
+    await revokeRoleScopes(db, [...scopeIds, ...(nopermScope ? [nopermScope] : [])]);
+    await truncateDynamic();
+    const dropAbove = (table) => (watermark[table] == null ? null : db.none(`DELETE FROM ${table} WHERE id > $1`, [watermark[table]]));
+    for (const table of WATERMARKED.slice(1)) await dropAbove(table);
+    await db.none(`DELETE FROM tbl_user_role_scopes WHERE user_id = ANY($1::int[])`, [users]);
+    await db.none(`DELETE FROM tbl_hospitality_user_mappings WHERE user_id = ANY($1::int[])`, [users]);
+    await db.none(`DELETE FROM tbl_role_permissions WHERE role_id = ANY($1::int[])`, [madeRoles]);
+    await db.none(`DELETE FROM tbl_roles WHERE id = ANY($1::int[])`, [madeRoles]);
+    await db.none(`DELETE FROM tbl_users WHERE id = ANY($1::int[])`, [users]);
+    for (const [id, row] of Object.entries(prevUser)) {
+      await db.none(`UPDATE tbl_users SET user_type = $2, status = $3 WHERE id = $1`, [id, row.user_type, row.status]);
+    }
+    await dropAbove("tbl_audit_row_changes");
+    // Nothing of the suite's may outlive it: every table holds what it held before.
+    if (countsBefore) {
+      const after = await tableCounts();
+      const changed = Object.keys({ ...countsBefore, ...after })
+        .filter((t) => (countsBefore[t] ?? 0) !== (after[t] ?? 0))
+        .map((t) => `${t}: ${countsBefore[t] ?? 0} -> ${after[t] ?? 0}`);
+      if (changed.length) throw new Error(`the isolation suite left rows behind in ${changed.join(", ")}`);
+    }
+  } finally {
+    await closeDb();
   }
-  await closeDb();
 });
 
 // ---------------------------------------------------------------------------
@@ -464,6 +644,14 @@ afterAll(async () => {
 //                 consumes it (posts, deletes, cancels ...)
 
 const q = (method, path, body) => ({ method, path, body });
+/** A probe naming someone else's record, and its twin naming no record at all: same answer, byte for byte. */
+const pair = (spec, twin, { expect = 404, who = "B" } = {}) => ({ spec, twin, expect, who });
+/**
+ * A replayed idempotency key of someone else's document. There is no
+ * "missing" twin (a fresh key creates a document), so the full answer is
+ * pinned instead: it names nothing of theirs.
+ */
+const replayed = (spec, body, { expect = 404, who = "B" } = {}) => ({ spec, body, expect, who });
 
 const DOC_ROWS = [
   // ── delivery plan, short-close, site-rep links (PO read / initiate gates) ──
@@ -486,7 +674,10 @@ const DOC_ROWS = [
     ids: (f) => ({ poId: f.poId, deliveryId: f.deliveryId }),
     req: (x) => q("patch", `/po/${x.poId}/deliveries/${x.deliveryId}`, { dueDate: null }),
     // B on its own PO naming A's delivery.
-    foreign: (x) => [q("patch", `/po/${W.poB.poId}/deliveries/${x.deliveryId}`, { dueDate: null })],
+    foreign: (x) => [pair(
+      q("patch", `/po/${W.poB.poId}/deliveries/${x.deliveryId}`, { dueDate: null }),
+      q("patch", `/po/${W.poB.poId}/deliveries/${BOGUS}`, { dueDate: null }),
+    )],
   },
   {
     key: "POST /po/:poId/short-close", perm: "awarding.create", scoped: 404, noPerm: 403, ok: 200,
@@ -496,9 +687,14 @@ const DOC_ROWS = [
       target: { type: "lines", deliveryLineIds: [x.deliveryLineId] }, reasonCode: "no_longer_needed", remarks: null,
     }),
     // B on its own PO naming A's delivery lines.
-    foreign: (x) => [q("post", `/po/${W.poB.poId}/short-close`, {
-      target: { type: "lines", deliveryLineIds: [x.deliveryLineId] }, reasonCode: "no_longer_needed", remarks: null,
-    })],
+    foreign: (x) => [pair(
+      q("post", `/po/${W.poB.poId}/short-close`, {
+        target: { type: "lines", deliveryLineIds: [x.deliveryLineId] }, reasonCode: "no_longer_needed", remarks: null,
+      }),
+      q("post", `/po/${W.poB.poId}/short-close`, {
+        target: { type: "lines", deliveryLineIds: [BOGUS] }, reasonCode: "no_longer_needed", remarks: null,
+      }),
+    )],
   },
   {
     key: "POST /po/:poId/short-close/reopen", perm: "awarding.create", scoped: 404, noPerm: 403, ok: 200,
@@ -511,7 +707,10 @@ const DOC_ROWS = [
     },
     ids: (f) => ({ poId: f.poId, deliveryLineId: f.deliveryLineId }), idKey: "poId",
     req: (x) => q("post", `/po/${x.poId}/short-close/reopen`, { deliveryLineIds: [x.deliveryLineId], remarks: "back on" }),
-    foreign: (x) => [q("post", `/po/${W.poB.poId}/short-close/reopen`, { deliveryLineIds: [x.deliveryLineId], remarks: "x" })],
+    foreign: (x) => [pair(
+      q("post", `/po/${W.poB.poId}/short-close/reopen`, { deliveryLineIds: [x.deliveryLineId], remarks: "x" }),
+      q("post", `/po/${W.poB.poId}/short-close/reopen`, { deliveryLineIds: [BOGUS], remarks: "x" }),
+    )],
   },
   {
     key: "POST /po/:poId/site-rep/revoke", perm: "grn.create", scoped: 404, noPerm: 403, ok: 200,
@@ -519,7 +718,10 @@ const DOC_ROWS = [
     ids: (f) => ({ poId: W.poA.poId, tokenId: f.tokenId }), idKey: "poId",
     req: (x) => q("post", `/po/${x.poId}/site-rep/revoke`, { tokenId: x.tokenId }),
     // B on its own PO naming A's link.
-    foreign: (x) => [q("post", `/po/${W.poB.poId}/site-rep/revoke`, { tokenId: x.tokenId })],
+    foreign: (x) => [pair(
+      q("post", `/po/${W.poB.poId}/site-rep/revoke`, { tokenId: x.tokenId }),
+      q("post", `/po/${W.poB.poId}/site-rep/revoke`, { tokenId: BOGUS }),
+    )],
   },
 
   // ── receiving ──
@@ -527,7 +729,10 @@ const DOC_ROWS = [
     key: "GET /receive/po/:poId", perm: "grn.create", scoped: 404, noPerm: 403, ok: 200,
     ids: () => ({ poId: W.poA.poId }), idKey: "poId",
     req: (x) => q("get", `/receive/po/${x.poId}?hotelId=${A1}`),
-    foreign: (x) => [q("get", `/receive/po/${x.poId}`), q("get", `/receive/po/${x.poId}?hotelId=${B1}`)],
+    foreign: (x) => [
+      pair(q("get", `/receive/po/${x.poId}`), q("get", `/receive/po/${BOGUS}`)),
+      pair(q("get", `/receive/po/${x.poId}?hotelId=${B1}`), q("get", `/receive/po/${BOGUS}?hotelId=${B1}`)),
+    ],
   },
   {
     key: "POST /grn", perm: "grn.create", scoped: 404, noPerm: 403, ok: 201,
@@ -538,15 +743,21 @@ const DOC_ROWS = [
     }),
     foreign: (x) => [
       // A's PO received at B's own hotel.
-      q("post", "/grn", { poId: x.poId, hotelId: B1, receivedAt: TODAY, post: true, clientEventId: randomUUID(), lines: [grnLine(W.poA.lineIds[0], 1)] }),
+      pair(
+        q("post", "/grn", { poId: x.poId, hotelId: B1, receivedAt: TODAY, post: true, clientEventId: randomUUID(), lines: [grnLine(W.poA.lineIds[0], 1)] }),
+        q("post", "/grn", { poId: BOGUS, hotelId: B1, receivedAt: TODAY, post: true, clientEventId: randomUUID(), lines: [grnLine(W.poA.lineIds[0], 1)] }),
+      ),
       // B's own PO with A's PO line: a line error, word for word a missing line's.
-      {
-        expect: 400,
-        spec: q("post", "/grn", { poId: W.poB.poId, hotelId: B1, receivedAt: TODAY, post: true, clientEventId: randomUUID(), lines: [grnLine(W.poA.lineIds[0], 1)] }),
-        twin: q("post", "/grn", { poId: W.poB.poId, hotelId: B1, receivedAt: TODAY, post: true, clientEventId: randomUUID(), lines: [grnLine(BOGUS, 1)] }),
-      },
+      pair(
+        q("post", "/grn", { poId: W.poB.poId, hotelId: B1, receivedAt: TODAY, post: true, clientEventId: randomUUID(), lines: [grnLine(W.poA.lineIds[0], 1)] }),
+        q("post", "/grn", { poId: W.poB.poId, hotelId: B1, receivedAt: TODAY, post: true, clientEventId: randomUUID(), lines: [grnLine(BOGUS, 1)] }),
+        { expect: 400 },
+      ),
       // Replaying the key of A's posted receipt.
-      q("post", "/grn", { poId: W.poB.poId, hotelId: B1, receivedAt: TODAY, post: true, clientEventId: W.grnA.clientEventId, lines: [grnLine(W.poB.lineIds[0], 1)] }),
+      replayed(
+        q("post", "/grn", { poId: W.poB.poId, hotelId: B1, receivedAt: TODAY, post: true, clientEventId: W.grnA.clientEventId, lines: [grnLine(W.poB.lineIds[0], 1)] }),
+        { status: 2, message: "GRN not found", code: "NOT_FOUND", details: {} },
+      ),
     ],
   },
   {
@@ -606,9 +817,10 @@ const DOC_ROWS = [
       grnId: x.grnId, disposition: "REPLACE", remarks: "ISO-A1-ONLY return", lines: [{ grnLineId: x.grnLineId, qty: 1, reason: "damaged" }],
     }),
     // B's own receipt naming A's receipt line.
-    foreign: (x) => [q("post", "/rtv", {
-      grnId: W.grnB.id, disposition: "REPLACE", remarks: "x", lines: [{ grnLineId: x.grnLineId, qty: 1, reason: "damaged" }],
-    })],
+    foreign: (x) => [pair(
+      q("post", "/rtv", { grnId: W.grnB.id, disposition: "REPLACE", remarks: "x", lines: [{ grnLineId: x.grnLineId, qty: 1, reason: "damaged" }] }),
+      q("post", "/rtv", { grnId: W.grnB.id, disposition: "REPLACE", remarks: "x", lines: [{ grnLineId: BOGUS, qty: 1, reason: "damaged" }] }),
+    )],
   },
   {
     key: "GET /rtv/:id", perm: "grn.read", scoped: 404, noPerm: 404, ok: 200,
@@ -669,7 +881,7 @@ const DOC_ROWS = [
     ids: (f) => ({ id: W.itemA2, barcodeId: f.id }), idKey: "id",
     req: (x) => q("delete", `/items/${x.id}/barcodes/${x.barcodeId}`),
     // B's own item naming A's barcode.
-    foreign: (x) => [q("delete", `/items/${W.itemB}/barcodes/${x.barcodeId}`)],
+    foreign: (x) => [pair(q("delete", `/items/${W.itemB}/barcodes/${x.barcodeId}`), q("delete", `/items/${W.itemB}/barcodes/${BOGUS}`))],
   },
 
   // ── hotel setup ──
@@ -678,7 +890,10 @@ const DOC_ROWS = [
     ids: () => ({ hotelId: A1, invItemId: W.itemA1 }), idKey: "hotelId",
     req: (x) => q("put", `/hotel-items/${x.hotelId}/${x.invItemId}`, { minQty: 1, reorderLevel: 2, maxQty: 50, binLabel: "ISO-A1-ONLY-BIN" }),
     // B's own hotel naming A's item.
-    foreign: (x) => [q("put", `/hotel-items/${B1}/${x.invItemId}`, { minQty: 1, reorderLevel: 2, maxQty: 50, binLabel: null })],
+    foreign: (x) => [pair(
+      q("put", `/hotel-items/${B1}/${x.invItemId}`, { minQty: 1, reorderLevel: 2, maxQty: 50, binLabel: null }),
+      q("put", `/hotel-items/${B1}/${BOGUS}`, { minQty: 1, reorderLevel: 2, maxQty: 50, binLabel: null }),
+    )],
   },
   {
     key: "GET /settings/hotel/:hotelId", perm: "inventory.read", scoped: 404, noPerm: 404, ok: 200,
@@ -704,11 +919,11 @@ const DOC_ROWS = [
     }),
     // B's own hotel naming A's item: a row error ("No matching item"), word
     // for word what a missing item id gets.
-    foreign: (x) => [{
-      expect: 400,
-      spec: q("post", `/opening/${B1}/post`, { rows: [{ invItemId: x.invItemId, stockQty: 5, unitCost: 10, binLabel: null }], clientEventId: randomUUID() }),
-      twin: q("post", `/opening/${B1}/post`, { rows: [{ invItemId: BOGUS, stockQty: 5, unitCost: 10, binLabel: null }], clientEventId: randomUUID() }),
-    }],
+    foreign: (x) => [pair(
+      q("post", `/opening/${B1}/post`, { rows: [{ invItemId: x.invItemId, stockQty: 5, unitCost: 10, binLabel: null }], clientEventId: randomUUID() }),
+      q("post", `/opening/${B1}/post`, { rows: [{ invItemId: BOGUS, stockQty: 5, unitCost: 10, binLabel: null }], clientEventId: randomUUID() }),
+      { expect: 400 },
+    )],
   },
 
   // ── stock (stockCommon.assertDocAccess: 404 for anything the caller cannot read, C3) ──
@@ -716,13 +931,13 @@ const DOC_ROWS = [
     key: "GET /stock/:hotelId/items/:invItemId", perm: "inventory.read", scoped: 404, noPerm: 404, ok: 200,
     ids: () => ({ hotelId: A1, invItemId: W.itemA1 }), idKey: "hotelId",
     req: (x) => q("get", `/stock/${x.hotelId}/items/${x.invItemId}`),
-    foreign: (x) => [q("get", `/stock/${B1}/items/${x.invItemId}`)],
+    foreign: (x) => [pair(q("get", `/stock/${B1}/items/${x.invItemId}`), q("get", `/stock/${B1}/items/${BOGUS}`))],
   },
   {
     key: "GET /stock/:hotelId/items/:invItemId/ledger", perm: "inventory.read", scoped: 404, noPerm: 404, ok: 200,
     ids: () => ({ hotelId: A1, invItemId: W.itemA1 }), idKey: "hotelId",
     req: (x) => q("get", `/stock/${x.hotelId}/items/${x.invItemId}/ledger`),
-    foreign: (x) => [q("get", `/stock/${B1}/items/${x.invItemId}/ledger`)],
+    foreign: (x) => [pair(q("get", `/stock/${B1}/items/${x.invItemId}/ledger`), q("get", `/stock/${B1}/items/${BOGUS}/ledger`))],
   },
   {
     key: "POST /out", perm: "inventory.create", scoped: 404, noPerm: 403, ok: 201,
@@ -731,8 +946,14 @@ const DOC_ROWS = [
       hotelId: x.hotelId, docType: "OUT", departmentId: FB, clientEventId: randomUUID(), lines: [{ invItemId: W.itemA1, qty: 1 }],
     }),
     foreign: () => [
-      q("post", "/out", { hotelId: B1, docType: "OUT", departmentId: FB, clientEventId: randomUUID(), lines: [{ invItemId: W.itemA1, qty: 1 }] }),
-      q("post", "/out", { hotelId: B1, docType: "OUT", departmentId: FB, clientEventId: W.outA.clientEventId, lines: [{ invItemId: W.itemB, qty: 1 }] }),
+      pair(
+        q("post", "/out", { hotelId: B1, docType: "OUT", departmentId: FB, clientEventId: randomUUID(), lines: [{ invItemId: W.itemA1, qty: 1 }] }),
+        q("post", "/out", { hotelId: B1, docType: "OUT", departmentId: FB, clientEventId: randomUUID(), lines: [{ invItemId: BOGUS, qty: 1 }] }),
+      ),
+      replayed(
+        q("post", "/out", { hotelId: B1, docType: "OUT", departmentId: FB, clientEventId: W.outA.clientEventId, lines: [{ invItemId: W.itemB, qty: 1 }] }),
+        { status: 2, message: "Document not found", code: "NOT_FOUND", details: {} },
+      ),
     ],
   },
   {
@@ -747,8 +968,14 @@ const DOC_ROWS = [
       hotelId: x.hotelId, reasonCode: "WASTAGE", submit: true, clientEventId: randomUUID(), lines: [{ invItemId: W.itemA1, qty: -1 }],
     }),
     foreign: () => [
-      q("post", "/adjustments", { hotelId: B1, reasonCode: "WASTAGE", submit: true, clientEventId: randomUUID(), lines: [{ invItemId: W.itemA1, qty: -1 }] }),
-      q("post", "/adjustments", { hotelId: B1, reasonCode: "WASTAGE", submit: true, clientEventId: W.adjA.clientEventId, lines: [{ invItemId: W.itemB, qty: -1 }] }),
+      pair(
+        q("post", "/adjustments", { hotelId: B1, reasonCode: "WASTAGE", submit: true, clientEventId: randomUUID(), lines: [{ invItemId: W.itemA1, qty: -1 }] }),
+        q("post", "/adjustments", { hotelId: B1, reasonCode: "WASTAGE", submit: true, clientEventId: randomUUID(), lines: [{ invItemId: BOGUS, qty: -1 }] }),
+      ),
+      replayed(
+        q("post", "/adjustments", { hotelId: B1, reasonCode: "WASTAGE", submit: true, clientEventId: W.adjA.clientEventId, lines: [{ invItemId: W.itemB, qty: -1 }] }),
+        { status: 2, message: "Adjustment not found", code: "NOT_FOUND", details: {} },
+      ),
     ],
   },
   {
@@ -772,7 +999,10 @@ const DOC_ROWS = [
     key: "POST /counts", perm: "inventory.create", scoped: 404, noPerm: 403, ok: 201,
     ids: () => ({ hotelId: A1 }), idKey: "hotelId",
     req: (x) => q("post", "/counts", { hotelId: x.hotelId, scope: "SELECTED", isBlind: false, invItemIds: [W.countItems[5]] }),
-    foreign: () => [q("post", "/counts", { hotelId: B1, scope: "SELECTED", isBlind: false, invItemIds: [W.countItems[5]] })],
+    foreign: () => [pair(
+      q("post", "/counts", { hotelId: B1, scope: "SELECTED", isBlind: false, invItemIds: [W.countItems[5]] }),
+      q("post", "/counts", { hotelId: B1, scope: "SELECTED", isBlind: false, invItemIds: [BOGUS] }),
+    )],
   },
   {
     key: "GET /counts/:id", perm: "inventory.read", scoped: 404, noPerm: 404, ok: 200,
@@ -784,7 +1014,10 @@ const DOC_ROWS = [
     fresh: () => newCount(W.countItems[1]), ids: (f) => ({ id: f.id }), idKey: "id",
     req: (x) => q("put", `/counts/${x.id}/lines`, { lines: [{ invItemId: W.countItems[1], countedQty: 0, clientEventId: randomUUID() }] }),
     // B's own count naming A's item.
-    foreign: () => [q("put", `/counts/${W.countB.id}/lines`, { lines: [{ invItemId: W.countItems[1], countedQty: 0, clientEventId: randomUUID() }] })],
+    foreign: () => [pair(
+      q("put", `/counts/${W.countB.id}/lines`, { lines: [{ invItemId: W.countItems[1], countedQty: 0, clientEventId: randomUUID() }] }),
+      q("put", `/counts/${W.countB.id}/lines`, { lines: [{ invItemId: BOGUS, countedQty: 0, clientEventId: randomUUID() }] }),
+    )],
   },
   {
     key: "POST /counts/:id/submit", perm: "inventory.create", scoped: 404, noPerm: 403, ok: 200,
@@ -807,10 +1040,20 @@ const DOC_ROWS = [
     key: "POST /labels/items", perm: "inventory.update", scoped: 404, noPerm: 403, ok: 200,
     ids: () => ({ hotelId: A1, invItemId: W.itemA1 }), idKey: "hotelId",
     req: (x) => q("post", "/labels/items", { layout: "A4_65", hotelId: x.hotelId, items: [{ invItemId: x.invItemId, copies: 1 }] }),
-    foreign: (x) => [
-      q("post", "/labels/items", { layout: "A4_65", items: [{ invItemId: x.invItemId, copies: 1 }] }),
-      q("post", "/labels/items", { layout: "A4_65", hotelId: B1, items: [{ invItemId: x.invItemId, copies: 1 }] }),
-    ],
+    foreign: (x) => {
+      const labels = (hotelId, invItemId) => q("post", "/labels/items", {
+        layout: "A4_65", ...(hotelId ? { hotelId } : {}), items: [{ invItemId, copies: 1 }],
+      });
+      return [
+        // No hotel: A's item reads like no item.
+        pair(labels(null, x.invItemId), labels(null, BOGUS)),
+        // B's own hotel with A's item.
+        pair(labels(B1, x.invItemId), labels(B1, BOGUS)),
+        // A hotel that does not exist: the hotel is refused before any item is looked up.
+        pair(labels(BOGUS, x.invItemId), labels(BOGUS, BOGUS)),
+        pair(labels(BOGUS, x.invItemId), labels(BOGUS, BOGUS), { who: "OTHER" }),
+      ];
+    },
   },
   {
     // Exactly what GET /grn/:id answers.
@@ -823,7 +1066,39 @@ const DOC_ROWS = [
     key: "GET /s/resolve", perm: "grn.read", scoped: 404, noPerm: 404, ok: 200,
     ids: () => ({ id: W.grnA.id }), idKey: "id",
     req: (x) => q("get", `/s/resolve?t=g&id=${x.id}`),
-    foreign: () => [q("get", `/s/resolve?t=p&id=${W.poA.poId}`), q("get", `/s/resolve?t=i&id=${W.itemA1}`), q("get", `/s/resolve?t=d&id=${W.dispatchA.id}`)],
+    foreign: () => [
+      pair(q("get", `/s/resolve?t=p&id=${W.poA.poId}`), q("get", `/s/resolve?t=p&id=${BOGUS}`)),
+      pair(q("get", `/s/resolve?t=i&id=${W.itemA1}`), q("get", `/s/resolve?t=i&id=${BOGUS}`)),
+      pair(q("get", `/s/resolve?t=d&id=${W.dispatchA.id}`), q("get", `/s/resolve?t=d&id=${BOGUS}`)),
+    ],
+  },
+
+  // ── reorder (D3): the hotel is gated against the caller's own scopes ──
+  {
+    key: "GET /reorder", perm: "inventory.read", scoped: 404, noPerm: 404, ok: 200,
+    ids: () => ({ hotelId: A1 }), idKey: "hotelId",
+    req: (x) => q("get", `/reorder?hotelId=${x.hotelId}`),
+  },
+  {
+    key: "POST /reorder/mr-draft", perm: "inventory.update", scoped: 404, noPerm: 403, ok: 201,
+    ids: () => ({ hotelId: A1, invItemId: W.itemA1 }), idKey: "hotelId",
+    req: (x) => q("post", "/reorder/mr-draft", {
+      hotelId: x.hotelId, departmentId: FB, clientEventId: randomUUID(), items: [{ invItemId: x.invItemId, qty: 1 }],
+    }),
+    foreign: (x) => {
+      const draft = (invItemId, clientEventId = randomUUID()) => q("post", "/reorder/mr-draft", {
+        hotelId: B1, departmentId: FB, clientEventId, items: [{ invItemId, qty: 1 }],
+      });
+      return [
+        // B's own hotel with A's item.
+        pair(draft(x.invItemId), draft(BOGUS)),
+        // Replaying the key of A's draft: refused as any reused key is, naming nothing of A's.
+        replayed(draft(W.itemB, W.mrDraftA.clientEventId), {
+          status: 0, message: "This request was already used for another requisition", code: "CONFLICT",
+          details: { field: "clientEventId" },
+        }, { expect: 409 }),
+      ];
+    },
   },
 
   // ── legacy PO routes owned by inventory (mounted under /api/v1/po) ──
@@ -851,13 +1126,15 @@ const DOC_ROWS = [
 // answer — a status, or 'empty' (200 with no rows). B's and A_OTHER's answers
 // never carry A (resp. A1) data; `has` names what the answer must contain.
 const rowsOf = (data) => data?.rows ?? data;
+const NO_CODE = "8901234599990"; // a barcode no company holds
+const link = (t, id) => encodeURIComponent(`https://x.test/s?t=${t}&id=${id}`);
 const LIST_ROWS = [
   {
     key: "GET /receive/awaiting",
     probes: () => [
       { who: "B", req: q("get", "/receive/awaiting"), expect: 200, has: [W.poB.poNumber] },
-      { who: "B", req: q("get", `/receive/awaiting?hotelId=${A1}`), expect: "empty" },
-      { who: "OTHER", req: q("get", `/receive/awaiting?hotelId=${A1}`), expect: "empty" },
+      { who: "B", req: q("get", `/receive/awaiting?hotelId=${A1}`), expect: "empty", sameAs: q("get", `/receive/awaiting?hotelId=${BOGUS}`) },
+      { who: "OTHER", req: q("get", `/receive/awaiting?hotelId=${A1}`), expect: "empty", sameAs: q("get", `/receive/awaiting?hotelId=${BOGUS}`) },
       { who: "A", req: q("get", `/receive/awaiting?hotelId=${A1}`), expect: 200, has: [W.poA.poNumber] },
     ],
   },
@@ -865,10 +1142,11 @@ const LIST_ROWS = [
     key: "GET /grn",
     probes: () => [
       { who: "B", req: q("get", "/grn"), expect: 200, has: [W.grnB.grnNumber] },
-      { who: "B", req: q("get", `/grn?hotelId=${A1}`), expect: "empty" },
-      { who: "B", req: q("get", `/grn?poId=${W.poA.poId}`), expect: "empty" },
+      { who: "B", req: q("get", `/grn?hotelId=${A1}`), expect: "empty", sameAs: q("get", `/grn?hotelId=${BOGUS}`) },
+      { who: "B", req: q("get", `/grn?poId=${W.poA.poId}`), expect: "empty", sameAs: q("get", `/grn?poId=${BOGUS}`) },
       { who: "B", req: q("get", "/grn?status=draft"), expect: 200 },
-      { who: "OTHER", req: q("get", `/grn?hotelId=${A1}`), expect: "empty" },
+      { who: "OTHER", req: q("get", `/grn?hotelId=${A1}`), expect: "empty", sameAs: q("get", `/grn?hotelId=${BOGUS}`) },
+      { who: "OTHER", req: q("get", `/grn?poId=${W.poA.poId}`), expect: "empty", sameAs: q("get", `/grn?poId=${BOGUS}`) },
       { who: "A", req: q("get", `/grn?hotelId=${A1}`), expect: 200, has: [W.grnA.grnNumber] },
     ],
   },
@@ -876,7 +1154,7 @@ const LIST_ROWS = [
     key: "GET /items",
     probes: () => [
       { who: "B", req: q("get", "/items"), expect: 200, has: ["ISO-B Rice"] },
-      { who: "B", req: q("get", "/items?search=ISO-A-SECRET"), expect: "empty" },
+      { who: "B", req: q("get", "/items?search=ISO-A-SECRET"), expect: "empty", sameAs: q("get", "/items?search=ISO-Z-NOTHING") },
       { who: "B", req: q("get", `/items?hotelId=${A1}`), expect: 404, sameAs: q("get", `/items?hotelId=${BOGUS}`) },
       { who: "OTHER", req: q("get", `/items?hotelId=${A1}`), expect: 404, sameAs: q("get", `/items?hotelId=${BOGUS}`) },
       // The hint only narrows among B's own companies: naming A narrows to nothing.
@@ -908,8 +1186,8 @@ const LIST_ROWS = [
     probes: () => [
       { who: "B", req: q("get", "/stock"), expect: 200, has: ["ISO-B Rice"] },
       { who: "B", req: q("get", `/stock?hotelId=${A1}`), expect: 404, sameAs: q("get", `/stock?hotelId=${BOGUS}`) },
-      { who: "B", req: q("get", "/stock?search=ISO-A-SECRET"), expect: "empty" },
-      { who: "OTHER", req: q("get", `/stock?hotelId=${A1}`), expect: 404 },
+      { who: "B", req: q("get", "/stock?search=ISO-A-SECRET"), expect: "empty", sameAs: q("get", "/stock?search=ISO-Z-NOTHING") },
+      { who: "OTHER", req: q("get", `/stock?hotelId=${A1}`), expect: 404, sameAs: q("get", `/stock?hotelId=${BOGUS}`) },
       { who: "A", req: q("get", `/stock?hotelId=${A1}`), expect: 200, has: ["ISO-A-SECRET Saffron"] },
     ],
   },
@@ -917,8 +1195,8 @@ const LIST_ROWS = [
     key: "GET /out",
     probes: () => [
       { who: "B", req: q("get", "/out"), expect: 200, has: [W.outB.outNumber] },
-      { who: "B", req: q("get", `/out?hotelId=${A1}`), expect: "empty" },
-      { who: "OTHER", req: q("get", `/out?hotelId=${A1}`), expect: "empty" },
+      { who: "B", req: q("get", `/out?hotelId=${A1}`), expect: "empty", sameAs: q("get", `/out?hotelId=${BOGUS}`) },
+      { who: "OTHER", req: q("get", `/out?hotelId=${A1}`), expect: "empty", sameAs: q("get", `/out?hotelId=${BOGUS}`) },
       { who: "A", req: q("get", `/out?hotelId=${A1}`), expect: 200, has: [W.outA.outNumber] },
     ],
   },
@@ -926,8 +1204,8 @@ const LIST_ROWS = [
     key: "GET /adjustments",
     probes: () => [
       { who: "B", req: q("get", "/adjustments"), expect: 200, has: [W.adjB.adjustmentNumber] },
-      { who: "B", req: q("get", `/adjustments?hotelId=${A1}`), expect: "empty" },
-      { who: "OTHER", req: q("get", `/adjustments?hotelId=${A1}`), expect: "empty" },
+      { who: "B", req: q("get", `/adjustments?hotelId=${A1}`), expect: "empty", sameAs: q("get", `/adjustments?hotelId=${BOGUS}`) },
+      { who: "OTHER", req: q("get", `/adjustments?hotelId=${A1}`), expect: "empty", sameAs: q("get", `/adjustments?hotelId=${BOGUS}`) },
       { who: "A", req: q("get", `/adjustments?hotelId=${A1}`), expect: 200, has: [W.adjA.adjustmentNumber] },
     ],
   },
@@ -935,8 +1213,8 @@ const LIST_ROWS = [
     key: "GET /counts",
     probes: () => [
       { who: "B", req: q("get", "/counts"), expect: 200, has: [W.countB.countNumber] },
-      { who: "B", req: q("get", `/counts?hotelId=${A1}`), expect: "empty" },
-      { who: "OTHER", req: q("get", `/counts?hotelId=${A1}`), expect: "empty" },
+      { who: "B", req: q("get", `/counts?hotelId=${A1}`), expect: "empty", sameAs: q("get", `/counts?hotelId=${BOGUS}`) },
+      { who: "OTHER", req: q("get", `/counts?hotelId=${A1}`), expect: "empty", sameAs: q("get", `/counts?hotelId=${BOGUS}`) },
       { who: "A", req: q("get", `/counts?hotelId=${A1}`), expect: 200, has: [W.countA.countNumber] },
     ],
   },
@@ -945,7 +1223,7 @@ const LIST_ROWS = [
     probes: () => [
       { who: "B", req: q("get", "/overview"), expect: 200, has: ["Hotel B-1"] },
       { who: "B", req: q("get", `/overview?hotelId=${A1}`), expect: 404, sameAs: q("get", `/overview?hotelId=${BOGUS}`) },
-      { who: "OTHER", req: q("get", `/overview?hotelId=${A1}`), expect: 404 },
+      { who: "OTHER", req: q("get", `/overview?hotelId=${A1}`), expect: 404, sameAs: q("get", `/overview?hotelId=${BOGUS}`) },
       { who: "OTHER", req: q("get", "/overview"), expect: 200 },
       { who: "A", req: q("get", `/overview?hotelId=${A1}`), expect: 200, has: ["Hotel A-1"] },
     ],
@@ -953,12 +1231,14 @@ const LIST_ROWS = [
   {
     key: "GET /scan/resolve",
     probes: () => [
-      // A's barcode, scanned by B with no context and in B's own hotel: unknown.
-      { who: "B", req: q("get", `/scan/resolve?code=${W.barcodeA.code}`), expect: 200, kind: "unknown" },
-      { who: "B", req: q("get", `/scan/resolve?code=${W.barcodeA.code}&context=hotel:${B1}`), expect: 200, kind: "unknown" },
-      // A's own QR short links, scanned by B.
-      { who: "B", req: q("get", `/scan/resolve?code=${encodeURIComponent(`https://x.test/s?t=i&id=${W.itemA1}`)}&context=hotel:${B1}`), expect: 200, kind: "unknown" },
-      { who: "B", req: q("get", `/scan/resolve?code=${encodeURIComponent(`https://x.test/s?t=g&id=${W.grnA.id}`)}`), expect: 200, kind: "unknown" },
+      // A's barcode, scanned by B with no context and in B's own hotel: unknown, like a code nobody has.
+      { who: "B", req: q("get", `/scan/resolve?code=${W.barcodeA.code}`), expect: 200, kind: "unknown", sameAs: q("get", `/scan/resolve?code=${NO_CODE}`) },
+      { who: "B", req: q("get", `/scan/resolve?code=${W.barcodeA.code}&context=hotel:${B1}`), expect: 200, kind: "unknown", sameAs: q("get", `/scan/resolve?code=${NO_CODE}&context=hotel:${B1}`) },
+      // A's own QR short links, scanned by B: like a link to nothing.
+      { who: "B", req: q("get", `/scan/resolve?code=${link("i", W.itemA1)}&context=hotel:${B1}`), expect: 200, kind: "unknown", sameAs: q("get", `/scan/resolve?code=${link("i", BOGUS)}&context=hotel:${B1}`) },
+      { who: "B", req: q("get", `/scan/resolve?code=${link("g", W.grnA.id)}`), expect: 200, kind: "unknown", sameAs: q("get", `/scan/resolve?code=${link("g", BOGUS)}`) },
+      // A user at A2 scanning A1's receipt link.
+      { who: "OTHER", req: q("get", `/scan/resolve?code=${link("g", W.grnA.id)}`), expect: 200, kind: "unknown", sameAs: q("get", `/scan/resolve?code=${link("g", BOGUS)}`) },
       // A's hotel or PO as the scan context.
       { who: "B", req: q("get", `/scan/resolve?code=${W.barcodeA.code}&context=hotel:${A1}`), expect: 404, sameAs: q("get", `/scan/resolve?code=${W.barcodeA.code}&context=hotel:${BOGUS}`) },
       { who: "B", req: q("get", `/scan/resolve?code=${W.barcodeA.code}&context=po:${W.poA.poId}`), expect: 404, sameAs: q("get", `/scan/resolve?code=${W.barcodeA.code}&context=po:${BOGUS}`) },
@@ -1015,7 +1295,10 @@ const VENDOR_ROWS = [
     ids: (f) => ({ poId: W.poA.poId, id: f.id }), idKey: "poId",
     req: (x) => q("post", `/vendor/po/${x.poId}/dispatches/${x.id}/cancel`),
     // The owner of PO A naming Company B's dispatch under their own PO.
-    ownerForeign: () => [q("post", `/vendor/po/${W.poA.poId}/dispatches/${W.dispatchB.id}/cancel`)],
+    ownerForeign: () => [pair(
+      q("post", `/vendor/po/${W.poA.poId}/dispatches/${W.dispatchB.id}/cancel`),
+      q("post", `/vendor/po/${W.poA.poId}/dispatches/${BOGUS}/cancel`),
+    )],
   },
   {
     key: "POST /api/v1/po/raiseInvoice", ok: 200,
@@ -1033,14 +1316,6 @@ const VENDOR_ROWS = [
 // TOKEN routes: covered by the "site-rep links" describe below.
 const TOKEN_KEYS = ["GET /token/receive-context", "POST /token/grn", "POST /token/grn/:id/attachments"];
 
-// Routes still answering the 501 stub: no handler, nothing to isolate yet.
-// The owner (D3) replaces each entry with a real row; the stub check below
-// fails the moment the route stops answering 501.
-const STUB_ROWS = [
-  { key: "GET /reorder", req: q("get", `/reorder?hotelId=${A1}`), reason: "D3 reorder: 501 stub on this branch" },
-  { key: "POST /reorder/mr-draft", req: q("post", "/reorder/mr-draft", {}), reason: "D3 reorder: 501 stub on this branch" },
-];
-
 // Inventory-owned routes mounted outside /api/v1/inventory.
 const ELSEWHERE = [
   "POST /api/v1/po/addSiteRepresentative", // B6: issues a hashed site-rep link
@@ -1052,26 +1327,50 @@ const ELSEWHERE = [
 
 const TABLE_KEYS = [
   ...DOC_ROWS.map((r) => r.key), ...LIST_ROWS.map((r) => r.key), ...COMPANY_ROWS.map((r) => r.key),
-  ...VENDOR_ROWS.map((r) => r.key), ...TOKEN_KEYS, ...STUB_ROWS.map((r) => r.key),
+  ...VENDOR_ROWS.map((r) => r.key), ...TOKEN_KEYS,
 ];
 
-/** Every METHOD + full path mounted on the app. */
+/**
+ * The path a router is mounted at, read back from Express 4's mount regexp
+ * (path-to-regexp 0.1, end:false). Fails closed: anything it cannot read
+ * exactly (an array of paths, a regexp, a wildcard) is an error, never skipped.
+ */
+function mountOf(layer) {
+  if (layer.regexp?.fast_slash) return "";
+  const src = layer.regexp?.source ?? "";
+  const fail = () => new Error(`route guard cannot read the mount /${src}/ (${layer.name})`);
+  const m = src.match(/^\^(.*)\\\/\?\(\?=\\\/\|\$\)$/);
+  if (!m) throw fail();
+  let k = 0;
+  const mount = m[1]
+    .replace(/\(\?:\(\[\^\\\/\]\+\?\)\)/g, () => {
+      const key = layer.keys?.[k++];
+      if (!key?.name) throw fail();
+      return `:${key.name}`;
+    })
+    .replace(/\\(.)/g, "$1");
+  if (/[\\^$*+?()[\]{}|]/.test(mount) || k !== (layer.keys?.length ?? 0)) throw fail();
+  return mount;
+}
+
+/** Every METHOD + full path mounted on the app, with its route's handlers. */
 function mountedRoutes(app) {
   const out = [];
-  const mountOf = (layer) => {
-    if (layer.regexp?.fast_slash) return "";
-    const m = layer.regexp?.source.match(/^\^((?:\\\/[^\\?()]+)+)\\\/\?\(\?=\\\/\|\$\)$/);
-    return m ? m[1].replace(/\\\//g, "/") : null;
-  };
   const walk = (stack, prefix) => {
     for (const layer of stack) {
       if (layer.route) {
-        for (const m of Object.keys(layer.route.methods)) {
-          if (m !== "_all") out.push(`${m.toUpperCase()} ${prefix}${layer.route.path}`);
+        if (typeof layer.route.path !== "string") {
+          throw new Error(`route guard cannot read the route ${String(layer.route.path)} under ${prefix || "/"}`);
         }
+        for (const m of Object.keys(layer.route.methods)) {
+          if (m !== "_all") {
+            out.push({ key: `${m.toUpperCase()} ${prefix}${layer.route.path}`, handles: layer.route.stack.map((l) => l.handle) });
+          }
+        }
+      } else if (layer.name === "mounted_app") {
+        throw new Error(`route guard cannot walk a mounted sub-app under ${prefix || "/"}`);
       } else if (layer.handle?.stack) {
-        const mount = mountOf(layer);
-        if (mount !== null) walk(layer.handle.stack, prefix + mount);
+        walk(layer.handle.stack, prefix + mountOf(layer));
       }
     }
   };
@@ -1079,17 +1378,31 @@ function mountedRoutes(app) {
   return out;
 }
 
+/** Every function app/controllers/inventory/* exports (named, and the default object's values). */
+async function inventoryHandlers() {
+  const handlers = new Set();
+  for (const file of fs.readdirSync(CONTROLLERS_DIR).filter((f) => f.endsWith(".js"))) {
+    const mod = await import(pathToFileURL(path.join(CONTROLLERS_DIR, file)).href);
+    for (const [name, value] of Object.entries(mod)) {
+      if (typeof value === "function") handlers.add(value);
+      if (name === "default" && value && typeof value === "object") {
+        for (const v of Object.values(value)) if (typeof v === "function") handlers.add(v);
+      }
+    }
+  }
+  return handlers;
+}
+
 // ---------------------------------------------------------------------------
 // 1. Every inventory route has an entry
 // ---------------------------------------------------------------------------
 
+const underBase = (key) => key.split(" ")[1].startsWith(`${BASE}/`);
+
 describe("route enumeration guard", () => {
   it("every mounted inventory route has an isolation entry, and every entry is mounted", async () => {
-    const app = await buildTestApp();
-    const mounted = mountedRoutes(app);
-    const inventory = mounted
-      .filter((r) => r.split(" ")[1].startsWith(`${BASE}/`))
-      .map((r) => r.replace(` ${BASE}/`, " /"));
+    const mounted = mountedRoutes(await buildTestApp()).map((r) => r.key);
+    const inventory = mounted.filter(underBase).map((r) => r.replace(` ${BASE}/`, " /"));
     expect(inventory.length).toBeGreaterThan(60);
 
     const keys = new Set(TABLE_KEYS);
@@ -1102,9 +1415,25 @@ describe("route enumeration guard", () => {
     expect(new Set(TABLE_KEYS).size).toBe(TABLE_KEYS.length);
   });
 
-  it.each(STUB_ROWS.map((r) => [r.key, r]))("%s is still a 501 stub (replace this entry with a row once it lands)", async (key, row) => {
-    const res = await send(C.aAll, row.req);
-    expect({ key, status: res.status, message: res.body?.message }).toEqual({ key, status: 501, message: "not implemented" });
+  it("an inventory controller handler mounted anywhere else in the app is listed too", async () => {
+    const routes = mountedRoutes(await buildTestApp());
+    const handlers = await inventoryHandlers();
+    const usesInventory = (r) => r.handles.some((h) => handlers.has(h));
+    // Sanity: the matcher recognises the handler of every /inventory route itself.
+    expect(routes.filter((r) => underBase(r.key) && !usesInventory(r)).map((r) => r.key)).toEqual([]);
+    // Anywhere else, each must be an ELSEWHERE entry (which the first test ties to a row).
+    const outside = routes.filter((r) => !underBase(r.key) && usesInventory(r)).map((r) => r.key);
+    expect(outside.filter((k) => !ELSEWHERE.includes(k))).toEqual([]);
+  });
+
+  it("the mount reader fails closed on a mount it cannot read", () => {
+    const layer = (source, keys = []) => ({ name: "router", regexp: new RegExp(source, "i"), keys });
+    expect(mountOf(layer("^\\/api\\/v1\\/inventory\\/?(?=\\/|$)"))).toBe("/api/v1/inventory");
+    expect(mountOf(layer("^\\/x\\/(?:([^\\/]+?))\\/?(?=\\/|$)", [{ name: "id" }]))).toBe("/x/:id");
+    expect(() => mountOf(layer("^(?:\\/a|\\/b)\\/?(?=\\/|$)"))).toThrow(/cannot read the mount/); // an array of paths
+    expect(() => mountOf(layer("^\\/a(.*)\\/?(?=\\/|$)"))).toThrow(/cannot read the mount/); // a wildcard
+    expect(() => mountOf(layer("^\\/x\\/(?:([^\\/]+?))\\/?(?=\\/|$)"))).toThrow(/cannot read the mount/); // a param with no key
+    expect(() => mountOf(layer("^\\/x$"))).toThrow(/cannot read the mount/); // not a mount regexp at all
   });
 });
 
@@ -1118,22 +1447,31 @@ async function expectRefused(res, { route, actor, status, secrets = SECRETS_A })
   }).toEqual({ route, actor, status, bodyStatus: status === 404 ? 2 : 0, leaks: [] });
 }
 
+/** Two answers must be indistinguishable: the whole signature, ids echoed from each request normalised. */
+async function expectSame(label, res, spec, twinRes, twinSpec) {
+  expect({ ...label, answer: signature(res, spec) }).toEqual({ ...label, answer: signature(twinRes, twinSpec) });
+}
+
 describe("records addressed by id", () => {
   it.each(DOC_ROWS.map((r) => [r.key, r]))("%s", async (route, row) => {
     const fresh = row.fresh ? await row.fresh() : {};
     const ids = row.ids(fresh);
     const real = row.req(ids);
+    const missingSpec = row.req({ ...ids, [row.idKey]: BOGUS });
 
     // Company B: 404, nothing of A's, and indistinguishable from a missing id.
     const asB = await send(C.bAll, real);
     await expectRefused(asB, { route, actor: "B", status: 404 });
-    const missing = await send(C.bAll, row.req({ ...ids, [row.idKey]: BOGUS }));
-    expect({ route, oracle: signature(asB) }).toEqual({ route, oracle: signature(missing) });
+    await expectSame({ route, actor: "B" }, asB, real, await send(C.bAll, missingSpec), missingSpec);
+    const callers = { B: C.bAll, OTHER: C.other };
     for (const [i, probe] of (row.foreign?.(ids) ?? []).entries()) {
-      const { spec, expect: status = 404, twin } = probe.spec ? probe : { spec: probe };
-      const res = await send(C.bAll, spec);
-      await expectRefused(res, { route, actor: `B foreign #${i}`, status });
-      if (twin) expect({ route, i, oracle: signature(res) }).toEqual({ route, i, oracle: signature(await send(C.bAll, twin)) });
+      const actor = `${probe.who} foreign #${i}`;
+      if (!probe.twin && !probe.body) throw new Error(`${route} ${actor}: every foreign probe needs a twin (or a pinned body)`);
+      const client = callers[probe.who];
+      const res = await send(client, probe.spec);
+      await expectRefused(res, { route, actor, status: probe.expect, secrets: probe.who === "B" ? SECRETS_A : SECRETS_A1 });
+      if (probe.twin) await expectSame({ route, actor }, res, probe.spec, await send(client, probe.twin), probe.twin);
+      else expect({ route, actor, body: res.body }).toEqual({ route, actor, body: probe.body });
     }
 
     // Company A, other hotel only.
@@ -1142,16 +1480,17 @@ describe("records addressed by id", () => {
     } else {
       const scoped = await send(C.other, real);
       await expectRefused(scoped, { route, actor: "A at A2 only", status: row.scoped, secrets: SECRETS_A1 });
-      if (row.scoped === 404) {
-        // C3: an out-of-scope record of the caller's own company reads like a missing one too.
-        const twin = await send(C.other, row.req({ ...ids, [row.idKey]: BOGUS }));
-        expect({ route, scopedOracle: signature(scoped) }).toEqual({ route, scopedOracle: signature(twin) });
-      }
+      // C3: an out-of-scope record of the caller's own company reads like a missing one too.
+      if (row.scoped === 404) await expectSame({ route, actor: "A at A2 only" }, scoped, real, await send(C.other, missingSpec), missingSpec);
     }
 
     // Company A, right hotel, everything but the route's permission.
     await grantNoPerm(row.perm, row.hotel ?? A1);
-    await expectRefused(await send(C.noPerm, real), { route, actor: `A without ${row.perm}`, status: row.noPerm, secrets: [] });
+    const noPerm = await send(C.noPerm, real);
+    await expectRefused(noPerm, { route, actor: `A without ${row.perm}`, status: row.noPerm, secrets: [] });
+    if (row.noPerm === 404) {
+      await expectSame({ route, actor: `A without ${row.perm}` }, noPerm, real, await send(C.noPerm, missingSpec), missingSpec);
+    }
 
     // Positive control.
     const good = await send(C.aAll, real);
@@ -1165,12 +1504,28 @@ describe("a GRN's PDF and labels", () => {
     const callers = { B: C.bAll, "A at A2 only": C.other, "A without grn.read": C.noPerm };
     for (const [who, client] of Object.entries(callers)) {
       for (const id of [W.grnA.id, BOGUS]) {
-        const grn = signature(await client.get(`${BASE}/grn/${id}`));
-        const pdfRes = signature(await client.get(`${BASE}/grn/${id}/pdf`));
-        const labels = signature(await client.post(`${BASE}/labels/grn/${id}`).send({ layout: "A4_65", mode: "per_pack" }));
+        const answer = async (spec) => signature(await send(client, spec), spec);
+        const grn = await answer(q("get", `/grn/${id}`));
+        const pdfRes = await answer(q("get", `/grn/${id}/pdf`));
+        const labels = await answer(q("post", `/labels/grn/${id}`, { layout: "A4_65", mode: "per_pack" }));
         expect({ who, id, grn: grn.status, pdf: pdfRes, labels }).toEqual({ who, id, grn: 404, pdf: grn, labels: grn });
       }
     }
+  });
+});
+
+describe("a platform super admin (user_type 8)", () => {
+  it("reads both companies' records with no mapping or role of their own", async () => {
+    const reads = [
+      q("get", `/grn/${W.grnA.id}`), q("get", `/grn/${W.grnB.id}`),
+      q("get", `/out/${W.outA.id}`), q("get", `/out/${W.outB.id}`),
+      q("get", `/stock?hotelId=${A1}`), q("get", `/stock?hotelId=${B1}`),
+      q("get", `/po/${W.poA.poId}/deliveries`), q("get", `/po/${W.poB.poId}/deliveries`),
+      q("get", `/reorder?hotelId=${A1}`), q("get", `/settings/hotel/${B1}`),
+    ];
+    const answers = [];
+    for (const spec of reads) answers.push({ path: spec.path, status: (await send(C.super, spec)).status });
+    expect(answers).toEqual(reads.map((spec) => ({ path: spec.path, status: 200 })));
   });
 });
 
@@ -1200,25 +1555,72 @@ describe("lists and aggregates", () => {
       const itemIds = (Array.isArray(res.body.data) ? res.body.data : []).map((x) => x.invItemId);
       if (p.hasItem) expect({ label, hasItem: itemIds.includes(p.hasItem) }).toEqual({ label, hasItem: true });
       if (p.lacksItem) expect({ label, hasItem: itemIds.includes(p.lacksItem) }).toEqual({ label, hasItem: false });
-      if (p.sameAs) {
-        const twin = await send(client[p.who], p.sameAs);
-        expect({ label, oracle: signature(res) }).toEqual({ label, oracle: signature(twin) });
-      }
+      if (p.sameAs) await expectSame({ label }, res, p.req, await send(client[p.who], p.sameAs), p.sameAs);
     }
   });
 
   it("inventory reports: Company B sees none of A's rows, and naming A's hotel narrows to nothing", async () => {
-    const wide = { from: "2020-04-01", to: "2031-03-31" };
+    // Every inventory / receiving report in the registry, and each one runnable.
+    expect(REPORT_KEYS.length).toBeGreaterThanOrEqual(10);
+    expect(INVENTORY_REPORTS.filter((d) => !isRunnable(d)).map((d) => d.key)).toEqual([]);
     for (const key of REPORT_KEYS) {
-      const all = await C.bAll.post(`/api/v1/reports/${key}/preview`).send(wide);
+      const preview = (body) => q("post", `/api/v1/reports/${key}/preview`, body);
+      const all = await send(C.bAll, preview(WIDE));
       expect({ key, status: all.status, leaks: leaksIn(all.body) }).toEqual({ key, status: 200, leaks: [] });
-      const named = await C.bAll.post(`/api/v1/reports/${key}/preview`).send({ ...wide, hotel_ids: [A1] });
+      const namedSpec = preview({ ...WIDE, hotel_ids: [A1] });
+      const named = await send(C.bAll, namedSpec);
       expect({ key, status: named.status, total: named.body?.data?.total_rows, leaks: leaksIn(named.body) })
         .toEqual({ key, status: 200, total: 0, leaks: [] });
+      const bogusSpec = preview({ ...WIDE, hotel_ids: [BOGUS] });
+      await expectSame({ key }, named, namedSpec, await send(C.bAll, bogusSpec), bogusSpec);
     }
     // The control: A's own stock report does carry A's rows.
-    const mine = await C.aAll.post("/api/v1/reports/stock_on_hand/preview").send(wide);
+    const mine = await C.aAll.post("/api/v1/reports/stock_on_hand/preview").send(WIDE);
     expect(JSON.stringify(mine.body)).toContain("ISO-A-SECRET Saffron");
+  });
+
+  it("A moving stock changes nothing B or a user at A2 can see: the overview and every inventory report", async () => {
+    const views = async () => {
+      const out = {};
+      for (const [who, client] of [["B", C.bAll], ["A at A2 only", C.other]]) {
+        const overview = await client.get(`${BASE}/overview`);
+        out[`${who} /overview`] = { status: overview.status, body: overview.body };
+        for (const key of REPORT_KEYS) {
+          const r = await client.post(`/api/v1/reports/${key}/preview`).send(WIDE);
+          out[`${who} ${key}`] = { status: r.status, body: r.body };
+        }
+      }
+      return out;
+    };
+    const stockOfA = async () => JSON.stringify((await C.aAll.get(`${BASE}/stock/${A1}/items/${W.itemA1}`)).body.data);
+
+    const before = await views();
+    expect(Object.entries(before).filter(([, v]) => v.status !== 200).map(([k]) => k)).toEqual([]);
+    const aBefore = await stockOfA();
+    await postGrnA({ qty: 1 });
+    await must(C.aAll.post(`${BASE}/out`).send({
+      hotelId: A1, docType: "OUT", departmentId: FB, clientEventId: randomUUID(), lines: [{ invItemId: W.itemA1, qty: 1 }],
+    }), "A out");
+    const after = await views();
+    expect(after).toEqual(before);
+    // The control: A's own stock did move (a GRN in and a mark-out, so the ledger grew).
+    expect(await stockOfA()).not.toEqual(aBefore);
+  });
+
+  it("GET /reorder: no hotel means the caller's own; Create MR draft follows inventory.update", async () => {
+    const own = await C.bAll.get(`${BASE}/reorder`);
+    expect({ status: own.status, hotel: own.body.data?.hotelId, leaks: leaksIn(own.body) }).toEqual({ status: 200, hotel: B1, leaks: [] });
+    expect(own.body.data.hotels.map((h) => h.id).filter((id) => [A1, A2, A3].includes(id))).toEqual([]);
+    const other = await C.other.get(`${BASE}/reorder`);
+    expect({ status: other.status, hotel: other.body.data?.hotelId, leaks: leaksIn(other.body, SECRETS_A1) })
+      .toEqual({ status: 200, hotel: A2, leaks: [] });
+    expect(other.body.data.hotels.map((h) => h.id)).toEqual([A2]);
+
+    const mine = await C.aAll.get(`${BASE}/reorder?hotelId=${A1}`);
+    expect({ status: mine.status, can: mine.body.data?.can }).toEqual({ status: 200, can: { createMrDraft: true } });
+    await grantNoPerm("inventory.update", A1);
+    const readOnly = await C.noPerm.get(`${BASE}/reorder?hotelId=${A1}`);
+    expect({ status: readOnly.status, can: readOnly.body.data?.can }).toEqual({ status: 200, can: { createMrDraft: false } });
   });
 });
 
@@ -1231,10 +1633,11 @@ describe("company-level routes", () => {
     const v = () => (row.key === "POST /items" ? nextVariant() : undefined);
 
     // B naming Company A: refused exactly as naming a company that does not exist.
-    const named = await send(C.bAll, row.req(CO_A, v()));
-    const bogus = await send(C.bAll, row.req(BOGUS, v()));
+    const namedSpec = row.req(CO_A, v());
+    const bogusSpec = row.req(BOGUS, v());
+    const named = await send(C.bAll, namedSpec);
     await expectRefused(named, { route, actor: "B naming A", status: 403 });
-    expect({ route, oracle: signature(named) }).toEqual({ route, oracle: signature(bogus) });
+    await expectSame({ route, actor: "B naming A" }, named, namedSpec, await send(C.bAll, bogusSpec), bogusSpec);
 
     // B on its own: B's company, nothing of A's.
     if (!row.mutates) {
@@ -1269,13 +1672,15 @@ describe("vendor routes", () => {
 
     const other = await send(C.otherVendor, real);
     await expectRefused(other, { route, actor: "another vendor", status: 404 });
-    const missing = await send(C.otherVendor, row.req({ ...ids, [row.idKey]: BOGUS }));
-    expect({ route, oracle: signature(other) }).toEqual({ route, oracle: signature(missing) });
+    const missingSpec = row.req({ ...ids, [row.idKey]: BOGUS });
+    await expectSame({ route, actor: "another vendor" }, other, real, await send(C.otherVendor, missingSpec), missingSpec);
 
     for (const [i, probe] of (row.ownerForeign?.() ?? []).entries()) {
-      const res = await send(C.vendor, probe);
-      expect({ route, probe: i, status: res.status, leaks: leaksIn(res.body, ["ISO-B"]) })
-        .toEqual({ route, probe: i, status: 404, leaks: [] });
+      const actor = `PO owner foreign #${i}`;
+      const res = await send(C.vendor, probe.spec);
+      expect({ route, actor, status: res.status, leaks: leaksIn(res.body, ["ISO-B"]) })
+        .toEqual({ route, actor, status: probe.expect, leaks: [] });
+      await expectSame({ route, actor }, res, probe.spec, await send(C.vendor, probe.twin), probe.twin);
     }
 
     const good = await send(C.vendor, real);

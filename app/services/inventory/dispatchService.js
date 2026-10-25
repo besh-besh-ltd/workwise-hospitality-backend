@@ -38,7 +38,8 @@ const positiveInt = (v) => {
   return Number.isInteger(n) && n > 0 ? n : null;
 };
 
-const notFound = (poId) => new InventoryError('NOT_FOUND', 'Purchase order not found', { poId: poId ?? null });
+// One body for a missing PO and someone else's: no details to tell them apart.
+const notFound = () => new InventoryError('NOT_FOUND', 'Purchase order not found');
 
 /**
  * The PO, locked or not, when `actor` is its vendor (or the system); NOT_FOUND
@@ -47,18 +48,18 @@ const notFound = (poId) => new InventoryError('NOT_FOUND', 'Purchase order not f
  */
 async function ownedPo(t, actor, poId, { forUpdate = false } = {}) {
   const id = positiveInt(poId);
-  if (!id) throw notFound(poId);
+  if (!id) throw notFound();
   let ctx;
   try {
     ctx = await getPoContext(t, id, { forUpdate });
   } catch (err) {
-    if (err instanceof InventoryError && err.code === 'NOT_FOUND') throw notFound(id);
+    if (err instanceof InventoryError && err.code === 'NOT_FOUND') throw notFound();
     throw err;
   }
   if (actor?.system === true) return ctx;
   const userId = positiveInt(actor?.id);
-  if (!userId || Number(actor?.user_type) !== 3 || ctx.vendorId !== userId) throw notFound(id);
-  if (INVALID_PO_STATUSES_FOR_VENDOR.includes(String(ctx.status))) throw notFound(id);
+  if (!userId || Number(actor?.user_type) !== 3 || ctx.vendorId !== userId) throw notFound();
+  if (INVALID_PO_STATUSES_FOR_VENDOR.includes(String(ctx.status))) throw notFound();
   return ctx;
 }
 
