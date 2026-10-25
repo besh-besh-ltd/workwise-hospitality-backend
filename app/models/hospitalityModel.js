@@ -996,40 +996,26 @@ const hospitalityModel = {
     );
   },
 
+  // A company-level grant covers every hotel of the company; a hotel-level
+  // grant covers that hotel only. EXISTS, not a single-row read: a user can
+  // hold the same grant more than once (legacy rows from before the unique
+  // key was NULLS NOT DISTINCT), and oneOrNone threw on them, which 500'd
+  // the RFQ draft save for that user.
   userHasContext: async (userId, companyId, hotelId = null) => {
-    const params = [userId, companyId];
-    let condition = '';
-    if (hotelId) {
-      params.push(hotelId);
-      condition = `AND hum.hospitality_hotel_id = $3 AND hum.mapping_type = 1`;
-    } else {
-      condition = `AND hum.mapping_type = 0 AND hum.hospitality_hotel_id IS NULL`;
-    }
-
-    const row = await db.oneOrNone(
-      `SELECT 1
-       FROM tbl_hospitality_user_mappings hum
-       WHERE hum.user_id = $1
-         AND hum.hospitality_company_id = $2
-         ${condition}`,
-      params
+    const row = await db.one(
+      `SELECT EXISTS (
+         SELECT 1
+           FROM tbl_hospitality_user_mappings hum
+          WHERE hum.user_id = $1
+            AND hum.hospitality_company_id = $2
+            AND (
+                 (hum.mapping_type = 0 AND hum.hospitality_hotel_id IS NULL)
+              OR ($3::int IS NOT NULL AND hum.mapping_type = 1 AND hum.hospitality_hotel_id = $3::int)
+            )
+       ) AS ok`,
+      [userId, companyId, hotelId || null]
     );
-
-    if (!row && hotelId) {
-      // allow company level access to cover hotels
-      const companyLevelAccess = await db.oneOrNone(
-        `SELECT 1
-         FROM tbl_hospitality_user_mappings hum
-         WHERE hum.user_id = $1
-           AND hum.hospitality_company_id = $2
-           AND hum.mapping_type = 0
-           AND hum.hospitality_hotel_id IS NULL`,
-        [userId, companyId]
-      );
-      return Boolean(companyLevelAccess);
-    }
-
-    return Boolean(row);
+    return row.ok;
   },
 
   saveCompanyDocument: async (companyId, documentType, documentUrl, documentNumber = null) => {
