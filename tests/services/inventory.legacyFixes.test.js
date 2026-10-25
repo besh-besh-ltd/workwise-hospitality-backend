@@ -216,11 +216,11 @@ const siteRepRows = (poId) =>
     [poId]
   );
 
-/** The token in the newest site-rep mail sent to `email` (from its /receive/token?t= link). */
+/** The token in the newest site-rep mail sent to `email` (from its /receive/token#t= link). */
 function tokenMailedTo(email) {
   const mail = [...sentMail].reverse().find((m) => [].concat(m.to).includes(email));
   if (!mail) throw new Error(`no mail to ${email}`);
-  const m = /\/receive\/token\?t=([A-Za-z0-9_-]+)/.exec(mail.html);
+  const m = /\/receive\/token#t=([A-Za-z0-9_-]+)/.exec(mail.html);
   if (!m) throw new Error(`no receive link in mail to ${email}`);
   return { token: m[1], mail };
 }
@@ -285,6 +285,11 @@ describe("site representative", () => {
 
     const { token, mail } = tokenMailedTo("ravi.site@example.test");
     expect(sha256(token)).toBe(row.token_hash);
+    // The token rides in the URL fragment, which browsers never send: it stays
+    // out of frontend, proxy and load-balancer access logs.
+    const front = (process.env.FRONT_END_WEBSITE || "https://hospitality.letsworkwise.com").replace(/\/+$/, "");
+    expect(mail.html).toContain(`href="${front}/receive/token#t=${token}"`);
+    expect(mail.html).not.toContain(`?t=${token}`);
     expect(mail.html).not.toContain("/dashboard/buyer/purchase-order/grn");
     // The buyer's response never carries the credential.
     expect(JSON.stringify(res.body)).not.toContain(token);
@@ -876,7 +881,7 @@ describe("phase-due sweeper: site-rep emails", () => {
       const first = await runPhaseDueSweep({ conn: t, today: TODAY, notify });
       expect(first).toMatchObject({ digests: 0, siteRepEmails: 1 });
       expect(mailsToRep()).toHaveLength(1);
-      expect(mailsToRep()[0].html).not.toMatch(/receive\/token\?t=/);
+      expect(mailsToRep()[0].html).not.toMatch(/receive\/token[?#]t=/);
 
       // Second run, same day: the digest is tried again, the rep is not re-emailed.
       const second = await runPhaseDueSweep({ conn: t, today: TODAY, notify });

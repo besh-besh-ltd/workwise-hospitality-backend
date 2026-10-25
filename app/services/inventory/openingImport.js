@@ -11,14 +11,28 @@
 //
 // Preview unitCost, like the post body's, is per STOCK unit (the sheet's cost
 // per Unit divided by the unit factor).
+//
+// Live stock is never reset. Once the hotel's stock has started
+// (stock_started_at, stamped by the first import or the first approved FULL
+// count), a row is refused when its item has any movement at the hotel other
+// than OPENING posted at or after that moment: the import would silently undo
+// those receipts and mark-outs. A count or an adjustment corrects such items.
+// Items untouched since the start still import (a second department's sheet a
+// few days later), and an unchanged re-upload posts zero deltas. Before the
+// start nothing is refused: R1 receipts are expected, and the import posts
+// deltas against them.
+//
+// A count freeze (spec §8.5) blocks the post; preview reports it.
 
 import ExcelJS from 'exceljs';
 import { InventoryError } from './errors.js';
 import { assertHotelPermission } from './scope.js';
+import { getEffectiveSettings } from './settings.js';
 import { nextDocNumber } from './docNumber.js';
 import { postMovements } from './ledger.js';
 import { resolveItemForVariant } from './items.js';
 import { resolveUomFactor, normalizeUomLabel } from './uom.js';
+import { assertNotFrozen, freezingCount, lockBalances } from './stockCommon.js';
 
 export const MAX_ROWS = 5000;
 
@@ -110,12 +124,54 @@ const parseNumber = (s) => {
   return Number.isFinite(n) ? n : null;
 };
 
+const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+const IST_OFFSET_MS = 330 * 60 * 1000;
+
+/** "25 Oct 2026": the IST calendar day of a timestamp. */
+function istDay(ts) {
+  const d = new Date(new Date(ts).getTime() + IST_OFFSET_MS);
+  return `${d.getUTCDate()} ${MONTHS[d.getUTCMonth()]} ${d.getUTCFullYear()}`;
+}
+
+const activitySinceStart = (startedAt) =>
+  `Has stock activity since stock started on ${istDay(startedAt)}: use a count or an adjustment`;
+
+/**
+ * Which of `invItemIds` moved at the hotel since its stock started: any
+ * movement but OPENING, posted at or after stock_started_at (compared in SQL,
+ * at full precision). Nothing has, while stock has not started.
+ * @returns {Promise<{startedAt:Date|null, moved:Set<number>}>}
+ */
+async function movedSinceStart(t, { companyId, hotelId, invItemIds }) {
+  const hs = await t.oneOrNone(
+    `SELECT stock_started_at FROM tbl_inv_hotel_settings WHERE hotel_id = $1 AND hospitality_company_id = $2`,
+    [hotelId, companyId]
+  );
+  const startedAt = hs?.stock_started_at ?? null;
+  if (!startedAt || !invItemIds.length) return { startedAt, moved: new Set() };
+  const rows = await t.any(
+    `SELECT DISTINCT m.inv_item_id
+       FROM tbl_inv_movement m
+       JOIN tbl_inv_hotel_settings hs ON hs.hotel_id = m.hotel_id
+      WHERE m.hotel_id = $1
+        AND m.inv_item_id = ANY($2::int[])
+        AND m.movement_type <> 'OPENING'
+        AND m.posted_at >= hs.stock_started_at`,
+    [hotelId, invItemIds]
+  );
+  return { startedAt, moved: new Set(rows.map((r) => Number(r.inv_item_id))) };
+}
+
 /**
  * @param {Buffer} buffer the uploaded xlsx
- * @returns {{rows:Array, okCount:number, errorCount:number}}
+ * @returns {{rows:Array, okCount:number, errorCount:number, stockStartedAt:string|null, countFreeze:boolean}}
+ *   stockStartedAt: the hotel's stock start (ISO), null before it; countFreeze:
+ *   a count freeze would refuse the post right now (the company's setting is on
+ *   and a count is open at the hotel).
  */
 export async function previewOpeningStock(t, user, hotelId, buffer) {
   const { companyId } = await assertHotelPermission(t, user, { resource: 'inventory', action: 'admin', hotelId });
+  const hotel = Number(hotelId);
   if (!buffer || !buffer.length) throw bad('Attach the opening stock .xlsx file', 'file');
   const sheet = await readSheet(buffer);
 
@@ -268,14 +324,32 @@ export async function previewOpeningStock(t, user, hotelId, buffer) {
     seenItems.add(res.invItemId);
   }
 
+  // Live stock: an item that moved since the start is not the sheet's to reset.
+  const { startedAt, moved } = await movedSinceStart(t, { companyId, hotelId: hotel, invItemIds: [...seenItems] });
+  for (const r of out) {
+    if (!r.error && r.invItemId && moved.has(r.invItemId)) r.error = activitySinceStart(startedAt);
+  }
+
   const errorCount = out.filter((r) => r.error).length;
-  return { rows: out, okCount: out.length - errorCount, errorCount };
+  const settings = await getEffectiveSettings(t, { companyId, hotelId: hotel });
+  return {
+    rows: out,
+    okCount: out.length - errorCount,
+    errorCount,
+    stockStartedAt: settings.stockStartedAt,
+    countFreeze: (await freezingCount(t, { companyId, hotelId: hotel })) != null,
+  };
 }
 
 /**
  * Posts opening stock as one OPENING adjustment: for every row a movement of
  * (target stockQty - current balance) at the row's unit cost. All or nothing.
  * Replays of the same clientEventId return the original document.
+ *
+ * Refused: LOCKED {countId, countNumber} during a count freeze; VALIDATION
+ * {field:'rows', rows:[{index, invItemId, error}]} for bad rows, including an
+ * item that moved since the hotel's stock started (checked under the balance
+ * locks).
  *
  * @returns {Promise<{result:{adjustmentId:number, adjustmentNumber:string}, audit:object}>}
  */
@@ -303,6 +377,8 @@ export async function postOpeningStock(t, user, hotelId, rows, clientEventId) {
       audit: { companyId, hotelId: hotel, label: prior.adjustment_number },
     };
   }
+  // A replay (above) still answers during a count freeze; a new import waits.
+  await assertNotFrozen(t, { companyId, hotelId: hotel });
 
   // Validate every row before touching anything. A row with invItemId null
   // names a catalogue variant plus the stock unit its item will be created with.
@@ -381,19 +457,44 @@ export async function postOpeningStock(t, user, hotelId, rows, clientEventId) {
     });
   }
 
-  // Number first, then the balance locks (ledger lock order).
+  // Lock order: item rows (created above) → doc sequence → balances → settings.
   const adjustmentNumber = await nextDocNumber(t, { hotelId: hotel, docType: 'ADJ' });
   clean.sort((a, b) => a.invItemId - b.invItemId);
-  const current = new Map(
-    (
-      await t.any(
-        `SELECT inv_item_id, qty::text AS qty FROM tbl_inv_balance
-          WHERE hotel_id = $1 AND inv_item_id = ANY($2::int[]) ORDER BY inv_item_id FOR UPDATE`,
-        [hotel, clean.map((r) => r.invItemId)]
-      )
-    ).map((b) => [Number(b.inv_item_id), Number(b.qty)])
+
+  // The balance rows, locked in ledger order, with the missing ones inserted
+  // first (lockBalances create): postMovements then never inserts while it
+  // holds other rows' locks, and an item's first receipt committing meanwhile
+  // is waited for rather than missed. Only items that will post get a row: a
+  // target above 0 posts against a missing row; a target of 0 posts only
+  // against an existing one (one appearing after this read is left alone).
+  const zeroTargets = clean.filter((r) => r.stockQty === 0).map((r) => r.invItemId);
+  const zeroWithRow = new Set(
+    zeroTargets.length
+      ? (await t.any(`SELECT inv_item_id FROM tbl_inv_balance WHERE hotel_id = $1 AND inv_item_id = ANY($2::int[])`, [
+        hotel, zeroTargets,
+      ])).map((b) => Number(b.inv_item_id))
+      : []
   );
-  for (const r of clean) r.delta = round4(r.stockQty - (current.get(r.invItemId) ?? 0));
+  const current = await lockBalances(t, {
+    companyId,
+    hotelId: hotel,
+    invItemIds: clean.filter((r) => r.stockQty > 0 || zeroWithRow.has(r.invItemId)).map((r) => r.invItemId),
+    create: true,
+  });
+
+  // Under those locks, so a mark-out or receipt cannot slip in between the
+  // check and the post: an item that moved since stock started is refused.
+  const { startedAt, moved } = await movedSinceStart(t, {
+    companyId, hotelId: hotel, invItemIds: clean.map((r) => r.invItemId),
+  });
+  const live = clean.filter((r) => moved.has(r.invItemId)).sort((a, b) => a.index - b.index);
+  if (live.length) {
+    throw new InventoryError('VALIDATION', `${live.length} row(s) have errors: fix them and try again`, {
+      field: 'rows',
+      rows: live.map((r) => ({ index: r.index, invItemId: r.invItemId, error: activitySinceStart(startedAt) })),
+    });
+  }
+  for (const r of clean) r.delta = round4(r.stockQty - (current.get(r.invItemId)?.qty ?? 0));
 
   const adj = await t.one(
     `INSERT INTO tbl_inv_adjustment
