@@ -179,6 +179,15 @@ export async function executeApprovalAction(args) {
   // 1. Run the underlying transactional model action (status updates only).
   const result = await submitApprovalActionModel(args);
 
+  // A replay: the instance had already concluded (or this approver had already
+  // given this decision), so nothing was decided now. submitApprovalAction
+  // answers an already-concluded instance BEFORE its approver check, so the
+  // caller need not be an approver at all, and re-running the post-approval
+  // handler here re-drafted the award's PO (cancelling the one awaiting
+  // approval) and re-sent the outcome mail on behalf of whoever replayed it.
+  // The handler and the notifications ran when the decision was made.
+  if (result.already_completed) return result;
+
   // 2. Dispatch entity-specific post-action only if the instance terminally transitioned.
   if (result.instance_status === 'APPROVED' || result.instance_status === 'REJECTED') {
     await dispatchPostApprovalAction(args.approval_instance_id, args.approver_user_id, {

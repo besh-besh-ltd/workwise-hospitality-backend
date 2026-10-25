@@ -151,23 +151,70 @@ export async function bindFinalizeAward(dbCtx, { body, rfqProductId }) {
   });
 }
 
+const INSTANCE_NOT_ON_RFQ = "This approval's award is not for a product of an RFQ of its company.";
+
+/**
+ * The approval instance must be its own company's award: the RFQ the metadata
+ * names belongs to the instance's hospitality company, and the instance's
+ * product (entity_id) is on that RFQ. The metadata is written by the server
+ * flow that opened the instance, but the binding below only ties the quote
+ * ids to `metadata.rfq_id`; an instance whose metadata names another
+ * company's RFQ (one opened through the generic submit route before it was
+ * closed to these types) would bind against that company's quotes and draft
+ * a PO on its RFQ. One 404 whatever the reason.
+ *
+ * @param {object} dbCtx
+ * @param {object} instance  the tbl_approval_instances row (hospitality_company_id, entity_id)
+ * @param {*} rfqId          the RFQ the instance's metadata awards
+ * @throws PoDecisionError 404 AWARD_QUOTE_NOT_FOUND
+ */
+async function bindInstanceToRfq(dbCtx, instance, rfqId) {
+  const company = toId(instance?.hospitality_company_id);
+  const rfqProduct = toId(instance?.entity_id);
+  const rfq = toId(rfqId);
+  if (!company || !rfqProduct || !rfq) throw notFound(INSTANCE_NOT_ON_RFQ);
+  const row = await dbCtx.oneOrNone(
+    `SELECT 1
+       FROM tbl_rfq r
+       JOIN tbl_rfq_products rp ON rp.id = $2 AND rp.rfq_id = r.id
+      WHERE r.id = $1 AND r.hospitality_company_id = $3`,
+    [rfq, rfqProduct, company]
+  );
+  if (!row) throw notFound(INSTANCE_NOT_ON_RFQ);
+}
+
+/** Does this approval instance belong to the company that owns `rfqId`? (No throw.) */
+export async function instanceOwnsRfq(dbCtx, instance, rfqId) {
+  try {
+    await bindInstanceToRfq(dbCtx, instance, rfqId);
+    return true;
+  } catch (e) {
+    if (e instanceof PoDecisionError) return false;
+    throw e;
+  }
+}
+
 /**
  * A NEGOTIATION_QUOTE approval's parked award (metadata.po_payload, written by
  * finalize), checked before the approval that turns it into a PO is recorded.
- * The payload must bind (bindPoPayload) and must be the award of the product
- * the instance is for (entity_id is the rfq_product id) on the RFQ the
- * instance names. An instance with no po_payload has nothing to bind.
+ * The instance must be its company's award of a product on that company's
+ * RFQ (bindInstanceToRfq); the payload must bind (bindPoPayload) and must be
+ * the award of the product the instance is for (entity_id is the rfq_product
+ * id) on the RFQ the instance names. An instance with no po_payload has
+ * nothing to bind.
  *
  * @param {object} dbCtx
- * @param {object} instance  { entity_id, metadata }
+ * @param {object} instance  the tbl_approval_instances row: { entity_id, hospitality_company_id, metadata }
  * @throws PoDecisionError as bindAwardQuote
  */
-export async function bindParkedAward(dbCtx, { entity_id: entityId, metadata } = {}) {
+export async function bindParkedAward(dbCtx, instance = {}) {
+  const { entity_id: entityId, metadata } = instance;
   const meta = typeof metadata === 'string' ? JSON.parse(metadata) : (metadata || {});
   const payload = meta.po_payload;
   if (!payload) return null;
   if (toId(payload.product_info?.rfq_product_id) !== toId(entityId)) throw mismatch(OTHER_AWARDED_PRODUCT);
   if (meta.rfq_id != null && toId(meta.rfq_id) !== toId(payload.rfq_id)) throw notFound(NOT_ON_RFQ);
+  await bindInstanceToRfq(dbCtx, instance, payload.rfq_id);
   return bindPoPayload(dbCtx, payload);
 }
 
@@ -196,11 +243,15 @@ const SELECTED_NOT_ON_PRODUCT = "A selected quote is not this RFQ product's quot
  * never says whether a foreign quote exists. An instance without
  * selected_quotes, or without the rfq_id the award needs, has nothing to bind.
  *
+ * The instance must be its company's award of a product on that company's
+ * RFQ first (bindInstanceToRfq).
+ *
  * @param {object} dbCtx
- * @param {object} instance  { entity_id, metadata }
+ * @param {object} instance  the tbl_approval_instances row: { entity_id, hospitality_company_id, metadata }
  * @throws PoDecisionError 404 AWARD_QUOTE_NOT_FOUND | 400 AWARD_QUOTE_MISMATCH
  */
-export async function bindSelectedQuotes(dbCtx, { entity_id: entityId, metadata } = {}) {
+export async function bindSelectedQuotes(dbCtx, instance = {}) {
+  const { entity_id: entityId, metadata } = instance;
   const meta = typeof metadata === 'string' ? JSON.parse(metadata) : (metadata || {});
   const entries = meta.selected_quotes;
   if (!Array.isArray(entries) || entries.length === 0 || meta.rfq_id == null) return null;
@@ -208,6 +259,7 @@ export async function bindSelectedQuotes(dbCtx, { entity_id: entityId, metadata 
   const rfq = toId(meta.rfq_id);
   const rfqProduct = toId(entityId);
   if (!rfq || !rfqProduct) throw mismatch(BAD_IDS);
+  await bindInstanceToRfq(dbCtx, instance, rfq);
 
   for (const entry of entries) {
     const quote = toId(entry?.quote_id);
@@ -243,3 +295,38 @@ export async function bindSelectedQuotes(dbCtx, { entity_id: entityId, metadata 
 
 /** The refusal for a quote line that is not (or no longer) on its RFQ. */
 export const awardQuoteNotFound = () => notFound(NOT_ON_RFQ);
+
+/**
+ * The vendor quote line a selected_quotes entry is priced from, on this RFQ
+ * product (null when the vendor has no line for it).
+ *
+ * Never the entry's own quoted_price. That figure is parked in the instance
+ * metadata, and for a negotiation-round entry it is the round quote's
+ * quoted_price, which is the landed LINE total the vendor re-quoted
+ * (rfqController writes quoteItem.total_price into it), not a unit price:
+ * pricing the PO line's unit_price from it multiplied the award by the
+ * quantity. The vendor's re-quote updates their quote line itself, so the line
+ * carries the negotiated rate either way.
+ *   - a regular entry: the line of the very quote that was selected;
+ *   - a round entry:   the vendor's latest line for this product on this RFQ.
+ *
+ * @param {object} dbCtx
+ * @param {object} args { rfqId, rfqProductId, entry }
+ * @returns {Promise<{quote_item_id:number, quantity:string}|null>}
+ */
+export async function selectedQuoteLine(dbCtx, { rfqId, rfqProductId, entry }) {
+  const fromRound = entry?.negotiation_round_id !== undefined;
+  return dbCtx.oneOrNone(
+    `SELECT qi.id AS quote_item_id, qi.quantity
+       FROM tbl_quote_items qi
+       JOIN tbl_quotes q ON q.id = qi.quote_id
+       JOIN tbl_rfq_products rp ON rp.id = $2 AND rp.rfq_id = q.rfq_id
+      WHERE q.rfq_id = $1 AND qi.rfq_id = q.rfq_id AND q.created_by = $3
+        AND qi.product_variant_id = rp.product_variant_id
+        AND qi.variant IS NOT DISTINCT FROM rp.variant
+        AND ($4::int IS NULL OR q.id = $4::int)
+      ORDER BY q.timestamp DESC, qi.id DESC
+      LIMIT 1`,
+    [toId(rfqId), toId(rfqProductId), toId(entry?.vendor_id), fromRound ? null : toId(entry?.quote_id)]
+  );
+}

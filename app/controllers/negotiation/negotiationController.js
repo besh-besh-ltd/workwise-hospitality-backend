@@ -47,7 +47,8 @@ const formatRoundDeadlineIst = (endDate) => {
 import { draftPO, buildAuthoritativePOPayload } from '../po/purchaseOrderController.js';
 import { notifyDraftCreated } from '../../services/po/poInitiateNotifier.js';
 import { PoDecisionError } from '../../services/po/poDecisionError.js';
-import { bindParkedAward, bindSelectedQuotes } from '../../services/po/awardQuoteBinding.js';
+import { bindParkedAward, bindSelectedQuotes, selectedQuoteLine } from '../../services/po/awardQuoteBinding.js';
+import { recordApprovedWithoutPo } from '../general/negotiationQuotePostApproval.js';
 import { isApproverOnCurrentStep, NOT_AN_APPROVER_MESSAGE } from '../../services/approvalMembership.js';
 import { buildDraftedPos } from '../../models/po/poInitiateGuide.js';
 import { initiatePurchaseOrder, assertDraftMergeTarget } from '../../models/purchaseOrderModel.js';
@@ -550,8 +551,25 @@ const handleNegotiationPostApproval = async (approval_instance_id, approver_user
           `rfq_product_id=${rfq_product_id}): ${legacyScreen.message}`
         );
       }
+      // The legacy selection must bind like any other (bindSelectedQuotes):
+      // each entry a quote of this RFQ product by its vendor, on an RFQ of the
+      // instance's own company. Fail closed, like the screen above.
+      let legacyBound = legacyScreen.ok;
+      if (legacyBound) {
+        try {
+          await bindSelectedQuotes(t, { ...instance, entity_id: rfq_product_id, metadata });
+        } catch (bindError) {
+          if (!(bindError instanceof PoDecisionError)) throw bindError;
+          legacyBound = false;
+          logError(
+            `Legacy NEGOTIATION post-approval award BLOCKED: selected_quotes do not bind ` +
+            `(approval_instance_id=${approval_instance_id}, rfq_id=${rfq_id}, ` +
+            `rfq_product_id=${rfq_product_id}): ${bindError.code}`
+          );
+        }
+      }
       // Get RFQ data
-      const rfq = legacyScreen.ok
+      const rfq = legacyBound
         ? await t.oneOrNone(`SELECT * FROM tbl_rfq WHERE id = $1`, [rfq_id])
         : null;
 
@@ -3122,7 +3140,10 @@ const NegotiationController = {
       //     this RFQ product by its vendor. Submit binds them now, but before
       //     the round-quote ids were scoped it accepted any round quote, and
       //     the branch below awards each entry and prices its PO line from it.
-      const bindTarget = { entity_id: rfq_product_id, metadata: guardMeta };
+      // The instance row itself: the binders check its company owns the RFQ
+      // the metadata awards (an instance opened before the generic submit
+      // route was closed to this type could name another company's RFQ).
+      const bindTarget = { ...pendingInstance, metadata: guardMeta };
       await bindParkedAward(db, bindTarget);
       await bindSelectedQuotes(db, bindTarget);
 
@@ -3151,6 +3172,8 @@ const NegotiationController = {
 
       const isFullyApproved = result.instance_status === 'APPROVED';
       let arcApprovalCreated = false;
+      // Set when the approval committed but its PO was refused (Path A below).
+      let poNotDrafted = null;
 
       // 3. If fully approved, add to finalization and create ARC
       if (isFullyApproved) {
@@ -3165,29 +3188,50 @@ const NegotiationController = {
             poPayload.existing_po_id = mergeTargetId;
           }
 
-          await db.tx(async (t) => {
-            // The approval has committed: a target (the approver's or the one
-            // parked at finalize) that is no longer a draft of this RFQ for the
-            // vendor is set aside under the PO lock, not refused.
-            const authPayload = await buildAuthoritativePOPayload(poPayload, t);
-            const poResult = await draftPO(authPayload, metadata.po_user, t, { staleTargetFallback: true });
-            if (poResult?.po_id) { draftedPoIds.push(poResult.po_id); draftedRfqId = metadata.rfq_id; if (poResult.created) createdPoIds.push(poResult.po_id); }
+          try {
+            await db.tx(async (t) => {
+              // The approval has committed: a target (the approver's or the one
+              // parked at finalize) that is no longer a draft of this RFQ for the
+              // vendor is set aside under the PO lock, not refused.
+              const authPayload = await buildAuthoritativePOPayload(poPayload, t);
+              const poResult = await draftPO(authPayload, metadata.po_user, t, { staleTargetFallback: true });
+              if (poResult?.po_id) { draftedPoIds.push(poResult.po_id); draftedRfqId = metadata.rfq_id; if (poResult.created) createdPoIds.push(poResult.po_id); }
 
-            await recordLifecycleEvent({
-              entity_type: metadata.is_tender === 1 ? 'TENDER' : 'RFQ',
-              entity_id: metadata.rfq_id,
-              stage: 'NEGOTIATION_QUOTES_APPROVED',
-              action: 'APPROVE',
-              performed_by: user_id,
-              metadata: {
-                approval_instance_id: pendingInstance.id,
-                rfq_product_id: metadata.rfq_product_id,
-                vendor_id: metadata.vendor_id,
-                quote_id: metadata.quote_id
-              },
-              txContext: t
+              await recordLifecycleEvent({
+                entity_type: metadata.is_tender === 1 ? 'TENDER' : 'RFQ',
+                entity_id: metadata.rfq_id,
+                stage: 'NEGOTIATION_QUOTES_APPROVED',
+                action: 'APPROVE',
+                performed_by: user_id,
+                metadata: {
+                  approval_instance_id: pendingInstance.id,
+                  rfq_product_id: metadata.rfq_product_id,
+                  vendor_id: metadata.vendor_id,
+                  quote_id: metadata.quote_id
+                },
+                txContext: t
+              });
             });
-          });
+          } catch (refusal) {
+            // The approval above HAS committed; only the PO was refused (the
+            // product's PO went on hold between the checks and now, say). The
+            // answer must not read "nothing was approved": record the approved
+            // award without a PO on the timeline, as the engine's handler
+            // does, and say so in a success body.
+            if (!(refusal instanceof PoDecisionError)) throw refusal;
+            logError(
+              `[approveQuotes] NEGOTIATION_QUOTE approval_instance_id=${pendingInstance.id} is APPROVED ` +
+              `but its PO was refused (${refusal.code}): NO purchase order was drafted.`,
+              refusal
+            );
+            await recordApprovedWithoutPo({
+              instance,
+              approverUserId: user_id,
+              metadata,
+              reason: refusal.code || 'PO_PAYLOAD_REFUSED',
+            });
+            poNotDrafted = { code: refusal.code, message: refusal.message };
+          }
         } else if (metadata.rfq_id && metadata.selected_quotes?.length > 0) {
           const rfq = await rfqModel.checkIfExists('tbl_rfq', { where: 'id = $1', values: [metadata.rfq_id] });
           const rfqData = rfq[0];
@@ -3322,76 +3366,44 @@ const NegotiationController = {
               if (product) {
                 for (const selectedQuote of metadata.selected_quotes) {
                   try {
-                    // Get vendor's original quote item for quantity/unit.
+                    // The PO line is priced from the vendor's quote line, read
+                    // here (selectedQuoteLine) and repriced by
+                    // buildAuthoritativePOPayload, never from the entry's
+                    // quoted_price. That figure is parked in the instance
+                    // metadata, and for a negotiation-round entry it is the
+                    // round's landed LINE total, which this branch used to
+                    // write as the UNIT price: a line of quantity 50 was
+                    // drafted at 50x its value (the Path B arithmetic
+                    // negotiationQuotePostApproval documents and deleted).
                     //
-                    // `qi.unit` USED TO BE SELECTED HERE AND DOES NOT EXIST.
-                    // tbl_quote_items has no unit-of-measure column (see
-                    // tests/setup/schema.sql — the pg_dump of the real
-                    // database), so this query raised 42703 "column qi.unit does
-                    // not exist" on EVERY execution. The consequences were much
-                    // worse than a missing unit, because of where the failure
-                    // landed:
-                    //
-                    //   1. submitApprovalAction has already committed the
-                    //      approval on its own connection — the instance is
-                    //      APPROVED for good.
-                    //   2. This query runs inside the surrounding db.tx, AFTER
-                    //      addQuotesToFinalization has inserted the award and
-                    //      recordLifecycleEvent has logged it.
-                    //   3. It throws. The `catch (poError)` below swallows the
-                    //      JS error — but a failed statement has already put
-                    //      POSTGRES into an aborted transaction, which no JS
-                    //      catch can undo. pg-promise's COMMIT degrades to a
-                    //      ROLLBACK, silently discarding the award and the
-                    //      lifecycle row written in steps 2.
-                    //   4. The endpoint still answers 200 "Quotes fully approved
-                    //      and finalized".
-                    //
-                    // Net effect in production: on this branch the approval was
-                    // recorded, the caller was told the award succeeded, and
-                    // tbl_quote_finalization got nothing at all. Dropping the
-                    // phantom column is the whole fix — `unit` was already
-                    // written as `vendorQuoteItem.unit || 'N/A'` below, and the
-                    // fallback is now simply always taken, which is the value
-                    // the column could ever have produced anyway.
-                    const vendorQuoteItem = await t.oneOrNone(
-                      `SELECT qi.quantity, qi.unit_price, qi.id as quote_item_id,
-                              qi.freight_price, qi.freight_mode, qi.package_price, qi.package_mode, qi.tax, qi.tax_mode,
-                              qi.other_charges
-                       FROM tbl_quote_items qi
-                       JOIN tbl_quotes q ON q.id = qi.quote_id
-                       WHERE q.rfq_id = $1 AND qi.product_variant_id = $2 AND qi.variant = $3 AND q.created_by = $4
-                       ORDER BY q.timestamp DESC LIMIT 1`,
-                      [metadata.rfq_id, product.product_variant_id, product.variant, selectedQuote.vendor_id]
-                    );
+                    // Only SELECTs run before draftPO, so a refusal here is a
+                    // JS throw, not a failed statement that would abort the
+                    // surrounding transaction. (This query once selected a
+                    // phantom `qi.unit` column: the 42703 aborted the tx and
+                    // the COMMIT silently rolled the award back.)
+                    const quoteLine = await selectedQuoteLine(t, {
+                      rfqId: metadata.rfq_id,
+                      rfqProductId: rfq_product_id,
+                      entry: selectedQuote,
+                    });
 
-                    if (vendorQuoteItem) {
-                      const negotiationPrice = parseFloat(selectedQuote.quoted_price);
-                      const quantity = parseFloat(vendorQuoteItem.quantity) || 1;
-                      const totalValue = quantity * negotiationPrice;
-
-                      const poResult = await draftPO({
+                    if (quoteLine) {
+                      const authPayload = await buildAuthoritativePOPayload({
                         rfq_id: metadata.rfq_id,
                         project_id: rfqData.project_id,
-                        total_value: totalValue,
-                        quote_item_id: vendorQuoteItem.quote_item_id,
+                        quote_item_id: quoteLine.quote_item_id,
                         product_info: {
                           rfq_product_id,
-                          quantity: vendorQuoteItem.quantity,
-                          unit: vendorQuoteItem.unit || 'N/A',
-                          unit_price: negotiationPrice,
-                          charges_meta: {
-                            freight_price: vendorQuoteItem.freight_price,
-                            freight_mode: vendorQuoteItem.freight_mode,
-                            package_price: vendorQuoteItem.package_price,
-                            package_mode: vendorQuoteItem.package_mode,
-                            tax: vendorQuoteItem.tax,
-                            tax_mode: vendorQuoteItem.tax_mode,
-                            other_charges: vendorQuoteItem.other_charges || []
-                          },
+                          quantity: quoteLine.quantity,
+                          unit: 'N/A',
                           finalized_vendor_id: selectedQuote.vendor_id
                         }
-                      }, { id: instance.initiated_by || user_id, company_id: req.user.company_id }, t);
+                      }, t);
+                      const poResult = await draftPO(
+                        authPayload,
+                        { id: instance.initiated_by || user_id, company_id: req.user.company_id },
+                        t
+                      );
                       if (poResult?.po_id) { draftedPoIds.push(poResult.po_id); draftedRfqId = metadata.rfq_id; if (poResult.created) createdPoIds.push(poResult.po_id); }
                     }
                   } catch (poError) {
@@ -3423,18 +3435,24 @@ const NegotiationController = {
           instance_status: result.instance_status,
           next_step: result.next_step || null,
           arc_approval_created: arcApprovalCreated,
-          drafted_pos
+          drafted_pos,
+          ...(poNotDrafted ? { po_not_drafted: poNotDrafted } : {})
         },
-        message: isFullyApproved
-          ? (arcApprovalCreated
-              ? 'Quotes approved, finalized, and ARC approval submitted'
-              : 'Quotes fully approved and finalized')
-          : 'Approval recorded. Waiting for other approvers.'
+        message: poNotDrafted
+          ? `Quotes approved, but no purchase order was drafted: ${poNotDrafted.message}`
+          : isFullyApproved
+            ? (arcApprovalCreated
+                ? 'Quotes approved, finalized, and ARC approval submitted'
+                : 'Quotes fully approved and finalized')
+            : 'Approval recorded. Waiting for other approvers.'
       });
     } catch (error) {
-      // An award refused because the product's PO is on hold, or because its
-      // quotes do not bind to this RFQ product (1b'): its own status and code,
-      // the same body as every PO hold refusal. Nothing was approved.
+      // An award refused BEFORE the approval was recorded: the product's PO is
+      // on hold, its quotes do not bind to this RFQ product or to the
+      // instance's company (1b'), or the merge target is not a draft (1c). Its
+      // own status and code, the same body as every PO hold refusal. Nothing
+      // was approved. (A refusal after the approval committed is answered
+      // above, as an approval without a PO.)
       if (error instanceof PoDecisionError) {
         return res.status(error.httpStatus || 409).json({ status: 0, message: error.message, code: error.code });
       }

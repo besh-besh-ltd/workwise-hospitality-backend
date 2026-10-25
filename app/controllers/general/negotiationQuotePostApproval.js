@@ -10,17 +10,60 @@ import { autoInitiateRFQPOs } from '../../models/purchaseOrderModel.js';
 import rfqModel from '../../models/rfqModel.js';
 import db from '../../config/dbConn.js';
 import { PoDecisionError } from '../../services/po/poDecisionError.js';
+import { bindParkedAward, instanceOwnsRfq } from '../../services/po/awardQuoteBinding.js';
+
+/**
+ * Why an approved award drafted no PO, worded for the RFQ/Tender timeline,
+ * chosen by the refusal's code: a PO on hold or a merge target that went stale
+ * is not an award that "does not match", and the remark is what tells the
+ * buyer what to do next.
+ */
+export const noPoRemark = (code) => {
+  const head = 'Quote approval completed but no purchase order was drafted: ';
+  const rerun = ' Re-run commercial finalization for this product.';
+  switch (code) {
+    case 'MISSING_PO_PAYLOAD':
+      return `${head}the approval instance carries no po_payload.${rerun}`;
+    case 'AWARD_QUOTE_NOT_FOUND':
+    case 'AWARD_QUOTE_MISMATCH':
+      return `${head}the approved award does not match a quote of this RFQ product by its vendor.${rerun}`;
+    case 'PO_ON_HOLD':
+      return `${head}the purchase order already raised for this product is on hold, waiting for information. ` +
+        'Answer or withdraw that request, then re-run commercial finalization for this product.';
+    case 'PO_MERGE_TARGET_INVALID':
+      return `${head}the purchase order chosen to merge the award into is no longer a draft of this RFQ for the vendor.${rerun}`;
+    default:
+      return `${head}the purchase order could not be drafted (${code || 'unknown reason'}).${rerun}`;
+  }
+};
 
 /**
  * An APPROVED quote approval that did not become a PO, on the RFQ/Tender
- * timeline: the NEGOTIATION_QUOTES_APPROVED_NO_PO lifecycle row. Best effort:
- * the approval has already committed, so a failure here is logged, never
- * thrown.
+ * timeline: the NEGOTIATION_QUOTES_APPROVED_NO_PO lifecycle row, its remark
+ * chosen by `reason` (noPoRemark). Written only to the timeline of an RFQ the
+ * instance's own company owns: an instance whose metadata names another
+ * company's RFQ (a forged one) is logged, never written onto that RFQ. Best
+ * effort: the approval has already committed, so a failure here is logged,
+ * never thrown.
+ *
+ * @param {object} args
+ * @param {object} args.instance        the tbl_approval_instances row
+ * @param {number} args.approverUserId
+ * @param {object} args.metadata        the instance's parsed metadata
+ * @param {string} args.reason          MISSING_PO_PAYLOAD or a PoDecisionError code
  */
-const recordApprovedWithoutPo = async ({ approval_instance_id, approver_user_id, metadata, rfqProductId, reason, remarks }) => {
+export const recordApprovedWithoutPo = async ({ instance, approverUserId, metadata, reason }) => {
   const rfqId = metadata.rfq_id || null;
+  const rfqProductId = metadata.rfq_product_id || instance?.entity_id;
   if (!rfqId) return;
   try {
+    if (!(await instanceOwnsRfq(db, instance, rfqId))) {
+      logError(
+        `[negotiationQuotePostApproval] NO_PO not recorded: approval_instance_id=${instance?.id} ` +
+        `(company ${instance?.hospitality_company_id}) names rfq_id=${rfqId}, which is not its company's.`
+      );
+      return;
+    }
     // is_tender normally rides on the metadata (Path A reads it the same
     // way). Fall back to the RFQ row when it is absent so the event lands on
     // the right timeline either way.
@@ -35,13 +78,13 @@ const recordApprovedWithoutPo = async ({ approval_instance_id, approver_user_id,
       entity_id: rfqId,
       stage: 'NEGOTIATION_QUOTES_APPROVED_NO_PO',
       action: 'APPROVE',
-      performed_by: approver_user_id,
+      performed_by: approverUserId,
       metadata: {
-        approval_instance_id: parseInt(approval_instance_id),
+        approval_instance_id: parseInt(instance?.id),
         rfq_product_id: rfqProductId,
         reason,
       },
-      remarks,
+      remarks: noPoRemark(reason),
     });
   } catch (lifecycleError) {
     logError(
@@ -92,6 +135,11 @@ export const handleNegotiationQuotePostApproval = async (approval_instance_id, a
       // Path A: PO payload stored by rfqController.finalize
       let txResult = null;
       try {
+        // The instance's own award: its company owns the RFQ and the payload
+        // binds to it. The approval surfaces check this before recording the
+        // approval; an instance completed without them (auto-completion) is
+        // checked here, and a refusal lands in the catch below.
+        await bindParkedAward(db, instance);
         await db.tx(async (t) => {
           // The approval is already recorded and must still get its PO: a merge
           // target parked at finalize that has since left draft is set aside
@@ -131,15 +179,10 @@ export const handleNegotiationQuotePostApproval = async (approval_instance_id, a
           refusal
         );
         await recordApprovedWithoutPo({
-          approval_instance_id,
-          approver_user_id,
+          instance,
+          approverUserId: approver_user_id,
           metadata,
-          rfqProductId: metadata.rfq_product_id || instance.entity_id,
           reason: refusal.code || 'PO_PAYLOAD_REFUSED',
-          remarks:
-            'Quote approval completed but no purchase order was drafted: the approved award ' +
-            'does not match a quote of this RFQ product by its vendor. Re-run commercial ' +
-            'finalization for this product.',
         });
         return;
       }
@@ -215,14 +258,10 @@ export const handleNegotiationQuotePostApproval = async (approval_instance_id, a
       );
 
       await recordApprovedWithoutPo({
-        approval_instance_id,
-        approver_user_id,
+        instance,
+        approverUserId: approver_user_id,
         metadata,
-        rfqProductId,
         reason: 'MISSING_PO_PAYLOAD',
-        remarks:
-          'Quote approval completed but no purchase order was drafted: the approval ' +
-          'instance carries no po_payload. Re-run commercial finalization for this product.',
       });
     }
   } catch (negQuoteError) {

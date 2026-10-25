@@ -324,6 +324,11 @@ describe("SECURITY: POST /approval/policies — cross-tenant CREATE", () => {
 });
 
 // ---------------------------------------------------------------------------
+// Every entity type the engine accepts is opened by its own server workflow,
+// which checks the entity's tenant and writes the metadata its post-approval
+// handler trusts. The generic route did neither (an RFQ instance forged on
+// another company's RFQ published it when approved), and no screen calls it,
+// so it now refuses every such type: 403 APPROVAL_TYPE_SERVER_OWNED.
 describe("SECURITY: POST /approval/submit — company from req.user, not the body", () => {
   it("a body-supplied company outside the caller's scope is refused", async () => {
     const client = await httpClient(IDS.users.companyA_admin);
@@ -345,7 +350,7 @@ describe("SECURITY: POST /approval/submit — company from req.user, not the bod
     expect(leaked).toBeNull();
   });
 
-  it("the same-tenant submit still creates the instance in the caller's company", async () => {
+  it("a same-tenant RFQ submit is refused too: RFQ approvals are opened by the RFQ's own workflow", async () => {
     const client = await httpClient(IDS.users.companyA_admin);
     const res = await client.post("/api/v1/general/hospitality/approval/submit").send({
       entity_type: "RFQ",
@@ -361,12 +366,12 @@ describe("SECURITY: POST /approval/submit — company from req.user, not the bod
     );
     if (row) made.instanceIds.push(row.id);
 
-    expect(res.status).toBe(201);
-    expect(row).not.toBeNull();
-    expect(row.hospitality_company_id).toBe(IDS.hospitality.A);
+    expect(res.status).toBe(403);
+    expect(res.body).toMatchObject({ status: 3, code: "APPROVAL_TYPE_SERVER_OWNED" });
+    expect(row).toBeNull();
   });
 
-  it("the super-admin (user_type 8) bypass is preserved", async () => {
+  it("the super-admin (user_type 8) is refused a server-owned type as well", async () => {
     const prev = await db.one(`SELECT user_type FROM tbl_users WHERE id=$1`, [IDS.users.superAdmin]);
     await db.none(`UPDATE tbl_users SET user_type = 8 WHERE id=$1`, [IDS.users.superAdmin]);
     try {
@@ -385,8 +390,9 @@ describe("SECURITY: POST /approval/submit — company from req.user, not the bod
       );
       if (row) made.instanceIds.push(row.id);
 
-      expect(res.status).toBe(201);
-      expect(row.hospitality_company_id).toBe(IDS.hospitality.B);
+      expect(res.status).toBe(403);
+      expect(res.body).toMatchObject({ status: 3, code: "APPROVAL_TYPE_SERVER_OWNED" });
+      expect(row).toBeNull();
     } finally {
       await db.none(`UPDATE tbl_users SET user_type = $2 WHERE id=$1`, [IDS.users.superAdmin, prev.user_type]);
     }

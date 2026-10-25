@@ -28,7 +28,8 @@ import generalModel, {
   checkIfUserIsFinalApprover,
   getApprovalPolicyTenant,
   getApprovalInstanceTenant,
-  getApprovalProcessTenant
+  getApprovalProcessTenant,
+  ENTITY_APPROVE_RESOURCE_MAP
 } from '../../models/generalModel.js';
 import { resolveHospitalityCompanyScope } from '../../helper/arc_v2/resolveHospitalityCompany.js';
 import { executeApprovalAction } from '../../services/approvalActionService.js';
@@ -503,6 +504,25 @@ async function guardPolicyTenant(req, res, policyId) {
   }
   return tenant;
 }
+
+// Entity types POST /hospitality/approval/submit refuses: every instance type
+// the engine accepts (createApprovalInstance rejects anything else).
+//
+// Each one is opened by its own server workflow (RFQ/TENDER publish, TECHNICAL
+// and NEGOTIATION rounds, finalize and submit-for-approval for
+// NEGOTIATION_QUOTE, PO initiate, MR, the ARC v2 stages), and that workflow is
+// what checks the entity belongs to the caller's tenant and writes the metadata
+// the post-approval handler later trusts. This route did neither: an instance
+// could name ANY entity_id with ANY metadata, so a NEGOTIATION_QUOTE forged on
+// another company's product with a self-consistent po_payload, once approved
+// by the caller's own approver, drafted a PO on that company's RFQ priced from
+// its vendor; a forged RFQ instance published another company's RFQ.
+//
+// No screen calls this route (frontend, admin panel and mobile searched for
+// `approval/submit`, 2026-10-25: no caller). A type added to the engine later
+// is refused here by default; opening one through this route would first need
+// an entity-tenant check and handlers that trust no caller-written metadata.
+const SERVER_OWNED_APPROVAL_TYPES = new Set(Object.keys(ENTITY_APPROVE_RESOURCE_MAP));
 
 /** Same as guardPolicyTenant, for approval instances. */
 async function guardInstanceTenant(req, res, instanceId) {
@@ -1274,6 +1294,17 @@ const hospitalityApprovalController = {
         });
       }
 
+      // Server-owned approval types are opened by their own workflow only
+      // (see SERVER_OWNED_APPROVAL_TYPES). Refused before anything is read.
+      const normalizedType = String(entity_type).trim().toUpperCase();
+      if (SERVER_OWNED_APPROVAL_TYPES.has(normalizedType)) {
+        return res.status(403).json({
+          status: 3,
+          code: 'APPROVAL_TYPE_SERVER_OWNED',
+          message: `${normalizedType} approvals are opened by their own workflow, not through this route.`
+        });
+      }
+
       // SECURITY (P0, cross-tenant WRITE): hospitality_company_id was taken
       // from the request body, so a caller could open an approval instance
       // inside another tenant — binding that tenant's approvers to an entity
@@ -1344,6 +1375,12 @@ const hospitalityApprovalController = {
           message: 'approval_instance_id and action are required'
         });
       }
+
+      // Tenant first: an instance of another company answers exactly like one
+      // that does not exist (404), before the engine says anything about it.
+      // The engine's own answers (already decided, not an approver, an award
+      // that does not bind) are only for callers inside the instance's company.
+      if (!(await guardInstanceTenant(req, res, parseInt(approval_instance_id)))) return;
 
       // executeApprovalAction wraps submitApprovalAction and centrally dispatches
       // entity-specific post-approval handlers (RFQ, TENDER, TECHNICAL, PO, ARC,

@@ -77,3 +77,75 @@ SELECT ai.id, sq->>'quote_id' AS quote_id
 --    requires both to be the award's RFQ, so such a line can never be
 --    awarded). Expect 0.
 SELECT count(*) FROM tbl_quote_items qi JOIN tbl_quotes q ON q.id=qi.quote_id WHERE qi.rfq_id<>q.rfq_id;
+
+-- ── Fix round 2 ──────────────────────────────────────────────────────────────
+-- Both binders now also require the INSTANCE's company to own the RFQ its
+-- metadata awards, and the instance's product (entity_id) to be on that RFQ.
+-- Until this deploy, POST /general/hospitality/approval/submit let any
+-- non-vendor open an instance of any engine type with any entity_id and
+-- metadata; it now refuses every engine type (403 APPROVAL_TYPE_SERVER_OWNED).
+-- Checks 4-5 are the deploy check (PENDING rows that will be refused); 6-8 are
+-- FORENSIC: did anyone use the hole before it closed?
+
+-- 4. Pending NEGOTIATION_QUOTE instances the binders will now refuse: the
+--    metadata RFQ is not the instance company's, or the instance's product is
+--    not on that RFQ. Expect 0 rows.
+SELECT ai.id, ai.hospitality_company_id AS instance_company, ai.entity_id AS rfq_product_id,
+       ai.metadata->>'rfq_id' AS meta_rfq, r.hospitality_company_id AS rfq_company, rp.rfq_id AS product_rfq
+  FROM tbl_approval_instances ai
+  LEFT JOIN tbl_rfq r ON r.id::text = ai.metadata->>'rfq_id'
+  LEFT JOIN tbl_rfq_products rp ON rp.id = ai.entity_id
+ WHERE ai.entity_type = 'NEGOTIATION_QUOTE' AND ai.status = 'PENDING'
+   AND (ai.metadata ? 'po_payload' OR jsonb_typeof(ai.metadata->'selected_quotes') = 'array')
+   AND (r.hospitality_company_id = ai.hospitality_company_id AND rp.rfq_id = r.id) IS NOT TRUE
+ ORDER BY 1;
+
+-- 5. Pending NEGOTIATION instances carrying selected_quotes. Their legacy
+--    post-approval award now runs only if the entries bind (bindSelectedQuotes,
+--    tenant included); one that does not is logged and awards nothing. Any row
+--    here: run check 2's binding by hand for it, or re-submit. Expect 0 rows.
+SELECT ai.id, ai.hospitality_company_id, ai.entity_id, ai.metadata->>'rfq_id' AS meta_rfq, ai.created_at
+  FROM tbl_approval_instances ai
+ WHERE ai.entity_type = 'NEGOTIATION' AND ai.status = 'PENDING'
+   AND jsonb_typeof(ai.metadata->'selected_quotes') = 'array'
+   AND jsonb_array_length(ai.metadata->'selected_quotes') > 0
+ ORDER BY 1;
+
+-- 6. FORENSIC, any status: NEGOTIATION_QUOTE instances whose company does not
+--    own the metadata RFQ, or whose product is not on it. A row is either a
+--    forged instance or a data defect; for an APPROVED one, look for POs and
+--    finalizations on meta_rfq created at/after completed_at. Expect 0 rows.
+SELECT ai.id, ai.status, ai.initiated_by, ai.created_at, ai.completed_at,
+       ai.hospitality_company_id AS instance_company, ai.entity_id AS rfq_product_id,
+       ai.metadata->>'rfq_id' AS meta_rfq, r.hospitality_company_id AS rfq_company, rp.rfq_id AS product_rfq
+  FROM tbl_approval_instances ai
+  LEFT JOIN tbl_rfq r ON r.id::text = ai.metadata->>'rfq_id'
+  LEFT JOIN tbl_rfq_products rp ON rp.id = ai.entity_id
+ WHERE ai.entity_type = 'NEGOTIATION_QUOTE'
+   AND ai.metadata ? 'rfq_id'
+   AND (r.hospitality_company_id = ai.hospitality_company_id AND rp.rfq_id = r.id) IS NOT TRUE
+ ORDER BY ai.created_at DESC;
+
+-- 7. FORENSIC: RFQ / TENDER instances (entity_id = the RFQ) whose company does
+--    not own the RFQ. handleRFQPostApproval publishes the RFQ named by
+--    entity_id, so an approved row here published another company's RFQ.
+--    Expect 0 rows.
+SELECT ai.id, ai.entity_type, ai.status, ai.initiated_by, ai.created_at, ai.completed_at,
+       ai.hospitality_company_id AS instance_company, ai.entity_id AS rfq_id, r.hospitality_company_id AS rfq_company
+  FROM tbl_approval_instances ai
+  LEFT JOIN tbl_rfq r ON r.id = ai.entity_id
+ WHERE ai.entity_type IN ('RFQ', 'TENDER')
+   AND (r.hospitality_company_id = ai.hospitality_company_id) IS NOT TRUE
+ ORDER BY ai.created_at DESC;
+
+-- 8. FORENSIC: every use of the generic submit route the activity trail saw
+--    (no UI calls it; the frontend and admin-panel have no caller). entity_id
+--    is the instance it opened. Any row: read that instance's entity_type,
+--    entity_id and metadata, and run 6/7 for it. Expect 0 rows outside tests.
+SELECT ae.id, ae.occurred_at, ae.actor_user_id, ae.actor_label, ae.hospitality_company_id,
+       ae.entity_id AS approval_instance_id, ae.summary,
+       ai.entity_type, ai.entity_id AS instance_entity_id, ai.status AS instance_status
+  FROM tbl_activity_events ae
+  LEFT JOIN tbl_approval_instances ai ON ai.id::text = ae.entity_id::text
+ WHERE ae.event_key = 'approval_submitted'
+ ORDER BY ae.occurred_at DESC;
