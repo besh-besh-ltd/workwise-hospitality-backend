@@ -249,10 +249,13 @@ export async function getStockItem(t, user, { hotelId, invItemId } = {}) {
       [id]
     ),
     await t.any(
+      // Stock on hand per batch, in the order FEFO takes it: undated first
+      // (an unknown expiry counts as the soonest), then by expiry, then batch.
+      // A deficit (negative stock allowed) is not a batch: the balance shows it.
       `SELECT batch_no, expiry_date::text AS expiry_date, qty::text AS qty FROM tbl_inv_batch
-        WHERE hotel_id = $1 AND inv_item_id = $2 AND qty <> 0
-        ORDER BY expiry_date, batch_no`,
-      [hotel, id]
+        WHERE hotel_id = $1 AND inv_item_id = $2 AND qty > 0
+        ORDER BY (expiry_date <> $3::date), expiry_date, batch_no`,
+      [hotel, id, NO_EXPIRY_DATE]
     ),
     await t.any(`${MOVEMENT_SELECT} ORDER BY m.posted_at DESC, m.id DESC LIMIT ${RECENT_MOVEMENTS}`, [hotel, id]),
   ];

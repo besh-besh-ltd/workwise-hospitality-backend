@@ -14,6 +14,9 @@
 -- tbl_inv_adjustment.client_event_id are UNIQUE; count-line saves are unique
 -- on (count_id, client_event_id) in tbl_inv_count_line_event, which keeps
 -- every key a count has applied (the line itself only holds the latest).
+-- tbl_material_requisition.client_event_id (nullable, unique when set) makes
+-- the reorder list's "Create MR draft" idempotent; MRs raised on the MR page
+-- leave it NULL.
 --
 -- Conventions as in 20261024100100_inventory_core.sql. Idempotent throughout.
 
@@ -156,6 +159,14 @@ CREATE TABLE IF NOT EXISTS public.tbl_inv_count_line_event (
   CONSTRAINT ux_inv_count_line_event UNIQUE (count_id, client_event_id)
 );
 CREATE INDEX IF NOT EXISTS ix_inv_count_line_event_line ON public.tbl_inv_count_line_event (count_line_id);
+
+-- ---------------------------------------------------------------------------
+-- Reorder "Create MR draft": a retried request answers the draft it made.
+-- ---------------------------------------------------------------------------
+
+ALTER TABLE public.tbl_material_requisition ADD COLUMN IF NOT EXISTS client_event_id UUID;
+CREATE UNIQUE INDEX IF NOT EXISTS ux_material_requisition_client_event
+  ON public.tbl_material_requisition (client_event_id) WHERE client_event_id IS NOT NULL;
 
 -- ---------------------------------------------------------------------------
 -- Row audit on the headers that change state under approval.

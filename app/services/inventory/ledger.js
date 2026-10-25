@@ -67,18 +67,26 @@
 //     batches is written as one movement row per batch, in that order, each
 //     with the line's sourceLineId and its batch_no / expiry_date (NULL for
 //     the undated bucket); valuation runs per row, in sequence.
+//   - An expiry write-off (ADJUST_OUT / COUNT_OUT with reasonCode EXPIRY)
+//     takes the batches that have already expired (expiry before today in
+//     IST) first, earliest first, after any batch it names; the rest goes
+//     FEFO as above. Writing off expired stock must empty the expired lot,
+//     not the undated bucket.
 //   - With negative stock allowed, what no batch holds is drawn from the
 //     undated bucket, which then carries the deficit (the only bucket that
 //     can go below 0, and only when every other bucket is empty); the next
 //     receipts cover it first, FEFO.
 //   - An item that starts tracking with stock already on hand (or any drift)
 //     self-heals: balance qty − Σ batches is folded into the undated bucket
-//     when the item is next posted.
+//     when the item is next posted. Drift on an item that already had batch
+//     rows is logged as a warning (it means something wrote stock around
+//     this function).
 // The negative-stock guard runs on the whole line, never per batch. Readers
 // that key on source_line_id must aggregate: one line may have several rows.
 
 import { InventoryError } from './errors.js';
 import { getEffectiveSettings } from './settings.js';
+import { logger } from '../../util/logger.js';
 
 export const INBOUND_TYPES = Object.freeze(['GRN_IN', 'RETURN_IN', 'ADJUST_IN', 'COUNT_IN']);
 export const OUTBOUND_TYPES = Object.freeze(['GRN_REVERSAL', 'RTV_OUT', 'MARK_OUT', 'ADJUST_OUT', 'COUNT_OUT']);
@@ -300,6 +308,10 @@ function fefo(a, b) {
 }
 const stocked = (set, except = null) => [...set.buckets.values()].filter((b) => b !== except && b.qty > 0n).sort(fefo);
 
+/** Outbound types that write stock off; with reasonCode EXPIRY they take expired lots first. */
+const WRITE_OFF_TYPES = new Set(['ADJUST_OUT', 'COUNT_OUT']);
+const writesOffExpiry = (line) => WRITE_OFF_TYPES.has(line.type) && line.reasonCode === 'EXPIRY';
+
 /** A deficit in the undated bucket is stock already issued: stock on hand covers it, FEFO. */
 function settleDeficit(set) {
   const undated = undatedOf(set);
@@ -313,10 +325,12 @@ function settleDeficit(set) {
 
 /**
  * Take `amount` (> 0) out of an item's batches for one outbound line: the
- * batch it names first, then FEFO, then (negative stock allowed) the undated
- * bucket. @returns {Array<{bucket, qty:bigint}>} one piece per batch, in order.
+ * batch it names first; for an expiry write-off, the batches expired before
+ * `today` (IST 'YYYY-MM-DD'), earliest first; then FEFO; then (negative stock
+ * allowed) the undated bucket.
+ * @returns {Array<{bucket, qty:bigint}>} one piece per batch, in order.
  */
-function draw(set, line, amount) {
+function draw(set, line, amount, today) {
   const pieces = [];
   let left = amount;
   const take = (bucket, q) => {
@@ -331,6 +345,12 @@ function draw(set, line, amount) {
     const named = bucketFor(set, line);
     if (named.qty > 0n) take(named, minOf(named.qty, left));
   }
+  if (today && writesOffExpiry(line)) {
+    for (const b of stocked(set)) {
+      if (left === 0n) break;
+      if (b.expiry !== NO_EXPIRY_DATE && b.expiry < today) take(b, minOf(b.qty, left));
+    }
+  }
   for (const b of stocked(set)) {
     if (left === 0n) break;
     take(b, minOf(b.qty, left));
@@ -341,8 +361,10 @@ function draw(set, line, amount) {
 
 /**
  * The batch sets of the tracked (hotel, item) keys, read under the balance
- * locks (tbl_inv_batch is only written by holders of those locks). What the
- * balance holds beyond Σ batches is folded into the undated bucket.
+ * locks (tbl_inv_batch is only written by holders of those locks). Only the
+ * batches holding stock are read, plus the undated bucket (it may carry a
+ * deficit); an emptied batch that receives again is upserted by its key.
+ * What the balance holds beyond Σ batches is folded into the undated bucket.
  */
 async function loadBatchSets(t, trackedKeys, state) {
   const sets = new Map();
@@ -350,24 +372,58 @@ async function loadBatchSets(t, trackedKeys, state) {
   for (const k of trackedKeys) {
     sets.set(keyOf(k.hotelId, k.invItemId), { ...k, buckets: new Map() });
   }
+  const hotelIds = trackedKeys.map((k) => k.hotelId);
+  const itemIds = trackedKeys.map((k) => k.invItemId);
   const rows = await t.any(
     `SELECT bt.hotel_id, bt.inv_item_id, bt.batch_no, bt.expiry_date::text AS expiry_date, bt.qty::text AS qty
        FROM tbl_inv_batch bt
        JOIN unnest($1::int[], $2::int[]) AS k(hotel_id, inv_item_id)
-         ON bt.hotel_id = k.hotel_id AND bt.inv_item_id = k.inv_item_id`,
-    [trackedKeys.map((k) => k.hotelId), trackedKeys.map((k) => k.invItemId)]
+         ON bt.hotel_id = k.hotel_id AND bt.inv_item_id = k.inv_item_id
+      WHERE bt.qty <> 0 OR (bt.batch_no = '' AND bt.expiry_date = $3::date)`,
+    [hotelIds, itemIds, NO_EXPIRY_DATE]
   );
   for (const r of rows) {
     bucketOf(sets.get(keyOf(r.hotel_id, r.inv_item_id)), r.batch_no, r.expiry_date).qty = toScaled(r.qty);
   }
+  const drift = [];
   for (const [k, set] of sets) {
     let held = 0n;
     for (const b of set.buckets.values()) held += b.qty;
     const residual = state.get(k).qty - held;
-    if (residual !== 0n) shift(undatedOf(set), residual);
+    if (residual !== 0n) {
+      shift(undatedOf(set), residual);
+      drift.push({ hotelId: set.hotelId, invItemId: set.invItemId, residual });
+    }
     settleDeficit(set);
   }
+  if (drift.length) await warnDrift(t, drift);
   return sets;
+}
+
+/**
+ * Self-heal is expected once, when an item starts tracking with stock on hand
+ * (no batch rows yet). Drift on an item that already had batch rows means
+ * stock was written around postMovements: say so.
+ */
+async function warnDrift(t, drift) {
+  const known = new Set(
+    (
+      await t.any(
+        `SELECT DISTINCT bt.hotel_id, bt.inv_item_id
+           FROM tbl_inv_batch bt
+           JOIN unnest($1::int[], $2::int[]) AS k(hotel_id, inv_item_id)
+             ON bt.hotel_id = k.hotel_id AND bt.inv_item_id = k.inv_item_id`,
+        [drift.map((d) => d.hotelId), drift.map((d) => d.invItemId)]
+      )
+    ).map((r) => keyOf(r.hotel_id, r.inv_item_id))
+  );
+  for (const d of drift) {
+    if (!known.has(keyOf(d.hotelId, d.invItemId))) continue;
+    logger.warn(
+      { hotelId: d.hotelId, invItemId: d.invItemId, residual: toDecimalString(d.residual) },
+      '[inventory.ledger] batch rows drifted from the balance; residual folded into the undated bucket'
+    );
+  }
 }
 
 async function saveBatchSets(t, sets) {
@@ -579,6 +635,10 @@ export async function postMovements(t, movements) {
     ])
   );
   const batchSets = await loadBatchSets(t, trackedKeys, state);
+  // IST today, for expiry write-offs of tracked items only.
+  const today = lines.some((l) => writesOffExpiry(l) && batchSets.has(keyOf(l.hotelId, l.invItemId)))
+    ? (await t.one(`SELECT (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Kolkata')::date::text AS today`)).today
+    : null;
 
   const shortfalls = [];
   const posted = [];
@@ -614,7 +674,7 @@ export async function postMovements(t, movements) {
     // One part per batch for a tracked outbound line; the line itself otherwise.
     const parts =
       set && line.qty < 0n
-        ? draw(set, line, -line.qty).map(({ bucket, qty }) => ({
+        ? draw(set, line, -line.qty, today).map(({ bucket, qty }) => ({
             ...costed,
             qty: -qty,
             batchNo: bucket.batchNo || null,

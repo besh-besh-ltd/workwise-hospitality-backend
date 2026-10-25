@@ -1064,7 +1064,8 @@ export const EVENTS = [
   e({
     method: 'POST', path: '/inventory/reorder/mr-draft', key: 'inventory_reorder_mr_drafted',
     category: CATEGORIES.INVENTORY, severity: 'notable',
-    entity: { type: 'MR', id: R('data.mrId') }, scope: SCOPE.detail(),
+    // A replayed clientEventId changes nothing: no detail, so no second row.
+    entity: { type: 'MR', id: R('data.mrId') }, scope: SCOPE.detail(), requireDetail: true,
     summary: (c) => `${c.actor} drafted a material requisition from reorder suggestions${c.entityLabel ? ` ${c.entityLabel}` : ''}`,
   }),
 ];

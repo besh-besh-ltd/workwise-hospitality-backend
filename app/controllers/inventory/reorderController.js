@@ -25,7 +25,11 @@ export const getReorder = async (req, res) => {
   }
 };
 
-/** POST /reorder/mr-draft {hotelId, departmentId, items:[{invItemId, qty, arcContractLineId?}]}: 201 {mrId, …}. */
+/**
+ * POST /reorder/mr-draft {hotelId, departmentId, clientEventId?, items:[{invItemId, qty, arcContractLineId?}]}:
+ * 201 {mrId, …, warnings}. A repeated clientEventId answers 200 with the first
+ * draft (replayed, no_op) and records no second activity row.
+ */
 export const createReorderMrDraft = async (req, res) => {
   let data;
   try {
@@ -33,6 +37,7 @@ export const createReorderMrDraft = async (req, res) => {
   } catch (err) {
     return sendInventoryError(res, err);
   }
+  if (data.replayed) return res.status(200).json({ status: 1, message: 'MR draft already created', data });
   res.locals.activityDetail = {
     scope: { hospitalityCompanyId: data.companyId, hotelId: data.hotelId, entityLabel: data.mrNumber },
     metadata: { departmentId: data.departmentId, itemCount: data.items.length },

@@ -24,6 +24,11 @@
 // Contracted: an active ARC contract line for a mapped variant at the hotel,
 //   per department (mrModel.searchContractedItems). Only departments the
 //   caller may raise an MR for are looked at (rates are commercial terms).
+//   unitRate is the rate the MR line will store: the contract line's own
+//   unit_rate, as mrController.createDraft stores it (not a group hotel's
+//   override; the call-off release re-prices, see the D3 report).
+// openMrQty: what draft and pending-approval MRs at the hotel already ask
+//   for, in stock units. Shown, never subtracted (they may not be approved).
 //
 // Security: the hotel comes from the query but is gated against the caller's
 // own role scopes (inventory.read for the list; inventory.update plus an MR
@@ -40,7 +45,8 @@ import { RECEIVABLE_PO_STATUSES } from './grnService.js';
 import { uomKey } from './uom.js';
 import { notifyLowStockDigest, LOW_STOCK_DIGEST_TYPE } from './notices/digestNotices.js';
 import {
-  MAX_LINES, IST_TODAY, positiveInt, invalid, notFound, num, iso, toQty, assertDocAccess, loadCompanyItems,
+  MAX_LINES, IST_TODAY, positiveInt, invalid, notFound, num, iso, toQty, assertDocAccess, loadCompanyItems, holds,
+  requireUuid,
 } from './stockCommon.js';
 import { InventoryError } from './errors.js';
 
@@ -134,8 +140,8 @@ async function onOrderAt(t, { hotelId, companyId, items, factorOf }) {
 
   const poRows = await t.any(
     `WITH po_base AS (
+       -- this company's live POs only, before the per-PO hotel list is built
        SELECT po.id,
-              COALESCE(r.hospitality_company_id, rh.hospitality_company_id, a.hospitality_company_id) AS company_id,
               CASE WHEN po.is_call_off THEN ARRAY[COALESCE(mr.hotel_id, a.hotel_id)]
                    ELSE COALESCE(
                      (SELECT array_agg(DISTINCT m.hotel_id) FROM tbl_rfq_hotel_mappings m WHERE m.rfq_id = r.id),
@@ -150,9 +156,10 @@ async function onOrderAt(t, { hotelId, companyId, items, factorOf }) {
         WHERE po.status::text = ANY($3::text[])
           AND po.receipt_legacy IS NOT TRUE
           AND po.receipt_status NOT IN ('received', 'closed_short')
+          AND COALESCE(r.hospitality_company_id, rh.hospitality_company_id, a.hospitality_company_id) = $2
      ),
      po_here AS (
-       SELECT id, hotel_ids FROM po_base WHERE company_id = $2 AND $1 = ANY(hotel_ids)
+       SELECT id, hotel_ids FROM po_base WHERE $1 = ANY(hotel_ids)
      ),
      open_rows AS (
        -- this hotel's plan rows, and the unallocated ones (a hint only)
@@ -204,6 +211,53 @@ async function onOrderAt(t, { hotelId, companyId, items, factorOf }) {
   return { onOrder, group, incomplete };
 }
 
+/**
+ * What draft and pending-approval MRs at the hotel ask for, per item, in
+ * stock units (a unit with no conversion is left out).
+ * @returns {Promise<Map<number, number>>}
+ */
+async function openMrAt(t, { hotelId, companyId, ids, factorOf }) {
+  const open = new Map();
+  if (!ids.length) return open;
+  const rows = await t.any(
+    `SELECT iv.inv_item_id, COALESCE(NULLIF(btrim(mi.uom), ''), ai.uom) AS unit, sum(mi.quantity)::text AS qty
+       FROM tbl_material_requisition mr
+       JOIN tbl_material_requisition_item mi ON mi.mr_id = mr.id
+       LEFT JOIN tbl_arc_contract_line cl     ON cl.id = mi.arc_contract_line_id
+       LEFT JOIN tbl_arc_item ai              ON ai.id = cl.arc_item_id
+       JOIN tbl_inv_item_variant iv
+         ON iv.hospitality_company_id = $2 AND iv.product_variant_id = mi.product_variant_id
+      WHERE mr.hotel_id = $1 AND mr.hospitality_company_id = $2 AND mr.status IN ('draft', 'pending_approval')
+        AND iv.inv_item_id = ANY($3::int[])
+      GROUP BY iv.inv_item_id, COALESCE(NULLIF(btrim(mi.uom), ''), ai.uom)`,
+    [hotelId, companyId, ids]
+  );
+  for (const r of rows) {
+    const id = Number(r.inv_item_id);
+    const factor = factorOf(id, r.unit);
+    if (factor == null) continue;
+    open.set(id, round4((open.get(id) ?? 0) + Number(r.qty) * factor));
+  }
+  return open;
+}
+
+/**
+ * Sets stored_rate on searchContractedItems rows: the rate an MR line stores
+ * for the contract line (the line's own unit_rate, as mrController.createDraft
+ * and getContractLineDetail read it). Their current_rate applies a group
+ * hotel's override, which the MR does not store.
+ */
+async function withStoredRates(t, lines) {
+  if (!lines.length) return lines;
+  const ids = [...new Set(lines.map((l) => Number(l.arc_contract_line_id)))];
+  const rates = new Map(
+    (await t.any(`SELECT id, unit_rate::text AS unit_rate FROM tbl_arc_contract_line WHERE id = ANY($1::int[])`, [ids])).map(
+      (r) => [Number(r.id), Number(r.unit_rate)]
+    )
+  );
+  return lines.map((l) => ({ ...l, stored_rate: rates.get(Number(l.arc_contract_line_id)) ?? Number(l.current_rate) }));
+}
+
 /** Departments the user may raise an MR for at the hotel (super admin: all). */
 async function mrDepartments(t, user, hotelId) {
   if (Number(user?.user_type) === SUPER_ADMIN) {
@@ -239,12 +293,12 @@ async function contractedLines(t, { hotelId, companyId, departmentIds, variantId
       if (variantIds.has(Number(l.product_variant_id))) out.push({ ...l, department_id: Number(dept) });
     }
   }
-  return out;
+  return withStoredRates(t, out);
 }
 
-/** Cheapest first, then the lowest line id: the line a reorder uses by default. */
+/** Cheapest at the stored rate first, then the lowest line id: the line a reorder uses by default. */
 const byRate = (a, b) =>
-  Number(a.current_rate) - Number(b.current_rate) || Number(a.arc_contract_line_id) - Number(b.arc_contract_line_id);
+  Number(a.stored_rate) - Number(b.stored_rate) || Number(a.arc_contract_line_id) - Number(b.arc_contract_line_id);
 
 async function variantsOf(t, companyId, itemIds) {
   const rows = itemIds.length
@@ -272,8 +326,11 @@ const toContracted = (l) => ({
   arcContractLineId: Number(l.arc_contract_line_id),
   productVariantId: Number(l.product_variant_id),
   variantName: l.variant_name ?? null,
-  unitRate: Number(l.current_rate),
+  unitRate: Number(l.stored_rate),
   uom: l.uom ?? null,
+  remainingQty: Number(l.remaining_qty),
+  isGroup: l.is_group === true,
+  hotelRemainingQty: l.is_group === true ? Number(l.hotel_remaining_qty ?? 0) : null,
   vendorId: l.vendor_id == null ? null : Number(l.vendor_id),
   vendorName: l.vendor_name ?? null,
 });
@@ -288,11 +345,14 @@ const toContracted = (l) => ({
  *
  * @returns {Promise<{hotelId:number|null, hotels:Array<{id,name}>, stockStartedAt:string|null,
  *   departments:Array<{id,title}>, rows:Array<{invItemId, displayName, itemCode, stockUom, qty,
- *   minQty, reorderLevel, maxQty, binLabel, onOrder, onOrderIncomplete, suggestedQty, packFactor,
- *   avgDailyUse90d, productVariantId, variantIds, contracted, contractedLines}>,
- *   groupOrdersOpen:Array<{invItemId, openQty}>}>}
+ *   minQty, reorderLevel, maxQty, binLabel, onOrder, onOrderIncomplete, openMrQty, suggestedQty,
+ *   packFactor, avgDailyUse90d, productVariantId, variantIds, contracted, contractedLines}>,
+ *   groupOrdersOpen:Array<{invItemId, openQty}>, can:{createMrDraft:boolean}}>}
  *   contracted: the cheapest line over the caller's departments (null when
- *   none); contractedLines: the cheapest per department.
+ *   none); contractedLines: the cheapest per department. A line's unitRate
+ *   is the rate the MR stores; remainingQty / hotelRemainingQty are in the
+ *   contract's unit. can.createMrDraft mirrors the POST /reorder/mr-draft
+ *   gate (inventory.update here, and a buyer).
  * @throws {InventoryError} NOT_FOUND for a hotel the caller cannot read
  */
 export async function getReorderList(t, user, { hotelId } = {}) {
@@ -309,9 +369,13 @@ export async function getReorderList(t, user, { hotelId } = {}) {
         readable,
       ])
     : [];
-  const empty = { hotelId: null, hotels: [], stockStartedAt: null, departments: [], rows: [], groupOrdersOpen: [] };
+  const empty = {
+    hotelId: null, hotels: [], stockStartedAt: null, departments: [], rows: [], groupOrdersOpen: [],
+    can: { createMrDraft: false },
+  };
   if (!hotel) return empty;
   const { companyId } = await assertDocAccess(t, user, hotel, 'read');
+  const canCreateMrDraft = MR_USER_TYPES.includes(Number(user?.user_type)) && (await holds(t, user, hotel, 'update'));
 
   const started = await t.oneOrNone(`SELECT stock_started_at FROM tbl_inv_hotel_settings WHERE hotel_id = $1`, [hotel]);
   const base = await belowReorderItems(t, { hotelId: hotel, companyId });
@@ -320,6 +384,7 @@ export async function getReorderList(t, user, { hotelId } = {}) {
 
   const factorOf = await unitConverters(t, items);
   const { onOrder, group, incomplete } = await onOrderAt(t, { hotelId: hotel, companyId, items, factorOf });
+  const openMr = await openMrAt(t, { hotelId: hotel, companyId, ids, factorOf });
   const variants = await variantsOf(t, companyId, ids);
   const departments = (await mrDepartments(t, user, hotel)).map((d) => ({ id: Number(d.id), title: d.title }));
   const lines = await contractedLines(t, {
@@ -381,6 +446,7 @@ export async function getReorderList(t, user, { hotelId } = {}) {
       binLabel: r.bin_label ?? null,
       onOrder: ordered,
       onOrderIncomplete: incomplete.has(id),
+      openMrQty: openMr.get(id) ?? 0,
       suggestedQty,
       packFactor: packs.get(id) ?? null,
       avgDailyUse90d: round4((use.get(id) ?? 0) / 90),
@@ -401,6 +467,7 @@ export async function getReorderList(t, user, { hotelId } = {}) {
       .filter(([, q]) => q > 0)
       .map(([invItemId, openQty]) => ({ invItemId, openQty }))
       .sort((a, b) => a.invItemId - b.invItemId),
+    can: { createMrDraft: canCreateMrDraft },
   };
 }
 
@@ -435,25 +502,94 @@ function parseDraftItems(items) {
   });
 }
 
+/** The draft as the caller sees it: the response of the request that made it. */
+async function draftResult(t, { mr, companyId, warnings }) {
+  const rows = await t.any(
+    `SELECT iv.inv_item_id, mi.product_variant_id, mi.arc_contract_id, mi.arc_contract_line_id,
+            mi.quantity::text AS quantity, mi.uom, mi.matched_unit_rate::text AS unit_rate
+       FROM tbl_material_requisition_item mi
+       LEFT JOIN tbl_inv_item_variant iv
+              ON iv.hospitality_company_id = $2 AND iv.product_variant_id = mi.product_variant_id
+      WHERE mi.mr_id = $1
+      ORDER BY mi.id`,
+    [mr.id, companyId]
+  );
+  return {
+    mrId: Number(mr.id),
+    mrNumber: mr.mr_number,
+    status: mr.status,
+    companyId,
+    hotelId: Number(mr.hotel_id),
+    departmentId: Number(mr.department_id),
+    items: rows.map((r) => ({
+      invItemId: r.inv_item_id == null ? null : Number(r.inv_item_id),
+      productVariantId: Number(r.product_variant_id),
+      arcContractId: Number(r.arc_contract_id),
+      arcContractLineId: Number(r.arc_contract_line_id),
+      quantity: Number(r.quantity),
+      uom: r.uom ?? null,
+      unitRate: r.unit_rate == null ? null : Number(r.unit_rate),
+    })),
+    warnings,
+  };
+}
+
+/**
+ * The draft an earlier request with this clientEventId made, or null. A key
+ * that made another user's MR, or one at another hotel or department, is a
+ * CONFLICT (never the other MR).
+ */
+async function replayDraft(t, user, clientEventId, { hotelId, departmentId, companyId }) {
+  const prior = await t.oneOrNone(
+    `SELECT id, mr_number, status, hospitality_company_id, hotel_id, department_id, raised_by
+       FROM tbl_material_requisition WHERE client_event_id = $1`,
+    [clientEventId]
+  );
+  if (!prior) return null;
+  if (
+    Number(prior.raised_by) !== positiveInt(user?.id) ||
+    Number(prior.hospitality_company_id) !== companyId ||
+    Number(prior.hotel_id) !== hotelId ||
+    Number(prior.department_id) !== departmentId
+  ) {
+    throw new InventoryError('CONFLICT', 'This request was already used for another requisition', {
+      field: 'clientEventId',
+    });
+  }
+  return { ...(await draftResult(t, { mr: prior, companyId, warnings: [] })), replayed: true, no_op: true };
+}
+
 /**
  * Create a draft MR at the hotel for the given department, one MR line per
  * item, each against an active ARC contract line of that hotel and department
- * for a variant mapped to the item (the cheapest, or `arcContractLineId` when
- * given and eligible). Quantities arrive in stock units and are converted to
- * the contract's unit (rounded up to 2 dp, the MR column's scale).
- * The MR is created through mrModel.createDraft / addItem; the buyer reviews
- * and submits it on the MR page.
+ * for a variant mapped to the item (the cheapest at the stored rate, or
+ * `arcContractLineId` when given and eligible). Quantities arrive in stock
+ * units and are converted to the contract's unit (rounded up to 2 dp, the MR
+ * column's scale). As at MR submit, a line's remaining quantity is a hard cap
+ * (summed over the draft's lines on one contract line) and a group contract
+ * hotel's own share is soft: going past it is allowed and reported in
+ * warnings[]. The MR is created through mrModel.createDraft / addItem; the
+ * buyer reviews and submits it on the MR page.
  *
- * @param {{hotelId:number, departmentId:number,
+ * Idempotent on clientEventId (optional, a UUID): a repeat answers the draft
+ * the first request made, with replayed:true, no_op:true (warnings empty).
+ *
+ * @param {{hotelId:number, departmentId:number, clientEventId?:string,
  *   items:Array<{invItemId:number, qty:number, arcContractLineId?:number}>}} input
- * @returns {Promise<{mrId:number, mrNumber:string, companyId:number, hotelId:number, departmentId:number,
- *   items:Array<{invItemId, productVariantId, arcContractId, arcContractLineId, quantity, uom, unitRate}>}>}
+ * @returns {Promise<{mrId:number, mrNumber:string, status:string, companyId:number, hotelId:number,
+ *   departmentId:number, items:Array<{invItemId, productVariantId, arcContractId, arcContractLineId,
+ *   quantity, uom, unitRate}>, warnings:Array<{invItemId, arcContractLineId, hotelId, quantity,
+ *   hotelRemainingQty, message}>, replayed?:true, no_op?:true}>}
  * @throws {InventoryError} NOT_FOUND (hotel or department out of the caller's
  *   scope, or a foreign item) | FORBIDDEN (no inventory.update, or not a buyer)
+ *   | CONFLICT (clientEventId already made another requisition)
  *   | VALIDATION ({field:'items', index, invItemId, reason:'NOT_CONTRACTED' |
- *   'UOM_FACTOR_REQUIRED', lines:[...every refused item]})
+ *   'UOM_FACTOR_REQUIRED' | 'EXCEEDS_CONTRACT_REMAINING' (with quantity and
+ *   remaining, in the contract's unit), lines:[...every refused item]})
  */
 export async function createReorderMrDraft(t, user, input = {}) {
+  const clientEventId =
+    input.clientEventId == null || input.clientEventId === '' ? null : requireUuid(input.clientEventId);
   const hotelId = positiveInt(input.hotelId);
   if (!hotelId) throw invalid('Choose a hotel', { field: 'hotelId' });
   const { companyId } = await assertDocAccess(t, user, hotelId, 'update');
@@ -475,16 +611,28 @@ export async function createReorderMrDraft(t, user, input = {}) {
       )));
   if (!inCell) throw notFound('Department not found', { field: 'departmentId' });
 
+  if (clientEventId) {
+    // Serialise copies of one request, then answer from the first.
+    await t.one(`SELECT pg_advisory_xact_lock(hashtext('inv:reorder_mr'), hashtext($1))`, [clientEventId]);
+    const prior = await replayDraft(t, user, clientEventId, { hotelId, departmentId, companyId });
+    if (prior) return prior;
+  }
+
   const wanted = parseDraftItems(input.items);
   const items = await loadCompanyItems(t, companyId, wanted.map((w) => w.invItemId));
   const variants = await variantsOf(t, companyId, [...items.keys()]);
   const lines = (
-    await mrModel.searchContractedItems({ hotel_id: hotelId, department_id: departmentId, limit: CONTRACT_SCAN_LIMIT }, t)
+    await withStoredRates(
+      t,
+      await mrModel.searchContractedItems({ hotel_id: hotelId, department_id: departmentId, limit: CONTRACT_SCAN_LIMIT }, t)
+    )
   ).sort(byRate);
   const factorOf = await unitConverters(t, [...items.values()].map((i) => ({ id: i.id, stockUom: i.stockUom })));
 
   const refused = [];
   const planned = [];
+  const warnings = [];
+  const usedOfLine = new Map(); // contract line id -> quantity this draft puts on it (contract unit)
   for (const w of wanted) {
     const item = items.get(w.invItemId);
     const mapped = variants.get(w.invItemId) ?? [];
@@ -505,6 +653,30 @@ export async function createReorderMrDraft(t, user, input = {}) {
       continue;
     }
     const quantity = Math.max(0.01, ceilTo(w.qty / factor, 0.01));
+    const lineId = Number(line.arc_contract_line_id);
+    const before = usedOfLine.get(lineId) ?? 0;
+    const remaining = round4(Math.max(0, Number(line.remaining_qty) - before));
+    if (quantity > remaining) {
+      refused.push({
+        index: w.index, invItemId: w.invItemId, displayName: item.displayName, reason: 'EXCEEDS_CONTRACT_REMAINING',
+        arcContractLineId: lineId, quantity, remaining, uom: line.uom ?? null,
+      });
+      continue;
+    }
+    usedOfLine.set(lineId, round4(before + quantity));
+    if (line.is_group === true) {
+      const share = round4(Math.max(0, Number(line.hotel_remaining_qty ?? 0) - before));
+      if (quantity > share) {
+        warnings.push({
+          invItemId: w.invItemId,
+          arcContractLineId: lineId,
+          hotelId,
+          quantity,
+          hotelRemainingQty: share,
+          message: `${item.displayName}: ${quantity} is more than this hotel's remaining share (${share}). The group total has room, so the order can go ahead; head office will be told.`,
+        });
+      }
+    }
     planned.push({ w, line, quantity });
   }
   if (refused.length) {
@@ -512,13 +684,18 @@ export async function createReorderMrDraft(t, user, input = {}) {
     let message;
     if (first.reason === 'NOT_CONTRACTED') {
       message = `${first.displayName} has no active contract for this department at this hotel: copy it to an RFQ instead`;
+    } else if (first.reason === 'EXCEEDS_CONTRACT_REMAINING') {
+      const unit = first.uom ? ` ${first.uom}` : '';
+      message = `${first.displayName}: ${first.quantity}${unit} is more than the contract has left (${first.remaining}${unit})`;
     } else if (!first.uom) {
       message = `The contract for ${first.displayName} has no unit: raise it from the MR page`;
     } else {
       message = `Set how many ${first.stockUom} make one ${first.uom} of ${first.displayName} (item units) first`;
     }
     throw invalid(refused.length === 1 ? message : `${refused.length} items cannot go on a requisition: ${message}`, {
-      field: 'items', index: first.index, invItemId: first.invItemId, reason: first.reason, lines: refused,
+      field: 'items', index: first.index, invItemId: first.invItemId, reason: first.reason,
+      ...(first.reason === 'EXCEEDS_CONTRACT_REMAINING' ? { remaining: first.remaining, quantity: first.quantity } : {}),
+      lines: refused,
     });
   }
 
@@ -536,8 +713,10 @@ export async function createReorderMrDraft(t, user, input = {}) {
     },
     t
   );
-  const written = [];
-  for (const { w, line, quantity } of planned) {
+  if (clientEventId) {
+    await t.none(`UPDATE tbl_material_requisition SET client_event_id = $2 WHERE id = $1`, [mr.id, clientEventId]);
+  }
+  for (const { line, quantity } of planned) {
     // The rate as the MR module stores it (mrController.createDraft): the contract line's.
     const detail = await mrModel.getContractLineDetail(line.arc_contract_line_id, hotelId, t);
     await mrModel.addItem(
@@ -552,24 +731,8 @@ export async function createReorderMrDraft(t, user, input = {}) {
       },
       t
     );
-    written.push({
-      invItemId: w.invItemId,
-      productVariantId: Number(line.product_variant_id),
-      arcContractId: Number(line.arc_contract_id),
-      arcContractLineId: Number(line.arc_contract_line_id),
-      quantity,
-      uom: line.uom,
-      unitRate: detail?.unit_rate == null ? null : Number(detail.unit_rate),
-    });
   }
-  return {
-    mrId: Number(mr.id),
-    mrNumber: mr.mr_number,
-    companyId,
-    hotelId,
-    departmentId,
-    items: written,
-  };
+  return draftResult(t, { mr, companyId, warnings });
 }
 
 // ---------------------------------------------------------------------------

@@ -1,12 +1,14 @@
-// Reorder (Task D3, spec §9): the worklist (on hand, on order, suggested
-// quantity, contracted lines), "Create MR draft" for contracted items, and the
-// daily low-stock digest.
+// Reorder (Task D3, spec §9): the worklist (on hand, on order, open MR
+// quantity, suggested quantity, contracted lines at the rate the MR stores),
+// "Create MR draft" for contracted items (within the contract's remaining
+// quantity, idempotent on clientEventId), and the daily low-stock digest.
 //
 // Service cases run inside withTx. The HTTP cases and the digest's real
 // notifier commit, so the suite truncates the dynamic tables before and after
 // and deletes the MR / ARC / notification rows it committed.
 
 import { describe, it, expect, beforeAll, afterAll, jest } from "@jest/globals";
+import { randomUUID } from "crypto";
 import { db, withTx, closeDb, truncateDynamic } from "../setup/db.js";
 import { httpClient } from "../helpers/http.js";
 import { IDS } from "../fixtures/ids.js";
@@ -70,8 +72,16 @@ async function addBarcode(t, invItemId, packFactor) {
   );
 }
 
-/** An ARC at the hotel and department with one active contract; lines [{variantId, unitRate, uom}]. */
-async function makeContract(t, { hotelId = A1, departmentId = FB, vendorId = VENDOR, lines, status = "active" }) {
+/**
+ * An ARC at the hotel and department with one active contract; lines
+ * [{variantId, unitRate, uom}], each committing committedQty with consumedQty
+ * used. group {[hotelId]: {committedQty, consumedQty, rateOverride}} makes it
+ * a group ARC with those hotel shares on every line.
+ */
+async function makeContract(t, {
+  hotelId = A1, departmentId = FB, vendorId = VENDOR, lines, status = "active", committedQty = 1000, consumedQty = 0,
+  group = null,
+}) {
   const arc = await t.one(
     `INSERT INTO tbl_arc
        (arc_number, title, category_id, hospitality_company_id, hotel_id, department_id, process_id, status,
@@ -93,12 +103,20 @@ async function makeContract(t, { hotelId = A1, departmentId = FB, vendorId = VEN
       [arc.id, l.variantId, l.uom ?? "litre"]
     );
     const line = await t.one(
-      `INSERT INTO tbl_arc_contract_line (arc_contract_id, arc_item_id, unit_rate, gst_pct, committed_qty)
-       VALUES ($1, $2, $3, 5, 1000) RETURNING id`,
-      [contract.id, item.id, l.unitRate ?? 90]
+      `INSERT INTO tbl_arc_contract_line (arc_contract_id, arc_item_id, unit_rate, gst_pct, committed_qty, consumed_qty)
+       VALUES ($1, $2, $3, 5, $4, $5) RETURNING id`,
+      [contract.id, item.id, l.unitRate ?? 90, committedQty, consumedQty]
     );
     lineIds.push(Number(line.id));
+    for (const [shareHotel, share] of Object.entries(group ?? {})) {
+      await t.none(
+        `INSERT INTO tbl_arc_contract_line_hotel (arc_contract_line_id, hotel_id, committed_qty, consumed_qty, unit_rate_override)
+         VALUES ($1, $2, $3, $4, $5)`,
+        [line.id, Number(shareHotel), share.committedQty, share.consumedQty ?? 0, share.rateOverride ?? null]
+      );
+    }
   }
+  if (group) await t.none(`UPDATE tbl_arc SET is_group = true WHERE id = $1`, [arc.id]);
   return { arcId: Number(arc.id), contractId: Number(contract.id), lineIds };
 }
 
@@ -272,6 +290,92 @@ describe("reorder worklist", () => {
     });
   });
 
+  it("a line shows the rate the MR will store, and the cheapest is picked on that rate", async () => {
+    await withTx(async (t) => {
+      await grantCast(t);
+      const v = V[0];
+      const milk = await itemWith(t, { name: "Milk", variantId: v, reorderLevel: 10, maxQty: 50 });
+      // F&B: a group line at 90 with this hotel's override at 60, a plain line at 80
+      await makeContract(t, {
+        departmentId: FB, lines: [{ variantId: v, unitRate: 90 }], committedQty: 500, consumedQty: 100,
+        group: { [A1]: { committedQty: 40, consumedQty: 10, rateOverride: 60 } },
+      });
+      const plain = await makeContract(t, { departmentId: FB, vendorId: VENDOR_B, lines: [{ variantId: v, unitRate: 80 }] });
+      // Housekeeping: only a group line at 90, overridden to 50 here
+      const hkGroup = await makeContract(t, {
+        departmentId: HK, lines: [{ variantId: v, unitRate: 90 }], committedQty: 500, consumedQty: 100,
+        group: { [A1]: { committedQty: 40, consumedQty: 10, rateOverride: 50 } },
+      });
+
+      const row = rowOf(await getReorderList(t, STORE, { hotelId: A1 }), milk);
+      expect(row.contracted).toMatchObject({
+        departmentId: FB, arcContractLineId: plain.lineIds[0], unitRate: 80, remainingQty: 1000, isGroup: false,
+        hotelRemainingQty: null,
+      });
+      const hk = row.contractedLines.find((l) => l.departmentId === HK);
+      expect(hk).toMatchObject({
+        arcContractLineId: hkGroup.lineIds[0], unitRate: 90, remainingQty: 400, isGroup: true, hotelRemainingQty: 30,
+      });
+
+      // the draft stores exactly the rate the list showed
+      const draft = await createReorderMrDraft(t, STORE, { hotelId: A1, departmentId: HK, items: [{ invItemId: milk, qty: 5 }] });
+      const stored = await t.one(
+        `SELECT matched_unit_rate::float AS rate FROM tbl_material_requisition_item WHERE mr_id = $1`,
+        [draft.mrId]
+      );
+      expect(stored.rate).toBe(hk.unitRate);
+      expect(draft.items[0].unitRate).toBe(hk.unitRate);
+    });
+  });
+
+  it("open MR quantity: drafts and pending MRs at the hotel, shown and never subtracted", async () => {
+    await withTx(async (t) => {
+      await grantCast(t);
+      const v = V[0];
+      const milk = await itemWith(t, { name: "Milk", variantId: v, reorderLevel: 10, maxQty: 50, qty: 4 });
+      await setUom(t, milk, "case", 12);
+      const arc = await makeContract(t, { lines: [{ variantId: v, uom: "litre" }] });
+      const it = (qty, uom = "litre") => ({ variantId: v, qty, uom, contractId: arc.contractId, lineId: arc.lineIds[0] });
+      await makeMr(t, { status: "draft", items: [it(5)] });
+      await makeMr(t, { status: "pending_approval", items: [it(3)] });
+      await makeMr(t, { status: "draft", items: [it(2, "case")] }); // 24 litres
+      await makeMr(t, { status: "approved", items: [it(7)] }); // on order
+      await makeMr(t, { status: "cancelled", items: [it(100)] });
+      await makeMr(t, { status: "rejected", items: [it(50)] });
+      await makeMr(t, { hotelId: A2, status: "draft", items: [it(9)] }); // another hotel
+
+      const row = rowOf(await getReorderList(t, STORE, { hotelId: A1 }), milk);
+      expect(row).toMatchObject({ qty: 4, onOrder: 7, openMrQty: 5 + 3 + 24, suggestedQty: 50 - 4 - 7 });
+    });
+  });
+
+  it("can.createMrDraft: inventory.update at the hotel, and a buyer", async () => {
+    await withTx(async (t) => {
+      await grantCast(t);
+      await itemWith(t, { name: "Milk", variantId: V[0], reorderLevel: 10, maxQty: 50 });
+      expect((await getReorderList(t, STORE, { hotelId: A1 })).can).toEqual({ createMrDraft: true });
+      // the same storekeeper on a non-buyer account
+      expect((await getReorderList(t, { id: STORE_ID, user_type: 5 }, { hotelId: A1 })).can).toEqual({ createMrDraft: false });
+      // inventory.read only
+      const viewer = IDS.users.a1_proc_techEval;
+      const custom = Number((await t.one(
+        `INSERT INTO tbl_roles (title, description, created_by) VALUES ('D3 list viewer', 'reorder test', $1) RETURNING id`,
+        [STORE_ID]
+      )).id);
+      await t.none(
+        `INSERT INTO tbl_role_permissions (role_id, permission_id)
+         SELECT $1, id FROM tbl_permissions WHERE resource::text = 'inventory' AND action::text = 'read'`,
+        [custom]
+      );
+      await grantRoleScope(t, { userId: viewer, roleId: custom, companyId: CO });
+      const seen = await getReorderList(t, { id: viewer, user_type: 2 }, { hotelId: A1 });
+      expect(seen.hotelId).toBe(A1);
+      expect(seen.can).toEqual({ createMrDraft: false });
+      // no hotel at all
+      expect((await getReorderList(t, { id: VENDOR, user_type: 3 }, {})).can).toEqual({ createMrDraft: false });
+    });
+  });
+
   it("a hotel outside the caller's scope is not found", async () => {
     await withTx(async (t) => {
       await grantCast(t);
@@ -378,6 +482,97 @@ describe("MR draft from the reorder list", () => {
       expect(unit.details).toMatchObject({ invItemId: oil, reason: "UOM_FACTOR_REQUIRED" });
       expect(unit.message).toMatch(/litre.*tin.*Oil/);
       expect(await mrCount()).toBe(before);
+    });
+  });
+
+  it("a contract's remaining quantity is a hard cap; a group hotel's own share is soft", async () => {
+    await withTx(async (t) => {
+      await grantCast(t);
+      const [v1, , v3] = V;
+      const milk = await itemWith(t, { name: "Milk", variantId: v1, reorderLevel: 10, maxQty: 50 });
+      const juice = await itemWith(t, { name: "Juice", variantId: v3, reorderLevel: 12, maxQty: 36 });
+      await setUom(t, juice, "case", 12);
+      // 5 left on each line (litres for milk, cases for juice)
+      const tight = await makeContract(t, {
+        departmentId: FB, lines: [{ variantId: v1, unitRate: 80 }, { variantId: v3, unitRate: 300, uom: "Case" }],
+        committedQty: 10, consumedQty: 5,
+      });
+      const mrCount = async () => Number((await t.one(`SELECT count(*) FROM tbl_material_requisition WHERE raised_by = $1`, [STORE_ID])).count);
+      const before = await mrCount();
+
+      // 6 litres of milk; 72 litres of juice = 6 cases
+      const err = await thrownBy(t, (sp) =>
+        createReorderMrDraft(sp, STORE, {
+          hotelId: A1, departmentId: FB, items: [{ invItemId: milk, qty: 6 }, { invItemId: juice, qty: 72 }],
+        })
+      );
+      expect(err.code).toBe("VALIDATION");
+      expect(err.details).toMatchObject({
+        field: "items", index: 0, invItemId: milk, reason: "EXCEEDS_CONTRACT_REMAINING", remaining: 5, quantity: 6,
+      });
+      expect(err.details.lines.map((l) => [l.invItemId, l.reason, l.quantity, l.remaining, l.uom, l.arcContractLineId])).toEqual([
+        [milk, "EXCEEDS_CONTRACT_REMAINING", 6, 5, "litre", tight.lineIds[0]],
+        [juice, "EXCEEDS_CONTRACT_REMAINING", 6, 5, "Case", tight.lineIds[1]],
+      ]);
+      expect(err.message).toBe("2 items cannot go on a requisition: Milk: 6 litre is more than the contract has left (5 litre)");
+      expect(await mrCount()).toBe(before);
+
+      // exactly what is left goes through
+      const exact = await createReorderMrDraft(t, STORE, {
+        hotelId: A1, departmentId: FB, items: [{ invItemId: milk, qty: 5 }, { invItemId: juice, qty: 60 }],
+      });
+      expect(exact.items.map((i) => i.quantity)).toEqual([5, 5]);
+      expect(exact.warnings).toEqual([]);
+
+      // a group line: 100 left for the group, 2 left of this hotel's share
+      const group = await makeContract(t, {
+        departmentId: HK, lines: [{ variantId: v1, unitRate: 90 }], committedQty: 100, consumedQty: 0,
+        group: { [A1]: { committedQty: 10, consumedQty: 8 } },
+      });
+      const over = await createReorderMrDraft(t, STORE, { hotelId: A1, departmentId: HK, items: [{ invItemId: milk, qty: 5 }] });
+      expect(over.items).toEqual([expect.objectContaining({ arcContractLineId: group.lineIds[0], quantity: 5 })]);
+      expect(over.warnings).toEqual([
+        {
+          invItemId: milk, arcContractLineId: group.lineIds[0], hotelId: A1, quantity: 5, hotelRemainingQty: 2,
+          message: "Milk: 5 is more than this hotel's remaining share (2). The group total has room, so the order can go ahead; head office will be told.",
+        },
+      ]);
+      // past the group's own remaining: refused
+      const groupOver = await thrownBy(t, (sp) =>
+        createReorderMrDraft(sp, STORE, { hotelId: A1, departmentId: HK, items: [{ invItemId: milk, qty: 101 }] })
+      );
+      expect(groupOver.details).toMatchObject({ reason: "EXCEEDS_CONTRACT_REMAINING", remaining: 100, quantity: 101 });
+    });
+  });
+
+  it("a repeated clientEventId answers the draft it made, and never another one", async () => {
+    await withTx(async (t) => {
+      await grantCast(t);
+      const milk = await itemWith(t, { name: "Milk", variantId: V[0], reorderLevel: 10, maxQty: 50 });
+      await makeContract(t, { departmentId: FB, lines: [{ variantId: V[0], unitRate: 80 }] });
+      await makeContract(t, { departmentId: HK, lines: [{ variantId: V[0], unitRate: 80 }] });
+      const key = randomUUID();
+      const body = { hotelId: A1, departmentId: FB, clientEventId: key, items: [{ invItemId: milk, qty: 5 }] };
+
+      const first = await createReorderMrDraft(t, STORE, body);
+      expect(first).not.toHaveProperty("replayed");
+      expect(first).toMatchObject({ status: "draft", items: [{ invItemId: milk, quantity: 5, unitRate: 80 }] });
+      // a retry (even with other quantities, or the key in capitals) answers the first draft
+      const again = await createReorderMrDraft(t, STORE, { ...body, clientEventId: key.toUpperCase(), items: [{ invItemId: milk, qty: 9 }] });
+      expect(again).toEqual({ ...first, replayed: true, no_op: true });
+      const made = await t.any(`SELECT id FROM tbl_material_requisition WHERE client_event_id = $1`, [key]);
+      expect(made.map((r) => Number(r.id))).toEqual([first.mrId]);
+
+      // the key never answers another department's or another user's request
+      const otherDept = await thrownBy(t, (sp) => createReorderMrDraft(sp, STORE, { ...body, departmentId: HK }));
+      expect(otherDept).toMatchObject({ code: "CONFLICT", details: { field: "clientEventId" } });
+      const otherUser = await thrownBy(t, (sp) => createReorderMrDraft(sp, CTRL, body));
+      expect(otherUser).toMatchObject({ code: "CONFLICT", details: { field: "clientEventId" } });
+      const bad = await thrownBy(t, (sp) => createReorderMrDraft(sp, STORE, { ...body, clientEventId: "not-a-uuid" }));
+      expect(bad).toMatchObject({ code: "VALIDATION", details: { field: "clientEventId" } });
+      // no key: a new draft each time
+      const plain = await createReorderMrDraft(t, STORE, { ...body, clientEventId: undefined });
+      expect(plain.mrId).not.toBe(first.mrId);
     });
   });
 
@@ -495,6 +690,20 @@ describe("low-stock digest", () => {
     }
   });
 
+  it("with no date given the digest is for today in IST, whatever the session zone", async () => {
+    await withTx(async (t) => {
+      await t.none(`SET LOCAL TIME ZONE 'UTC'`);
+      await grantCast(t);
+      await itemWith(t, { name: "Milk", reorderLevel: 10, maxQty: 50, qty: 4 });
+      await startStock(t, A1);
+      const notify = jest.fn(async () => ({ sent: true, recipients: 1 }));
+      const out = await runLowStockSweep({ conn: t, notify });
+      const ist = new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Kolkata" }).format(new Date());
+      expect(out).toMatchObject({ date: ist, digests: 1 });
+      expect(notify.mock.calls[0][0].date).toBe(ist);
+    });
+  });
+
   it("a run that cannot take the lock is skipped", async () => {
     const holder = await db.connect();
     try {
@@ -562,8 +771,9 @@ describe("over HTTP", () => {
     expect(res.status).toBe(200);
     expect(res.body.status).toBe(1);
     expect(res.body.data.rows.find((r) => r.invItemId === milk)).toMatchObject({
-      suggestedQty: 46, contracted: { arcContractLineId: contract.lineIds[0], unitRate: 90 },
+      suggestedQty: 46, openMrQty: 0, contracted: { arcContractLineId: contract.lineIds[0], unitRate: 90 },
     });
+    expect(res.body.data.can).toEqual({ createMrDraft: true });
 
     const foreign = await httpClient(FOREIGN_ID);
     const denied = await foreign.get(`/api/v1/inventory/reorder?hotelId=${A1}`);
@@ -592,5 +802,72 @@ describe("over HTTP", () => {
       hotelId: A1, departmentId: FB, items: [{ invItemId: milk, qty: 1 }],
     });
     expect(denied.status).toBe(404);
+  });
+
+  it("a repeated clientEventId answers 200 with the first draft and records no second activity row", async () => {
+    const store = await httpClient(STORE_ID);
+    const body = { hotelId: A1, departmentId: FB, clientEventId: randomUUID(), items: [{ invItemId: milk, qty: 3 }] };
+    const first = await store.post("/api/v1/inventory/reorder/mr-draft").send(body);
+    expect(first.status).toBe(201);
+    mrIds.push(first.body.data.mrId);
+    expect(await activityEvent(first.body.data.mrId)).toBeTruthy();
+
+    const again = await store.post("/api/v1/inventory/reorder/mr-draft").send(body);
+    expect(again.status).toBe(200);
+    expect(again.body.data).toEqual({ ...first.body.data, replayed: true, no_op: true });
+    // capture runs after the response: give a second row time to appear
+    await new Promise((r) => setTimeout(r, 500));
+    const rows = await db.any(
+      `SELECT id FROM tbl_activity_events WHERE entity_type = 'MR' AND entity_id = $1 AND event_key = 'inventory_reorder_mr_drafted'`,
+      [String(first.body.data.mrId)]
+    );
+    expect(rows).toHaveLength(1);
+  });
+
+  it("403 without inventory.update or on a non-buyer account; a department out of scope is a 404 envelope", async () => {
+    const body = { hotelId: A1, departmentId: FB, items: [{ invItemId: milk, qty: 1 }] };
+
+    // CTRL holds inventory.update company-wide but is not a buyer (user_type NULL)
+    const ctrl = await httpClient(CTRL_ID);
+    const notBuyer = await ctrl.post("/api/v1/inventory/reorder/mr-draft").send(body);
+    expect(notBuyer.status).toBe(403);
+    expect(notBuyer.body).toMatchObject({ status: 0, code: "FORBIDDEN" });
+    expect((await ctrl.get(`/api/v1/inventory/reorder?hotelId=${A1}`)).body.data.can).toEqual({ createMrDraft: false });
+
+    // a buyer with inventory.read only
+    const viewer = IDS.users.a1_proc_techEval;
+    const priorType = (await db.one(`SELECT user_type FROM tbl_users WHERE id = $1`, [viewer])).user_type;
+    const role = Number((await db.one(
+      `INSERT INTO tbl_roles (title, description, created_by) VALUES ('D3 HTTP viewer', 'reorder test', $1) RETURNING id`,
+      [STORE_ID]
+    )).id);
+    let scope = [];
+    try {
+      await db.none(
+        `INSERT INTO tbl_role_permissions (role_id, permission_id)
+         SELECT $1, id FROM tbl_permissions WHERE resource::text = 'inventory' AND action::text = 'read'`,
+        [role]
+      );
+      scope = [await grantRoleScope(db, { userId: viewer, roleId: role, companyId: CO })];
+      await db.none(`UPDATE tbl_users SET user_type = 2 WHERE id = $1`, [viewer]);
+      const client = await httpClient(viewer);
+      const readOnly = await client.post("/api/v1/inventory/reorder/mr-draft").send(body);
+      expect(readOnly.status).toBe(403);
+      expect(readOnly.body).toMatchObject({ status: 0, code: "FORBIDDEN" });
+      expect((await client.get(`/api/v1/inventory/reorder?hotelId=${A1}`)).body.data.can).toEqual({ createMrDraft: false });
+    } finally {
+      await db.none(`UPDATE tbl_users SET user_type = $2 WHERE id = $1`, [viewer, priorType ?? null]);
+      await revokeRoleScopes(db, scope);
+      await db.none(`DELETE FROM tbl_role_permissions WHERE role_id = $1`, [role]);
+      await db.none(`DELETE FROM tbl_roles WHERE id = $1`, [role]);
+    }
+
+    // a department that does not exist (or is not the caller's): the inventory 404 envelope
+    const store = await httpClient(STORE_ID);
+    const ghost = await store.post("/api/v1/inventory/reorder/mr-draft").send({ ...body, departmentId: 999999 });
+    expect(ghost.status).toBe(404);
+    expect(ghost.body).toEqual({
+      status: 2, message: "Department not found", code: "NOT_FOUND", details: { field: "departmentId" },
+    });
   });
 });

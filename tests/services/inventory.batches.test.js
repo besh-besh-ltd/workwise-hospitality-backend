@@ -11,12 +11,16 @@
 //   - Σ batch qty = balance qty for every tracked item, whatever happens;
 //   - items that do not track expiry keep no batches and are never split;
 //   - the documents that read movements per line (mark-out, adjustment,
-//     count) still show one line with its whole value when it was split.
+//     count) still show one line with its whole value when it was split;
+//   - an EXPIRY write-off takes the lots that have already expired first;
+//   - the real documents (GRN post with mark-out on arrival, GRN reversal,
+//     RTV dispatch, opening import) keep the batches in step;
+//   - drift on an item that already had batch rows is healed and logged.
 //
 // Service cases run inside withTx. The concurrency case commits, so the suite
 // truncates the dynamic tables before and after.
 
-import { describe, it, expect, beforeAll, afterAll } from "@jest/globals";
+import { describe, it, expect, beforeAll, afterAll, jest } from "@jest/globals";
 import { randomUUID } from "crypto";
 import { db, withTx, closeDb, truncateDynamic } from "../setup/db.js";
 import { postMovements, NO_EXPIRY_DATE } from "../../app/services/inventory/ledger.js";
@@ -24,9 +28,16 @@ import { postOut } from "../../app/services/inventory/outService.js";
 import { createAdjustment, getAdjustment, listAdjustments } from "../../app/services/inventory/adjustmentService.js";
 import { startCount, saveCountLines, submitCount, approveCount } from "../../app/services/inventory/countService.js";
 import { getStockItem } from "../../app/services/inventory/stockQueries.js";
+import { postGrn } from "../../app/services/inventory/grnService.js";
+import { reverseGrn } from "../../app/services/inventory/grnReverse.js";
+import { createRtv, dispatchRtv } from "../../app/services/inventory/rtvService.js";
+import { postOpeningStock } from "../../app/services/inventory/openingImport.js";
+import { resolveItemForVariant } from "../../app/services/inventory/items.js";
+import { logger } from "../../app/util/logger.js";
 import {
-  CO, A1, A2, FB, STORE, STORE_ID, CTRL, grantCast, makeItem, setCompanySettings, thrownBy,
+  CO, A1, A2, FB, STORE, STORE_ID, CTRL, grantCast, makeItem, setCompanySettings, thrownBy, istToday, addDays,
 } from "../helpers/invStockFixtures.js";
+import { makeRfqPo } from "../helpers/invReceiptFixtures.js";
 
 beforeAll(async () => {
   await truncateDynamic();
@@ -193,12 +204,13 @@ describe("FEFO", () => {
         { batchNo: "LOT-A", expiryDate: "2026-11-20", qty: 6 },
         { batchNo: "", expiryDate: NO_EXPIRY_DATE, qty: 2 },
       ]);
-      // the item card shows the undated bucket with no expiry date
+      // the item card lists stock on hand in the order FEFO takes it: the
+      // undated bucket (no expiry date) first, then by expiry; empty lots are left out
       await grantCast(t);
       const card = await getStockItem(t, STORE, { hotelId: A1, invItemId: milk });
       expect(card.batches).toEqual([
-        { batchNo: "LOT-A", expiryDate: "2026-11-20", qty: 6 },
         { batchNo: null, expiryDate: null, qty: 2 },
+        { batchNo: "LOT-A", expiryDate: "2026-11-20", qty: 6 },
       ]);
       // a negative opening delta is an outbound like any other
       await postMovements(t, [mv(milk, "OPENING", -3)]);
@@ -265,6 +277,222 @@ describe("FEFO", () => {
       expect(err.code).toBe("NEGATIVE_STOCK");
       expect(err.details).toMatchObject({ available: 2, requested: 5 });
     });
+  });
+});
+
+describe("expiry write-off", () => {
+  it("an EXPIRY write-off empties the expired lot, not the undated bucket", async () => {
+    await withTx(async (t) => {
+      await grantCast(t);
+      await setCompanySettings(t, { autoApproveLimit: 100000 });
+      const today = await istToday(t);
+      const milk = await trackedItem(t);
+      await postMovements(t, [
+        mv(milk, "OPENING", 10, { unitCost: 30 }),
+        mv(milk, "GRN_IN", 6, { unitCost: 40, ...lot("OLD", "2026-10-01") }),
+      ]);
+      const writeOff = (reasonCode, qty) =>
+        createAdjustment(t, STORE, {
+          hotelId: A1, reasonCode, submit: true, clientEventId: randomUUID(), lines: [{ invItemId: milk, qty }],
+        });
+
+      const { adjustment } = await writeOff("EXPIRY", -6);
+      expect(adjustment.status).toBe("posted");
+      expect(await batchesOf(t, milk)).toEqual([
+        { batchNo: "OLD", expiryDate: "2026-10-01", qty: 0 },
+        { batchNo: "", expiryDate: NO_EXPIRY_DATE, qty: 10 },
+      ]);
+      const rows = await t.any(
+        `SELECT batch_no, qty::float AS qty, reason_code FROM tbl_inv_movement WHERE source_type = 'ADJ' AND source_id = $1`,
+        [adjustment.id]
+      );
+      expect(rows).toEqual([{ batch_no: "OLD", qty: -6, reason_code: "EXPIRY" }]);
+
+      // expired lots first (earliest first), then FEFO; a lot expiring today has not expired yet
+      await postMovements(t, [
+        mv(milk, "GRN_IN", 2, { unitCost: 40, ...lot("OLDER", "2026-09-01") }),
+        mv(milk, "GRN_IN", 3, { unitCost: 40, ...lot("OLD-2", "2026-10-02") }),
+        mv(milk, "GRN_IN", 4, { unitCost: 40, ...lot("TODAY", today) }),
+        mv(milk, "GRN_IN", 5, { unitCost: 40, ...lot("NEW", addDays(today, 30)) }),
+      ]);
+      const { adjustment: second } = await writeOff("EXPIRY", -7);
+      const split = await t.any(
+        `SELECT batch_no, qty::float AS qty FROM tbl_inv_movement WHERE source_type = 'ADJ' AND source_id = $1 ORDER BY id`,
+        [second.id]
+      );
+      expect(split).toEqual([
+        { batch_no: "OLDER", qty: -2 },
+        { batch_no: "OLD-2", qty: -3 },
+        { batch_no: null, qty: -2 },
+      ]);
+
+      // any other write-off goes FEFO: the undated bucket first
+      await writeOff("WASTAGE", -1);
+      expect(nonZero(await batchesOf(t, milk))).toEqual([
+        { batchNo: "TODAY", expiryDate: today, qty: 4 },
+        { batchNo: "NEW", expiryDate: addDays(today, 30), qty: 5 },
+        { batchNo: "", expiryDate: NO_EXPIRY_DATE, qty: 7 },
+      ]);
+      expect(await batchDrift(t)).toEqual([]);
+    });
+  });
+});
+
+describe("real documents keep the batches", () => {
+  /** A tracked stock item mapped to an unused catalogue variant (stock unit pcs). */
+  async function trackedVariantItem(t) {
+    const variantId = Number((await t.one(`SELECT id FROM tbl_product_variant ORDER BY id DESC LIMIT 1`)).id);
+    const item = await resolveItemForVariant(t, {
+      companyId: CO, productVariantId: variantId, createIfMissing: true, userId: STORE_ID, defaultUom: "pcs",
+    });
+    await t.none(`UPDATE tbl_inv_item SET track_expiry = true WHERE id = $1`, [item.id]);
+    return { variantId, invItemId: Number(item.id) };
+  }
+  const grnLine = (poLineId, qty, extra = {}) => ({ poLineId, receivedQty: qty, acceptedQty: qty, rejectedQty: 0, ...extra });
+
+  it("GRN post (with mark-out on arrival), reversal and RTV dispatch move the batch they name", async () => {
+    await withTx(async (t) => {
+      await grantCast(t);
+      const today = await istToday(t);
+      const { variantId, invItemId } = await trackedVariantItem(t);
+      const { poId, lineIds: [line] } = await makeRfqPo(t, { lines: [{ qty: 20, unit: "pcs", variantId, unitPrice: 40 }] });
+      await postMovements(t, [mv(invItemId, "OPENING", 4, { unitCost: 30 })]);
+      const receive = (lines) =>
+        postGrn(t, CTRL, { input: { poId, hotelId: A1, receivedAt: today, clientEventId: randomUUID(), lines } });
+
+      // 8 into LOT-1
+      const lot1 = addDays(today, 60);
+      const { grn: first } = await receive([grnLine(line, 8, { batchNo: "LOT-1", expiryDate: lot1 })]);
+      expect(nonZero(await batchesOf(t, invItemId))).toEqual([
+        { batchNo: "LOT-1", expiryDate: lot1, qty: 8 },
+        { batchNo: "", expiryDate: NO_EXPIRY_DATE, qty: 4 },
+      ]);
+
+      // 3 of LOT-2 marked out on arrival: in and straight out of LOT-2, the
+      // undated bucket (first in FEFO) untouched
+      const lot2 = addDays(today, 30);
+      const { grn: second } = await receive([grnLine(line, 3, { batchNo: "LOT-2", expiryDate: lot2, markOutDepartmentId: FB })]);
+      const arrival = await t.any(
+        `SELECT movement_type, qty::float AS qty, batch_no FROM tbl_inv_movement
+          WHERE source_type = 'GRN' AND source_id = $1 ORDER BY id`,
+        [second.id]
+      );
+      expect(arrival).toEqual([
+        { movement_type: "GRN_IN", qty: 3, batch_no: "LOT-2" },
+        { movement_type: "MARK_OUT", qty: -3, batch_no: "LOT-2" },
+      ]);
+      expect(await batchesOf(t, invItemId)).toEqual([
+        { batchNo: "LOT-2", expiryDate: lot2, qty: 0 },
+        { batchNo: "LOT-1", expiryDate: lot1, qty: 8 },
+        { batchNo: "", expiryDate: NO_EXPIRY_DATE, qty: 4 },
+      ]);
+
+      // reversing it takes the mark-out back into LOT-2 and LOT-2 back out
+      const { grn: reversal } = await reverseGrn(t, CTRL, { grnId: second.id, reason: "Wrong PO", lines: "all" });
+      const back = await t.any(
+        `SELECT movement_type, qty::float AS qty, batch_no FROM tbl_inv_movement
+          WHERE source_type = 'GRN' AND source_id = $1 ORDER BY id`,
+        [reversal.id]
+      );
+      expect(back).toEqual([
+        { movement_type: "RETURN_IN", qty: 3, batch_no: "LOT-2" },
+        { movement_type: "GRN_REVERSAL", qty: -3, batch_no: "LOT-2" },
+      ]);
+      expect(nonZero(await batchesOf(t, invItemId))).toEqual([
+        { batchNo: "LOT-1", expiryDate: lot1, qty: 8 },
+        { batchNo: "", expiryDate: NO_EXPIRY_DATE, qty: 4 },
+      ]);
+
+      // returning 5 of the first receipt to the vendor takes them from LOT-1
+      const firstLine = first.lines[0].id;
+      const rtv = await createRtv(t, CTRL, {
+        grnId: first.id, disposition: "CREDIT", lines: [{ grnLineId: firstLine, qty: 5, reason: "Damaged" }],
+      });
+      await dispatchRtv(t, CTRL, rtv.id, { challanNo: "GP-D3" });
+      const sent = await t.any(
+        `SELECT movement_type, qty::float AS qty, batch_no FROM tbl_inv_movement
+          WHERE source_type = 'RTV' AND source_id = $1 ORDER BY id`,
+        [rtv.id]
+      );
+      expect(sent).toEqual([{ movement_type: "RTV_OUT", qty: -5, batch_no: "LOT-1" }]);
+      expect(nonZero(await batchesOf(t, invItemId))).toEqual([
+        { batchNo: "LOT-1", expiryDate: lot1, qty: 3 },
+        { batchNo: "", expiryDate: NO_EXPIRY_DATE, qty: 4 },
+      ]);
+      expect(await balanceQty(t, invItemId)).toBe(7);
+      expect(await batchDrift(t)).toEqual([]);
+    });
+  });
+
+  it("opening import on a tracked item: new stock is undated, a lower target comes out FEFO", async () => {
+    await withTx(async (t) => {
+      await grantCast(t);
+      const fresh = await trackedItem(t, "Fresh tracked");
+      const held = await trackedItem(t, "Held tracked");
+      // received before the hotel's stock started
+      await postMovements(t, [
+        mv(held, "GRN_IN", 6, { unitCost: 40, ...lot("LOT-A", "2026-11-20") }),
+        mv(held, "GRN_IN", 4, { unitCost: 40, ...lot("LOT-B", "2026-12-10") }),
+      ]);
+
+      const { result } = await postOpeningStock(
+        t, CTRL, A1,
+        [{ invItemId: fresh, stockQty: 12, unitCost: 25 }, { invItemId: held, stockQty: 7, unitCost: 40 }],
+        randomUUID()
+      );
+      expect(await batchesOf(t, fresh)).toEqual([{ batchNo: "", expiryDate: NO_EXPIRY_DATE, qty: 12 }]);
+      // 10 held, target 7: the 3 come out of the earliest lot
+      expect(nonZero(await batchesOf(t, held))).toEqual([
+        { batchNo: "LOT-A", expiryDate: "2026-11-20", qty: 3 },
+        { batchNo: "LOT-B", expiryDate: "2026-12-10", qty: 4 },
+      ]);
+      const opening = await t.any(
+        `SELECT inv_item_id, qty::float AS qty, batch_no FROM tbl_inv_movement
+          WHERE source_type = 'ADJ' AND source_id = $1 ORDER BY id`,
+        [result.adjustmentId]
+      );
+      expect(opening).toEqual(expect.arrayContaining([
+        { inv_item_id: fresh, qty: 12, batch_no: null },
+        { inv_item_id: held, qty: -3, batch_no: "LOT-A" },
+      ]));
+      expect(opening).toHaveLength(2);
+      expect(await batchDrift(t)).toEqual([]);
+    });
+  });
+});
+
+describe("drift", () => {
+  it("drift on an item that already had batch rows is folded in and logged; first-time tracking is not", async () => {
+    const warn = jest.spyOn(logger, "warn");
+    try {
+      await withTx(async (t) => {
+        const milk = await trackedItem(t);
+        await postMovements(t, [mv(milk, "GRN_IN", 5, { unitCost: 40, ...lot("LOT-A", "2026-11-20") })]);
+        // stock written around postMovements: the balance says 8, the batches 5
+        await t.none(`UPDATE tbl_inv_balance SET qty = qty + 3 WHERE hotel_id = $1 AND inv_item_id = $2`, [A1, milk]);
+
+        // an item that starts tracking with stock on hand heals silently
+        const curd = await makeItem(t, { name: "Curd", stockUom: "pcs" });
+        await postMovements(t, [mv(curd, "OPENING", 10, { unitCost: 20 })]);
+        await t.none(`UPDATE tbl_inv_item SET track_expiry = true WHERE id = $1`, [curd]);
+
+        warn.mockClear();
+        await postMovements(t, [mv(milk, "MARK_OUT", -1), mv(curd, "MARK_OUT", -1)]);
+        const drifted = warn.mock.calls.filter(([, msg]) => String(msg).startsWith("[inventory.ledger]"));
+        expect(drifted).toEqual([
+          [{ hotelId: A1, invItemId: milk, residual: "3.0000" }, expect.stringContaining("batch rows drifted")],
+        ]);
+        // healed: the 3 sat undated and went out first
+        expect(nonZero(await batchesOf(t, milk))).toEqual([
+          { batchNo: "LOT-A", expiryDate: "2026-11-20", qty: 5 },
+          { batchNo: "", expiryDate: NO_EXPIRY_DATE, qty: 2 },
+        ]);
+        expect(nonZero(await batchesOf(t, curd))).toEqual([{ batchNo: "", expiryDate: NO_EXPIRY_DATE, qty: 9 }]);
+        expect(await batchDrift(t)).toEqual([]);
+      });
+    } finally {
+      warn.mockRestore();
+    }
   });
 });
 
