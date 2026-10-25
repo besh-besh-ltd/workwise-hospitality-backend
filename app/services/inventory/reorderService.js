@@ -43,7 +43,7 @@ import cron from 'node-cron';
 import db from '../../config/dbConn.js';
 import { logError } from '../../helper/common.js';
 import mrModel from '../../models/mr/mrModel.js';
-import { assertUserHasScope, isAuthorizationError } from '../authorizationService.js';
+import { assertUserHasScope, departmentsInScope, isAuthorizationError } from '../authorizationService.js';
 import { logger } from '../../util/logger.js';
 import { hotelIdsWithPermission } from './scope.js';
 import { RECEIVABLE_PO_STATUSES } from './grnService.js';
@@ -264,34 +264,24 @@ async function withStoredRates(t, lines) {
 
 /**
  * Departments the user may raise an MR for at the hotel: a buyer's grants of
- * mr.create there (a grant with no department covers them all; super admin:
- * all). The predicate is assertUserHasScope's with no process, so every
- * department listed is one the POST admits.
+ * mr.create there (super admin: all). authorizationService.departmentsInScope
+ * runs assertUserHasScope's own predicate (no process), so every department
+ * listed is one the POST admits, and only those.
  */
 async function mrDepartments(t, user, { hotelId, companyId }) {
   if (Number(user?.user_type) === SUPER_ADMIN) {
     return t.any(`SELECT id, title FROM tbl_department ORDER BY title`);
   }
   if (!MR_USER_TYPES.includes(Number(user?.user_type))) return [];
-  return t.any(
-    `WITH grants AS (
-       SELECT urs.department_id
-         FROM tbl_user_role_scopes urs
-         JOIN tbl_role_permissions rp ON rp.role_id = urs.role_id
-         JOIN tbl_permissions p ON p.id = rp.permission_id
-        WHERE urs.user_id = $1
-          AND urs.company_id = $2
-          AND (urs.hotel_id IS NULL OR urs.hotel_id = $3)
-          AND urs.process_id IS NULL
-          AND (p.resource || '.' || p.action) = 'mr.create'
-     )
-     SELECT d.id, d.title
-       FROM tbl_department d
-      WHERE EXISTS (SELECT 1 FROM grants WHERE department_id IS NULL)
-         OR d.id IN (SELECT department_id FROM grants WHERE department_id IS NOT NULL)
-      ORDER BY d.title`,
-    [positiveInt(user.id), companyId, hotelId]
+  const { all, departmentIds } = await departmentsInScope(
+    positiveInt(user.id),
+    'mr.create',
+    { hospitality_company_id: companyId, hotel_id: hotelId },
+    t
   );
+  if (all) return t.any(`SELECT id, title FROM tbl_department ORDER BY title`);
+  if (!departmentIds.length) return [];
+  return t.any(`SELECT id, title FROM tbl_department WHERE id = ANY($1::int[]) ORDER BY title`, [departmentIds]);
 }
 
 /**

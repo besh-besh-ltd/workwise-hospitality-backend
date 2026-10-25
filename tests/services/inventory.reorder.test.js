@@ -708,6 +708,51 @@ describe("MR draft from the reorder list", () => {
   });
 });
 
+describe("who may raise the draft: the list and the draft agree", () => {
+  it("for every shape of mr.create grant, GET lists exactly the departments the POST admits", async () => {
+    await withTx(async (t) => {
+      const buyer = IDS.users.a1_eng_buyer;
+      const user = { id: buyer, user_type: 2 };
+      await grantRoleScope(t, { userId: buyer, roleId: await roleId(t, "Storekeeper"), companyId: CO });
+      const milk = await itemWith(t, { name: "Milk", variantId: V[0], reorderLevel: 10, maxQty: 50 });
+      await makeContract(t, { departmentId: FB, lines: [{ variantId: V[0] }] });
+      const all = (await t.any(`SELECT id FROM tbl_department ORDER BY id`)).map((r) => Number(r.id));
+      const raiser = await roleId(t, "MR Raiser");
+
+      const shapes = [
+        ["company-wide", { hotelId: null, departmentId: null }, all],
+        ["at this hotel", { hotelId: A1, departmentId: null }, all],
+        ["at another hotel", { hotelId: A2, departmentId: null }, []],
+        ["one department here", { hotelId: A1, departmentId: FB }, [FB]],
+        ["one department, company-wide", { hotelId: null, departmentId: HK }, [HK]],
+        ["bound to a process", { hotelId: A1, departmentId: null, processId: IDS.processes.A_P1 }, []],
+      ];
+      for (const [shape, grant, expected] of shapes) {
+        const scope = await grantRoleScope(t, { userId: buyer, roleId: raiser, companyId: CO, ...grant });
+        const list = await getReorderList(t, user, { hotelId: A1 });
+        const listed = list.departments.map((d) => d.id).sort((a, b) => a - b);
+        // the draft's own check, department by department
+        const admitted = [];
+        for (const d of all) {
+          const ok = await assertUserHasScope(buyer, "mr.create", { hospitality_company_id: CO, hotel_id: A1, department_id: d }, t)
+            .then(() => true, () => false);
+          if (ok) admitted.push(d);
+        }
+        const draft = await thrownBy(t, (sp) =>
+          createReorderMrDraft(sp, user, { hotelId: A1, departmentId: FB, items: [{ invItemId: milk, qty: 1 }] }).then(() => {
+            throw Object.assign(new Error("made"), { code: "MADE" });
+          })
+        );
+        expect({ shape, listed, can: list.can.createMrDraft, fb: draft.code }).toEqual({
+          shape, listed: admitted, can: admitted.length > 0, fb: admitted.includes(FB) ? "MADE" : "FORBIDDEN",
+        });
+        expect({ shape, listed }).toEqual({ shape, listed: [...expected].sort((a, b) => a - b) });
+        await revokeRoleScopes(t, [scope]);
+      }
+    });
+  });
+});
+
 describe("low-stock digest", () => {
   it("low-stock digest skips not-started hotels", async () => {
     await withTx(async (t) => {
@@ -976,5 +1021,34 @@ describe("over HTTP", () => {
     expect(ghost.body).toEqual({
       status: 2, message: "Department not found", code: "NOT_FOUND", details: { field: "departmentId" },
     });
+  });
+
+  it("a platform super admin (user_type 8) raises the draft with no mr.create grant", async () => {
+    const admin = IDS.users.a1_proc_commEval;
+    const prior = (await db.one(`SELECT user_type FROM tbl_users WHERE id = $1`, [admin])).user_type;
+    try {
+      await db.none(`UPDATE tbl_users SET user_type = 8 WHERE id = $1`, [admin]);
+      const held = await db.one(
+        `SELECT count(*)::int AS n FROM tbl_user_role_scopes urs
+           JOIN tbl_role_permissions rp ON rp.role_id = urs.role_id
+           JOIN tbl_permissions p ON p.id = rp.permission_id
+          WHERE urs.user_id = $1 AND p.resource::text = 'mr' AND p.action::text = 'create'`,
+        [admin]
+      );
+      expect(held.n).toBe(0);
+      const client = await httpClient(admin);
+      const list = await client.get(`/api/v1/inventory/reorder?hotelId=${A1}`);
+      expect({ status: list.status, can: list.body.data?.can }).toEqual({ status: 200, can: { createMrDraft: true } });
+      expect(list.body.data.departments.map((d) => d.id)).toEqual(expect.arrayContaining([FB]));
+      const res = await client.post("/api/v1/inventory/reorder/mr-draft").send({
+        hotelId: A1, departmentId: FB, items: [{ invItemId: milk, qty: 2 }],
+      });
+      expect(res.status).toBe(201);
+      expect(res.body.data).toMatchObject({ hotelId: A1, departmentId: FB, items: [{ invItemId: milk, quantity: 2 }] });
+      mrIds.push(res.body.data.mrId);
+      expect(await activityEvent(res.body.data.mrId)).toBeTruthy();
+    } finally {
+      await db.none(`UPDATE tbl_users SET user_type = $2 WHERE id = $1`, [admin, prior ?? null]);
+    }
   });
 });

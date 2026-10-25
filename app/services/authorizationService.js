@@ -204,6 +204,35 @@ export async function userHasAnyScope(userId, permissions, scope, dbContext = db
 }
 
 /**
+ * The departments a user's grants of `permission` cover at `scope` (its
+ * department_id is ignored). Same WHERE body (scopeMatchWhere) with the
+ * department left open, so department D is covered if and only if
+ * assertUserHasScope(userId, permission, { ...scope, department_id: D })
+ * passes: a grant naming no department covers every one (`all`), else the
+ * departments the grants name. Never throws on a missing user or company.
+ *
+ * @returns {Promise<{all: boolean, departmentIds: number[]}>}
+ */
+export async function departmentsInScope(userId, permission, scope, dbContext = db) {
+  if (!userId || !scope?.hospitality_company_id || typeof permission !== 'string' || !permission.includes('.')) {
+    return { all: false, departmentIds: [] };
+  }
+  const rows = await dbContext.any(
+    `
+    SELECT DISTINCT urs.department_id
+    ${SCOPE_MATCH_FROM}
+    WHERE urs.user_id = $1
+      AND ${scopeMatchWhere(2)}
+    `,
+    [userId, ...scopeMatchParams({ ...scope, department_id: null }, [permission])]
+  );
+  return {
+    all: rows.some((r) => r.department_id == null),
+    departmentIds: rows.filter((r) => r.department_id != null).map((r) => Number(r.department_id)),
+  };
+}
+
+/**
  * THE INVERSE of assertUserHasScope: every user whose grant on ANY of
  * `permissions` covers `scope`. Same predicate, same NULL/wildcard semantics —
  * scopeMatchWhere() is shared verbatim, so a user appears here if and only if
