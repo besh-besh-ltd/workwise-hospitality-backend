@@ -26,7 +26,7 @@ import { pdfRenderer } from '../../util/pdfRenderer.js';
 import { uploadToS3 } from '../../models/generalModel.js';
 import { supplierDetailsFor } from '../../helper/gstState.js';
 import { InventoryError } from './errors.js';
-import { assertHotelPermission } from './scope.js';
+import { assertGrnAccess } from './grnCommon.js';
 import { resolvePoLineUnitCost } from './cost.js';
 import { qrSvg } from './qr.js';
 import { shortUrl } from './shortUrl.js';
@@ -257,25 +257,18 @@ export async function loadGrnDocument(t, grnId) {
 export const buildGrnHtml = (ctx) => template('grn.html')(ctx);
 
 /**
- * May this user download this GRN's document? grn.read at its hotel; a GRN in
- * another company reads as not found; a draft has no document yet.
- * @throws InventoryError NOT_FOUND | FORBIDDEN | CONFLICT
+ * May this user download this GRN's document? Exactly what GET /grn/:id
+ * answers: grn.read at its hotel, else NOT_FOUND 'GRN not found' (rule C3,
+ * inside the caller's company too); a draft has no document yet.
+ * @throws InventoryError NOT_FOUND | CONFLICT
  */
 export async function assertGrnDocumentAccess(t, user, grnId) {
   const id = Number(grnId);
-  const notFound = () => new InventoryError('NOT_FOUND', 'Goods receipt not found');
   const g = Number.isInteger(id) && id > 0
-    ? await t.oneOrNone(`SELECT id, hospitality_company_id, hotel_id, status FROM tbl_grn WHERE id = $1`, [id])
+    ? await t.oneOrNone(`SELECT id, hospitality_company_id, hotel_id, po_id, status FROM tbl_grn WHERE id = $1`, [id])
     : null;
-  if (!g) throw notFound();
-  let companyId;
-  try {
-    ({ companyId } = await assertHotelPermission(t, user, { resource: 'grn', action: 'read', hotelId: g.hotel_id }));
-  } catch (err) {
-    if (err instanceof InventoryError && err.code === 'NOT_FOUND') throw notFound();
-    throw err;
-  }
-  if (Number(g.hospitality_company_id) !== companyId) throw notFound();
+  if (!g) throw new InventoryError('NOT_FOUND', 'GRN not found');
+  await assertGrnAccess(t, user, g, 'read');
   if (g.status === 'draft') {
     throw new InventoryError('CONFLICT', 'A draft goods receipt has no document yet', { grnId: id, status: g.status });
   }

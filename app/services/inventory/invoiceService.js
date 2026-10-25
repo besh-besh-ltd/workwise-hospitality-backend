@@ -48,7 +48,8 @@ const positiveInt = (v) => {
 };
 const blank = (v) => v == null || (typeof v === 'string' && v.trim() === '');
 const invalid = (field, message) => new InventoryError('VALIDATION', message, { field });
-const notFound = (poId) => new InventoryError('NOT_FOUND', 'Purchase order not found', { poId: poId ?? null });
+// One body for a missing PO and someone else's: no details to tell them apart.
+const notFound = () => new InventoryError('NOT_FOUND', 'Purchase order not found');
 
 /**
  * The invoice details of a /po/raiseInvoice body, validated.
@@ -121,17 +122,17 @@ export function parseInvoiceDetails(body = {}) {
 export async function raiseInvoice(t, actor, poId, { invoiceUrl, body } = {}) {
   const details = parseInvoiceDetails(body);
   const id = positiveInt(poId);
-  if (!id) throw notFound(poId);
+  if (!id) throw notFound();
 
   // The lock serialises invoices on one PO, so the duplicate checks below hold.
   const po = await t.oneOrNone(
     `SELECT id, status::text AS status, finalized_vendor_id FROM tbl_rfq_purchase_order WHERE id = $1 FOR UPDATE`,
     [id]
   );
-  if (!po) throw notFound(id);
+  if (!po) throw notFound();
   const vendorId = positiveInt(actor?.id);
-  if (!vendorId || Number(actor?.user_type) !== 3 || Number(po.finalized_vendor_id) !== vendorId) throw notFound(id);
-  if (INVALID_PO_STATUSES_FOR_VENDOR.includes(po.status)) throw notFound(id);
+  if (!vendorId || Number(actor?.user_type) !== 3 || Number(po.finalized_vendor_id) !== vendorId) throw notFound();
+  if (INVALID_PO_STATUSES_FOR_VENDOR.includes(po.status)) throw notFound();
   if (!INVOICEABLE_PO_STATUSES.includes(po.status)) {
     throw new InventoryError(
       'CONFLICT',

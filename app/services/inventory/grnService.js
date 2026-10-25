@@ -47,7 +47,7 @@
 //   grnReverse.js      reversals
 
 import { InventoryError } from './errors.js';
-import { hotelIdsWithPermission } from './scope.js';
+import { assertHotelPermission, hotelIdsWithPermission } from './scope.js';
 import { getEffectiveSettings } from './settings.js';
 import { nextDocNumber } from './docNumber.js';
 import { postMovements } from './ledger.js';
@@ -854,7 +854,9 @@ const useReceive = (message, details = {}) =>
 /**
  * Early gate for the legacy full receipt, before the receiving hotel is known:
  * a token must be a GRN token of this PO; a buyer must hold grn.create at one
- * of the PO's hotels (else NOT_FOUND outside the company, FORBIDDEN inside).
+ * of the PO's hotels (else NOT_FOUND outside the company, FORBIDDEN inside:
+ * the route's guardPo has already shown the PO itself to be visible, so this
+ * is "can see it, may not do this", rule C3).
  * The hotel-level check still runs once the hotel is picked.
  */
 async function assertLegacyCaller(t, actor, ctx, viaToken) {
@@ -864,7 +866,13 @@ async function assertLegacyCaller(t, actor, ctx, viaToken) {
   }
   const allowed = new Set(await hotelIdsWithPermission(t, actor, 'grn', 'create'));
   if (ctx.hotelIds.some((h) => allowed.has(h))) return;
-  await assertReceiveAccess(t, actor, ctx, ctx.hotelIds[0], { action: 'create' });
+  if (!ctx.hotelIds.length) throw new InventoryError('NOT_FOUND', 'Purchase order not found');
+  try {
+    await assertHotelPermission(t, actor, { resource: 'grn', action: 'create', hotelId: ctx.hotelIds[0] });
+  } catch (err) {
+    if (err instanceof InventoryError && err.code === 'NOT_FOUND') throw new InventoryError('NOT_FOUND', 'Purchase order not found');
+    throw err;
+  }
   throw new InventoryError('FORBIDDEN', 'You do not have permission to receive this purchase order');
 }
 

@@ -5,7 +5,9 @@
 //   - Item routes load the item first and derive the company from its row.
 //     A company the caller has no footing in is NOT_FOUND; one they belong to
 //     but lack the permission in is FORBIDDEN.
-//   - Hotel routes go through assertHotelPermission (company comes from the hotel).
+//   - Hotel routes go through assertVisibleHotelPermission (company comes from
+//     the hotel; rule C3: a hotel the caller can't see is NOT_FOUND, one they
+//     see without the permission FORBIDDEN).
 //   - Company-level routes without an entity (create item, settings, category
 //     defaults, suggestions) use the companies where the caller holds the
 //     permission on ANY hotel. With several, an optional hint (query / header)
@@ -15,7 +17,7 @@
 // { companyId, hotelId?, label } for res.locals.activityDetail.
 
 import { InventoryError } from './errors.js';
-import { assertHotelPermission, hotelIdsWithPermission } from './scope.js';
+import { assertVisibleHotelPermission, hotelIdsWithPermission } from './scope.js';
 import { getEffectiveSettings } from './settings.js';
 import { resolveItemForVariant, mapVariantToItem as mapVariant, suggestItems as suggest } from './items.js';
 import { setUomFactor, normalizeUomLabel, uomKey } from './uom.js';
@@ -162,7 +164,7 @@ async function oneItemDto(t, id) {
 export async function listItems(t, user, { search, page, hotelId, companyHint } = {}) {
   let companies;
   if (hotelId != null && hotelId !== '') {
-    const { companyId } = await assertHotelPermission(t, user, { resource: 'inventory', action: 'read', hotelId });
+    const { companyId } = await assertVisibleHotelPermission(t, user, { resource: 'inventory', action: 'read', hotelId });
     companies = [companyId];
   } else {
     companies = await companiesWith(t, user, 'read');
@@ -499,7 +501,7 @@ const LEVEL_SELECT = `SELECT i.id, i.display_name, i.stock_uom, hi.min_qty::text
 
 
 export async function listHotelItems(t, user, { hotelId, search, page } = {}) {
-  const { companyId } = await assertHotelPermission(t, user, { resource: 'inventory', action: 'read', hotelId });
+  const { companyId } = await assertVisibleHotelPermission(t, user, { resource: 'inventory', action: 'read', hotelId });
   const hotel = Number(hotelId);
   const q = String(search ?? '').trim();
   const filterParams = [companyId];
@@ -528,7 +530,7 @@ const levelValue = (v, field) => {
 };
 
 export async function saveHotelItem(t, user, { hotelId, invItemId }, body = {}) {
-  const { companyId } = await assertHotelPermission(t, user, { resource: 'inventory', action: 'update', hotelId });
+  const { companyId } = await assertVisibleHotelPermission(t, user, { resource: 'inventory', action: 'update', hotelId });
   const itemId = positiveInt(invItemId);
   const item = itemId
     ? await t.oneOrNone(`SELECT id, display_name FROM tbl_inv_item WHERE id = $1 AND hospitality_company_id = $2`, [
@@ -645,12 +647,12 @@ async function readHotelSettings(t, companyId, hotelId) {
 }
 
 export async function getHotelSettings(t, user, hotelId) {
-  const { companyId } = await assertHotelPermission(t, user, { resource: 'inventory', action: 'read', hotelId });
+  const { companyId } = await assertVisibleHotelPermission(t, user, { resource: 'inventory', action: 'read', hotelId });
   return readHotelSettings(t, companyId, Number(hotelId));
 }
 
 export async function saveHotelSettings(t, user, hotelId, body = {}) {
-  const { companyId } = await assertHotelPermission(t, user, { resource: 'inventory', action: 'admin', hotelId });
+  const { companyId } = await assertVisibleHotelPermission(t, user, { resource: 'inventory', action: 'admin', hotelId });
   const hotel = Number(hotelId);
   const cur = await t.oneOrNone(`SELECT doc_code, include_gst_in_cost FROM tbl_inv_hotel_settings WHERE hotel_id = $1`, [hotel]);
   let docCode = cur?.doc_code ?? null;

@@ -246,15 +246,15 @@ describe("renderGrnLabels", () => {
     });
   });
 
-  it("is 404 outside scope, 403 without grn.read, 400 for a reversal", async () => {
+  it("is 404 outside scope or without grn.read (as GET /grn/:id answers), 400 for a reversal", async () => {
     await withTx(async (t) => {
       const item = await makeItem(t);
       const { poId, lineIds } = await makeRfqPo(t, { lines: [{ qty: 1 }] });
       const grnId = await makeGrn(t, { poId, lines: [{ poLineId: lineIds[0], invItemId: item, accepted: 1 }] });
 
-      // Mapped to the company, no grn.read: the GRN's hotel is visible, the action is not.
+      // Mapped to the company, no grn.read: the GRN reads as missing (rule C3).
       let err = await thrownBy(t, (sp) => renderGrnLabels(sp, USER, grnId, { layout: "A4_24", mode: "per_unit" }));
-      expect([err.code, err.httpStatus]).toEqual(["FORBIDDEN", 403]);
+      expect([err.code, err.httpStatus, err.message]).toEqual(["NOT_FOUND", 404, "GRN not found"]);
 
       await grantRoleScope(t, { userId: USER.id, roleId: await roleWith(t, ["grn.read"]), companyId: A, hotelId: A1 });
       const foreignItem = await makeItem(t, { companyId: B });

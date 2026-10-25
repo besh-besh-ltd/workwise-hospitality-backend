@@ -6,7 +6,7 @@
 // tolerance checks have no float drift.
 
 import { InventoryError } from './errors.js';
-import { assertHotelPermission } from './scope.js';
+import { assertHotelPermission, assertVisibleHotelPermission } from './scope.js';
 import { recomputePoReceipt } from './receiptRollup.js';
 import { advanceLegacyPoStatus } from './poStatus.js';
 
@@ -155,8 +155,10 @@ export async function tokenHotelId(t, viaToken) {
 
 /**
  * Who may receive this PO at this hotel: the hotel must be in the PO's hotel
- * set (else NOT_FOUND), and the user must hold grn.<action> there
- * (assertHotelPermission: NOT_FOUND outside the company, FORBIDDEN inside).
+ * set (else NOT_FOUND), and the user must hold grn.<action> there. Rule C3:
+ * without grn.read or grn.<action> at the hotel the PO reads as missing
+ * (NOT_FOUND 'Purchase order not found', inside the caller's company too);
+ * seeing it without the action is FORBIDDEN.
  * A site-rep token is bound to its PO (and hotel) instead.
  */
 export async function assertReceiveAccess(t, actor, ctx, hotelId, { viaToken = null, action = 'create' } = {}) {
@@ -168,13 +170,14 @@ export async function assertReceiveAccess(t, actor, ctx, hotelId, { viaToken = n
     await assertToken(t, viaToken, ctx.po.id, hotel);
     return;
   }
-  await assertHotelPermission(t, actor, { resource: 'grn', action, hotelId: hotel });
+  await assertVisibleHotelPermission(t, actor, { resource: 'grn', action, hotelId: hotel, missing: 'Purchase order not found' });
 }
 
 /**
  * Access to an existing GRN: no grn.read on its hotel = NOT_FOUND (the caller
- * cannot see it); grn.read but not grn.<action> = FORBIDDEN. A token may only
- * touch GRNs of its own PO and hotel.
+ * cannot see it, another company's GRN included: the same answer as a missing
+ * id); grn.read but not grn.<action> = FORBIDDEN. A token may only touch GRNs
+ * of its own PO and hotel.
  */
 export async function assertGrnAccess(t, user, grn, action = 'read', { viaToken = null } = {}) {
   if (viaToken) {
@@ -184,7 +187,7 @@ export async function assertGrnAccess(t, user, grn, action = 'read', { viaToken 
   try {
     await assertHotelPermission(t, user, { resource: 'grn', action: 'read', hotelId: grn.hotel_id });
   } catch (err) {
-    if (err instanceof InventoryError && err.code === 'FORBIDDEN') throw notFound('GRN not found');
+    if (err instanceof InventoryError && (err.code === 'FORBIDDEN' || err.code === 'NOT_FOUND')) throw notFound('GRN not found');
     throw err;
   }
   if (action !== 'read') {

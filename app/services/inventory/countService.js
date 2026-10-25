@@ -171,7 +171,7 @@ async function headerForAccess(t, countId) {
 /** GET /counts/:id: inventory.read at its hotel, else NOT_FOUND. */
 export async function getCount(t, user, countId) {
   const { id, hotelId } = await headerForAccess(t, countId);
-  await assertDocAccess(t, user, hotelId, 'read');
+  await assertDocAccess(t, user, hotelId, 'read', { missing: 'Count not found' });
   return payloadFor(t, user, id, hotelId);
 }
 
@@ -327,7 +327,7 @@ export async function startCount(t, user, input = {}) {
 /** Load, gate and lock a count; it must be in one of `statuses`. */
 async function lockCount(t, user, countId, action, statuses) {
   const { id, hotelId } = await headerForAccess(t, countId);
-  const { companyId } = await assertDocAccess(t, user, hotelId, action);
+  const { companyId } = await assertDocAccess(t, user, hotelId, action, { missing: 'Count not found' });
   const row = await t.one(`SELECT id, status, scope FROM tbl_inv_count WHERE id = $1 FOR UPDATE`, [id]);
   if (!statuses.includes(row.status)) {
     throw conflict(`This count is ${row.status}`, { status: row.status });

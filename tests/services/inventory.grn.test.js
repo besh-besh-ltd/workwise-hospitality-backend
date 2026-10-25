@@ -1108,13 +1108,35 @@ describe("PO side effects", () => {
 // ---------------------------------------------------------------------------
 
 describe("access", () => {
-  it("user without grn.create on that hotel gets 403", async () => {
+  it("no grn rights at that hotel reads as a missing PO (rule C3); grn.read without grn.create is 403", async () => {
     const { poId, lineIds: [line] } = await makePo({ hotel: A2, lines: [{ qty: 10 }] });
     const res = await limited.post("/api/v1/inventory/grn").send(grnInput(poId, A2, [grnLine(line, 1)]));
-    expect(res.status).toBe(403);
-    expect(res.body.code).toBe("FORBIDDEN");
+    expect(res.status).toBe(404);
+    expect(res.body).toMatchObject({ status: 2, code: "NOT_FOUND", message: "Purchase order not found" });
     const ctx = await limited.get(`/api/v1/inventory/receive/po/${poId}`).query({ hotelId: A2 });
-    expect(ctx.status).toBe(403);
+    expect(ctx.status).toBe(404);
+    expect(ctx.body.message).toBe("Purchase order not found");
+
+    // Seeing the hotel's receipts (grn.read) without grn.create: visible, so 403.
+    const reader = Number((await db.one(
+      `INSERT INTO tbl_roles (title, description, created_by) VALUES ('GRN reader', 'inventory.grn test', $1) RETURNING id`,
+      [BUYER]
+    )).id);
+    madeRoles.push(reader);
+    await db.none(
+      `INSERT INTO tbl_role_permissions (role_id, permission_id)
+       SELECT $1, id FROM tbl_permissions WHERE resource::text = 'grn' AND action::text = 'read'`,
+      [reader]
+    );
+    const scope = await grantRoleScope(db, { userId: LIMITED, roleId: reader, companyId: CO, hotelId: A2 });
+    try {
+      const seen = await limited.post("/api/v1/inventory/grn").send(grnInput(poId, A2, [grnLine(line, 1)]));
+      expect(seen.status).toBe(403);
+      expect(seen.body.code).toBe("FORBIDDEN");
+      expect((await limited.get(`/api/v1/inventory/receive/po/${poId}`).query({ hotelId: A2 })).status).toBe(403);
+    } finally {
+      await revokeRoleScopes(db, [scope]);
+    }
     expect(await grnCount(poId)).toBe(0);
   });
 

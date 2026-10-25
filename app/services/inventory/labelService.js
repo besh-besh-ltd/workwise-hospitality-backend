@@ -19,7 +19,8 @@ import crypto from 'crypto';
 import { fileURLToPath } from 'url';
 import Handlebars from 'handlebars';
 import { InventoryError } from './errors.js';
-import { assertHotelPermission, hotelIdsWithPermission } from './scope.js';
+import { assertHotelPermission, assertVisibleHotelPermission, hotelIdsWithPermission } from './scope.js';
+import { assertGrnAccess } from './grnCommon.js';
 import { qrSvg } from './qr.js';
 import { shortUrl } from './shortUrl.js';
 import { pdfRenderer, NO_MARGIN } from '../../util/pdfRenderer.js';
@@ -81,6 +82,7 @@ const positiveInt = (v) => {
 const invalid = (field, message, details = {}) =>
   new InventoryError('VALIDATION', message, { field, ...details });
 
+const SUPER_ADMIN = 8;
 // One message whether the id is missing or belongs to another company, so the
 // label endpoints cannot be used to probe which ids exist.
 const itemNotFound = () => new InventoryError('NOT_FOUND', 'Item not found');
@@ -261,28 +263,48 @@ function validateItemsPayload(payload) {
  * @returns {Promise<{url:string}>}
  * @throws InventoryError VALIDATION (field: layout | hotelId | items |
  *   invItemId | copies | batchNo | expiryDate), NOT_FOUND (item or hotel
- *   outside scope), FORBIDDEN (visible, but no inventory.update)
+ *   outside scope: no inventory.read or inventory.update there), FORBIDDEN
+ *   (visible, but no inventory.update)
  */
 export async function renderItemLabels(t, user, payload) {
   const { layout, hotelId, items } = validateItemsPayload(payload);
   const ids = [...new Set(items.map((i) => i.invItemId))];
+
+  // Gate before any item lookup, and look items up only in the companies the
+  // caller can see, so a refusal never tells whether some tenant's item id
+  // exists. With a hotel: the hotel must be visible (rule C3), and its
+  // company is the only one. Without: the companies where the caller holds
+  // inventory.read or inventory.update at some hotel (all, for a super admin).
+  let visibleCompanies;
+  if (hotelId) {
+    const { companyId } = await assertVisibleHotelPermission(t, user, {
+      resource: 'inventory', action: 'update', hotelId,
+    });
+    visibleCompanies = [companyId];
+  } else if (Number(user?.user_type) === SUPER_ADMIN) {
+    visibleCompanies = null;
+  } else {
+    const hotels = await hotelIdsWithPermission(t, user, 'inventory', ['read', 'update']);
+    visibleCompanies = hotels.length
+      ? (await t.any(
+        `SELECT DISTINCT hospitality_company_id FROM tbl_hospitality_company_hotels WHERE id = ANY($1::int[])`,
+        [hotels]
+      )).map((r) => Number(r.hospitality_company_id))
+      : [];
+  }
   const rows = await t.any(
     `SELECT i.id, i.hospitality_company_id, i.display_name, i.item_code, i.stock_uom, hi.bin_label
        FROM tbl_inv_item i
        LEFT JOIN tbl_inv_hotel_item hi ON hi.inv_item_id = i.id AND hi.hotel_id = $2
-      WHERE i.id = ANY($1::int[])`,
-    [ids, hotelId]
+      WHERE i.id = ANY($1::int[])
+        AND ($3::int[] IS NULL OR i.hospitality_company_id = ANY($3::int[]))`,
+    [ids, hotelId, visibleCompanies]
   );
   if (rows.length !== ids.length) throw itemNotFound();
   const byId = new Map(rows.map((r) => [Number(r.id), r]));
   const companies = [...new Set(rows.map((r) => Number(r.hospitality_company_id)))];
 
-  if (hotelId) {
-    const { companyId } = await assertHotelPermission(t, user, {
-      resource: 'inventory', action: 'update', hotelId,
-    });
-    if (companies.some((c) => c !== companyId)) throw itemNotFound();
-  } else {
+  if (!hotelId) {
     for (const companyId of companies) await assertUpdateInCompany(t, user, companyId);
   }
 
@@ -315,8 +337,8 @@ export async function renderItemLabels(t, user, payload) {
  * @param {number|string} grnId
  * @param {{layout:string, mode?:'per_unit'|'per_pack'}} payload  mode defaults to per_unit
  * @returns {Promise<{url:string}>}
- * @throws InventoryError NOT_FOUND 'GRN not found' (missing or foreign GRN,
- *   one message for both), FORBIDDEN (no grn.read at the GRN's hotel),
+ * @throws InventoryError NOT_FOUND 'GRN not found' (missing, foreign or no
+ *   grn.read at its hotel: exactly what GET /grn/:id answers),
  *   VALIDATION (layout | mode | grnId for a draft, a reversal, a reversed
  *   receipt or nothing to label | copies over the cap)
  */
@@ -334,12 +356,7 @@ export async function renderGrnLabels(t, user, grnId, payload) {
     )
     : null;
   if (!grn) throw grnNotFound();
-  try {
-    await assertHotelPermission(t, user, { resource: 'grn', action: 'read', hotelId: Number(grn.hotel_id) });
-  } catch (err) {
-    if (err instanceof InventoryError && err.code === 'NOT_FOUND') throw grnNotFound();
-    throw err;
-  }
+  await assertGrnAccess(t, user, grn, 'read'); // exactly what GET /grn/:id answers (rule C3)
   if (grn.doc_type !== 'RECEIPT' || grn.status === 'reversed') {
     throw invalid('grnId', 'Labels are printed from a receipt that still stands');
   }

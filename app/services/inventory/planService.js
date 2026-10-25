@@ -199,9 +199,9 @@ export async function ensureCurrentPlan(t, poId, { userId = null } = {}) {
 }
 
 /** A vendor or a site-rep token never reads or edits a buyer's plan: NOT_FOUND, as for a PO out of scope. */
-function assertBuyerStaff(user, poId) {
+function assertBuyerStaff(user) {
   if (!user || Number(user.user_type) === 3 || user.is_token_user) {
-    throw new InventoryError('NOT_FOUND', 'Purchase order not found', { poId: positiveInt(poId) ?? null });
+    throw new InventoryError('NOT_FOUND', 'Purchase order not found');
   }
 }
 
@@ -633,7 +633,7 @@ async function buyerPayload(t, user, poId, tenancy) {
  * @throws PoAccessError (404) when the caller cannot see the PO.
  */
 export async function getDeliveries(t, user, poId) {
-  assertBuyerStaff(user, poId);
+  assertBuyerStaff(user);
   const tenancy = await assertPoAccess(user, poId, t);
   const id = Number(tenancy.id);
   const ctx = await getPoContext(t, id);
@@ -757,7 +757,7 @@ function validatePlan(input, { hotelIds, lines, minDay }) {
  *   InventoryError LOCKED | VALIDATION.
  */
 export async function savePlan(t, user, poId, deliveries) {
-  assertBuyerStaff(user, poId);
+  assertBuyerStaff(user);
   const tenancy = await assertPoInitiateAccess(user, poId, t);
   const id = Number(tenancy.id);
   const ctx = await getPoContext(t, id, { forUpdate: true });
@@ -799,7 +799,7 @@ export async function savePlan(t, user, poId, deliveries) {
  *   InventoryError NOT_FOUND (delivery of another PO) | LOCKED | VALIDATION.
  */
 export async function patchDueDate(t, user, poId, deliveryId, dueDate) {
-  assertBuyerStaff(user, poId);
+  assertBuyerStaff(user);
   const tenancy = await assertPoInitiateAccess(user, poId, t);
   const id = Number(tenancy.id);
   const ctx = await getPoContext(t, id, { forUpdate: true });

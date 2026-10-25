@@ -163,4 +163,33 @@ export async function assertHotelPermission(t, user, { resource, action, hotelId
   return { companyId };
 }
 
-export default { companyIdForHotel, hotelIdsWithPermission, assertHotelPermission };
+/**
+ * Rule C3: gate an action on a hotel the caller must first be able to see.
+ *
+ * Seeing the hotel (or a record at it) takes resource.read or resource.<action>
+ * there. Without either the answer is NOT_FOUND with `missing`, the words a
+ * missing id of that record gets, inside the caller's own company as much as
+ * outside it, so a refusal never tells an existing id from a made-up one.
+ * Seeing it without the action is FORBIDDEN (403).
+ *
+ * @param {object} t
+ * @param {object} user req.user
+ * @param {{resource:string, action:string, hotelId:number, missing?:string}} args
+ * @returns {Promise<{companyId:number}>}
+ */
+export async function assertVisibleHotelPermission(t, user, { resource, action, hotelId, missing = 'Hotel not found' } = {}) {
+  const actions = actionList(action);
+  let scope;
+  try {
+    scope = await assertHotelPermission(t, user, { resource, action: [...new Set(['read', ...actions])], hotelId });
+  } catch (err) {
+    if (err instanceof InventoryError && (err.code === 'NOT_FOUND' || err.code === 'FORBIDDEN')) {
+      throw new InventoryError('NOT_FOUND', missing);
+    }
+    throw err;
+  }
+  if (actions.length === 1 && actions[0] === 'read') return scope;
+  return assertHotelPermission(t, user, { resource, action: actions, hotelId });
+}
+
+export default { companyIdForHotel, hotelIdsWithPermission, assertHotelPermission, assertVisibleHotelPermission };

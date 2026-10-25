@@ -99,7 +99,7 @@ export async function getOut(t, user, outId) {
   const id = positiveInt(outId);
   const row = id ? await t.oneOrNone(`SELECT hotel_id FROM tbl_inv_out WHERE id = $1`, [id]) : null;
   if (!row) throw notFound('Document not found');
-  await assertDocAccess(t, user, Number(row.hotel_id), 'read');
+  await assertDocAccess(t, user, Number(row.hotel_id), 'read', { missing: 'Document not found' });
   return loadOutDoc(t, id);
 }
 

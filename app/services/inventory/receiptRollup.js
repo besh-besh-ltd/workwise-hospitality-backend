@@ -146,7 +146,7 @@ export async function recomputePoReceipt(t, poId) {
     `SELECT id, receipt_status, receipt_legacy FROM tbl_rfq_purchase_order WHERE id = $1 FOR UPDATE`,
     [id]
   );
-  if (!head) throw new InventoryError('NOT_FOUND', 'Purchase order not found', { poId: id });
+  if (!head) throw new InventoryError('NOT_FOUND', 'Purchase order not found');
 
   const poLines = await t.any(
     `SELECT pop.id, pop.unit, pop.quantity::text AS quantity,

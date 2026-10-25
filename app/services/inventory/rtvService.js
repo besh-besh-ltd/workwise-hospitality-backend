@@ -36,12 +36,13 @@
 //             booked to is received again or short-closed.
 //
 // Permissions: grn.approve at the GRN's hotel for every action, grn.read to
-// view (assertHotelPermission: NOT_FOUND outside the company, FORBIDDEN
-// inside it). Lock order (planCore): PO row → delivery lines → balances, and
+// view. Rule C3: without grn.read or the action there the return (or GRN)
+// reads as missing, inside the caller's company too; FORBIDDEN only when it
+// is visible. Lock order (planCore): PO row → delivery lines → balances, and
 // nextDocNumber before postMovements (ledger rule b).
 
 import { InventoryError } from './errors.js';
-import { assertHotelPermission } from './scope.js';
+import { assertVisibleHotelPermission } from './scope.js';
 import { getPoContext } from './planCore.js';
 import { recomputePoReceipt } from './receiptRollup.js';
 import { nextDocNumber } from './docNumber.js';
@@ -101,15 +102,14 @@ async function loadRtvRow(t, rtvId, { forUpdate = false } = {}) {
   return row;
 }
 
-/** Gate on the RTV's (or GRN's) hotel; a refusal outside the company reads as "not found". */
-async function gate(t, user, hotelId, action) {
-  try {
-    return await assertHotelPermission(t, user, { resource: 'grn', action, hotelId });
-  } catch (err) {
-    if (err instanceof InventoryError && err.code === 'NOT_FOUND') throw notFound();
-    throw err;
-  }
-}
+/**
+ * Gate on the RTV's (or GRN's) hotel. Rule C3: without grn.read or
+ * grn.<action> there the record reads as missing, in the words a missing id
+ * of it gets (`missing`), inside the caller's company too; seeing it without
+ * the action is FORBIDDEN.
+ */
+const gate = (t, user, hotelId, action, missing = 'Return to vendor not found') =>
+  assertVisibleHotelPermission(t, user, { resource: 'grn', action, hotelId, missing });
 
 /**
  * Returnable qty per GRN line: accepted − reversed − on other live RTVs.
@@ -264,7 +264,7 @@ export async function createRtv(t, user, { grnId, disposition, remarks, lines } 
     )
     : null;
   if (!grn) throw new InventoryError('NOT_FOUND', 'Goods receipt not found');
-  const { companyId } = await gate(t, user, grn.hotel_id, 'approve');
+  const { companyId } = await gate(t, user, grn.hotel_id, 'approve', 'Goods receipt not found');
   if (Number(grn.hospitality_company_id) !== companyId) throw new InventoryError('NOT_FOUND', 'Goods receipt not found');
 
   if (!RTV_DISPOSITIONS.includes(disposition)) {
