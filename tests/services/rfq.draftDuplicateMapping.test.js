@@ -20,12 +20,13 @@
 //   npm test -- --testPathPatterns "rfq.draftDuplicateMapping"
 
 import {
-  describe, it, expect, afterAll, beforeAll, beforeEach, afterEach,
+  describe, it, expect, afterAll, beforeAll, beforeEach, afterEach, jest,
 } from "@jest/globals";
 import { db, closeDb } from "../setup/db.js";
 import { IDS } from "../fixtures/ids.js";
 import { makeRFQ } from "../factories/rfq.js";
 import { httpClient } from "../helpers/http.js";
+import hospitalityModel from "../../app/models/hospitalityModel.js";
 import {
   dropUserMappingUnique,
   restoreUserMappingUnique,
@@ -201,5 +202,28 @@ describe("POST /rfq/save-draft — the access check is not weakened", () => {
       .post("/api/v1/rfq/save-draft")
       .send(saveBody(own, IDS.hotels.A1, "own unit saved"));
     expect(allowed.status).toBe(200);
+  });
+});
+
+describe("POST /rfq/save-draft — an unexpected failure", () => {
+  it("says only the generic sentence, never the database's own message", async () => {
+    const rfq_id = await makeDraft(BUYER);
+    const spy = jest
+      .spyOn(hospitalityModel, "userHasContext")
+      .mockRejectedValueOnce(new Error("Multiple rows were not expected."));
+    try {
+      const res = await buyer
+        .post("/api/v1/rfq/save-draft")
+        .send(saveBody(rfq_id, IDS.hotels.A1, "unexpected failure"));
+
+      expect(res.status).toBe(500);
+      expect(res.body.message).toBe("An error occurred while saving the draft");
+      // The client toasts every value under `errors`: the raw text was one
+      // toast, and an empty `details` array was a blank one.
+      expect(res.body.errors).toBeUndefined();
+      expect(JSON.stringify(res.body)).not.toMatch(/Multiple rows/);
+    } finally {
+      spy.mockRestore();
+    }
   });
 });

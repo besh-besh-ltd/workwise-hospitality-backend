@@ -7055,14 +7055,24 @@ const rfqController = {
         }
       }
 
+      // An unexpected failure: its cause is in the log (logError above). The
+      // client toasts every value under `errors`, so a database message sent
+      // there reached the buyer verbatim ("Multiple rows were not expected.")
+      // and an empty `details` array became a blank toast. Send neither.
+      if (httpCode === 500) {
+        return res.status(500).json({
+          status: 3,
+          message: 'An error occurred while saving the draft',
+        });
+      }
+
+      const details = parsedError?.details || [];
       res.status(httpCode).json({
         status: 3,
-        message: httpCode === 500
-          ? 'An error occurred while saving the draft'
-          : (innerMessage || 'An error occurred while saving the draft'),
+        message: innerMessage || 'An error occurred while saving the draft',
         errors: {
           rfq: innerMessage || 'An error occurred while saving the draft',
-          details: parsedError?.details || [],
+          ...(details.length ? { details } : {}),
         }
       });
     }
