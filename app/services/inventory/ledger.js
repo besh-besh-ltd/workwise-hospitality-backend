@@ -49,6 +49,33 @@
 //
 // Idempotency (client_event_id) lives on the document tables, not here: the
 // caller looks its document up by clientEventId before posting.
+//
+// Expiry batches (track_expiry items only; Task D3). tbl_inv_batch holds the
+// stock on hand per (hotel, item, batch_no, expiry_date), written here and
+// nowhere else, under the same balance locks, so Σ batch qty = balance qty
+// for every tracked item after every call:
+//   - Inbound stock lands in the batch it names (batchNo and/or expiryDate).
+//     Stock with neither goes to the undated bucket: batch_no '' and
+//     expiry_date NO_EXPIRY_DATE (the key columns are NOT NULL). A batch
+//     number with no expiry is undated too, in its own bucket.
+//   - Outbound stock (every outbound type, and OPENING < 0) that names a
+//     batch comes from that batch first (a GRN reversal or RTV gives back
+//     what was received, a mark-out on arrival takes what just arrived);
+//     anything it lacks, and every unnamed outbound, goes FEFO: undated
+//     buckets first (an unknown expiry is treated as the soonest), then by
+//     expiry date, then batch number. One outbound line touching several
+//     batches is written as one movement row per batch, in that order, each
+//     with the line's sourceLineId and its batch_no / expiry_date (NULL for
+//     the undated bucket); valuation runs per row, in sequence.
+//   - With negative stock allowed, what no batch holds is drawn from the
+//     undated bucket, which then carries the deficit (the only bucket that
+//     can go below 0, and only when every other bucket is empty); the next
+//     receipts cover it first, FEFO.
+//   - An item that starts tracking with stock already on hand (or any drift)
+//     self-heals: balance qty − Σ batches is folded into the undated bucket
+//     when the item is next posted.
+// The negative-stock guard runs on the whole line, never per batch. Readers
+// that key on source_line_id must aggregate: one line may have several rows.
 
 import { InventoryError } from './errors.js';
 import { getEffectiveSettings } from './settings.js';
@@ -63,6 +90,7 @@ const AT_GIVEN_COST = new Set(['GRN_REVERSAL', 'RTV_OUT']);
 const ALWAYS_GUARDED = new Set(['GRN_REVERSAL', 'RTV_OUT']);
 /** Inbound types valued at the current average when unitCost is omitted. */
 const COST_DEFAULTS_TO_AVG = new Set(['RETURN_IN', 'COUNT_IN', 'ADJUST_IN']);
+export const NO_EXPIRY_DATE = '9999-12-31';
 
 // ---------------------------------------------------------------------------
 // numeric(18,4) as BigInt "ten-thousandths"
@@ -189,7 +217,7 @@ function normalise(m, index) {
     unitCost,
     productVariantId: optionalId('productVariantId'),
     departmentId: optionalId('departmentId'),
-    batchNo: optionalText('batchNo', 64),
+    batchNo: optionalText('batchNo', 64)?.trim() || null,
     expiryDate,
     sourceType: m.sourceType,
     sourceId,
@@ -235,6 +263,145 @@ function apply(balance, line) {
   // exactly what is left, so a zero balance carries zero value.
   const value = qtyNew === 0n && balance.qty > 0n ? -balance.value : mul(qty, balance.avg);
   return { unitCost: balance.avg, value, next: { qty: qtyNew, avg: balance.avg, value: balance.value + value } };
+}
+
+// ---------------------------------------------------------------------------
+// Expiry batches
+// ---------------------------------------------------------------------------
+
+const minOf = (a, b) => (a < b ? a : b);
+
+/** The bucket for (batchNo, expiry) of an item's batch set, created empty when new. */
+function bucketOf(set, batchNo, expiry) {
+  const k = `${expiry}|${batchNo}`;
+  let b = set.buckets.get(k);
+  if (!b) {
+    b = { batchNo, expiry, qty: 0n, dirty: false };
+    set.buckets.set(k, b);
+  }
+  return b;
+}
+const undatedOf = (set) => bucketOf(set, '', NO_EXPIRY_DATE);
+const bucketFor = (set, line) => bucketOf(set, line.batchNo ?? '', line.expiryDate ?? NO_EXPIRY_DATE);
+
+function shift(bucket, delta) {
+  bucket.qty += delta;
+  bucket.dirty = true;
+}
+
+/** FEFO order: undated first, then earliest expiry, then batch number. */
+function fefo(a, b) {
+  const ua = a.expiry === NO_EXPIRY_DATE;
+  const ub = b.expiry === NO_EXPIRY_DATE;
+  if (ua !== ub) return ua ? -1 : 1;
+  if (a.expiry !== b.expiry) return a.expiry < b.expiry ? -1 : 1;
+  if (a.batchNo !== b.batchNo) return a.batchNo < b.batchNo ? -1 : 1;
+  return 0;
+}
+const stocked = (set, except = null) => [...set.buckets.values()].filter((b) => b !== except && b.qty > 0n).sort(fefo);
+
+/** A deficit in the undated bucket is stock already issued: stock on hand covers it, FEFO. */
+function settleDeficit(set) {
+  const undated = undatedOf(set);
+  for (const b of stocked(set, undated)) {
+    if (undated.qty >= 0n) return;
+    const q = minOf(b.qty, -undated.qty);
+    shift(b, -q);
+    shift(undated, q);
+  }
+}
+
+/**
+ * Take `amount` (> 0) out of an item's batches for one outbound line: the
+ * batch it names first, then FEFO, then (negative stock allowed) the undated
+ * bucket. @returns {Array<{bucket, qty:bigint}>} one piece per batch, in order.
+ */
+function draw(set, line, amount) {
+  const pieces = [];
+  let left = amount;
+  const take = (bucket, q) => {
+    if (q <= 0n) return;
+    shift(bucket, -q);
+    left -= q;
+    const same = pieces.find((p) => p.bucket === bucket);
+    if (same) same.qty += q;
+    else pieces.push({ bucket, qty: q });
+  };
+  if (line.batchNo != null || line.expiryDate != null) {
+    const named = bucketFor(set, line);
+    if (named.qty > 0n) take(named, minOf(named.qty, left));
+  }
+  for (const b of stocked(set)) {
+    if (left === 0n) break;
+    take(b, minOf(b.qty, left));
+  }
+  take(undatedOf(set), left);
+  return pieces;
+}
+
+/**
+ * The batch sets of the tracked (hotel, item) keys, read under the balance
+ * locks (tbl_inv_batch is only written by holders of those locks). What the
+ * balance holds beyond Σ batches is folded into the undated bucket.
+ */
+async function loadBatchSets(t, trackedKeys, state) {
+  const sets = new Map();
+  if (!trackedKeys.length) return sets;
+  for (const k of trackedKeys) {
+    sets.set(keyOf(k.hotelId, k.invItemId), { ...k, buckets: new Map() });
+  }
+  const rows = await t.any(
+    `SELECT bt.hotel_id, bt.inv_item_id, bt.batch_no, bt.expiry_date::text AS expiry_date, bt.qty::text AS qty
+       FROM tbl_inv_batch bt
+       JOIN unnest($1::int[], $2::int[]) AS k(hotel_id, inv_item_id)
+         ON bt.hotel_id = k.hotel_id AND bt.inv_item_id = k.inv_item_id`,
+    [trackedKeys.map((k) => k.hotelId), trackedKeys.map((k) => k.invItemId)]
+  );
+  for (const r of rows) {
+    bucketOf(sets.get(keyOf(r.hotel_id, r.inv_item_id)), r.batch_no, r.expiry_date).qty = toScaled(r.qty);
+  }
+  for (const [k, set] of sets) {
+    let held = 0n;
+    for (const b of set.buckets.values()) held += b.qty;
+    const residual = state.get(k).qty - held;
+    if (residual !== 0n) shift(undatedOf(set), residual);
+    settleDeficit(set);
+  }
+  return sets;
+}
+
+async function saveBatchSets(t, sets) {
+  const rows = [];
+  for (const set of sets.values()) {
+    for (const b of set.buckets.values()) {
+      if (b.dirty) rows.push({ ...b, companyId: set.companyId, hotelId: set.hotelId, invItemId: set.invItemId });
+    }
+  }
+  if (!rows.length) return;
+  rows.sort(
+    (a, b) =>
+      a.hotelId - b.hotelId ||
+      a.invItemId - b.invItemId ||
+      (a.batchNo < b.batchNo ? -1 : a.batchNo > b.batchNo ? 1 : 0) ||
+      (a.expiry < b.expiry ? -1 : a.expiry > b.expiry ? 1 : 0)
+  );
+  await t.none(
+    `INSERT INTO tbl_inv_batch (hospitality_company_id, hotel_id, inv_item_id, batch_no, expiry_date, qty)
+     SELECT x.company_id, x.hotel_id, x.inv_item_id, x.batch_no, x.expiry_date, x.qty
+       FROM unnest($1::int[], $2::int[], $3::int[], $4::text[], $5::date[], $6::numeric[])
+            WITH ORDINALITY AS x(company_id, hotel_id, inv_item_id, batch_no, expiry_date, qty, ord)
+      ORDER BY x.ord
+     ON CONFLICT (hotel_id, inv_item_id, batch_no, expiry_date)
+     DO UPDATE SET qty = EXCLUDED.qty, updated_at = now()`,
+    [
+      rows.map((r) => r.companyId),
+      rows.map((r) => r.hotelId),
+      rows.map((r) => r.invItemId),
+      rows.map((r) => r.batchNo),
+      rows.map((r) => r.expiry),
+      rows.map((r) => toDecimalString(r.qty)),
+    ]
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -308,6 +475,9 @@ async function negativeStockError(t, shortfalls) {
  *   ignored on the other outbound types.
  * @returns {Promise<object[]>} the written rows in input order (zero-qty
  *   movements are not written), numbers as JS numbers. See rowToMovement.
+ *   An outbound movement of a track_expiry item that draws on several
+ *   batches comes back as several adjacent rows (one per batch, same
+ *   sourceLineId); readers keyed on sourceLineId must sum them.
  * @throws {InventoryError} VALIDATION (details {index, field}, plus hotelId /
  *   invItemId when a defaulted unit cost has no average to fall back on) or
  *   NEGATIVE_STOCK (details {hotelId, invItemId, itemName, available,
@@ -347,14 +517,17 @@ export async function postMovements(t, movements) {
 
   // The hotel and the item must both belong to the movement's company.
   const owners = await t.any(
-    `SELECT k.ord, h.hospitality_company_id AS hotel_company, i.hospitality_company_id AS item_company
+    `SELECT k.ord, h.hospitality_company_id AS hotel_company, i.hospitality_company_id AS item_company,
+            i.track_expiry
        FROM unnest($1::int[], $2::int[]) WITH ORDINALITY AS k(hotel_id, inv_item_id, ord)
        LEFT JOIN tbl_hospitality_company_hotels h ON h.id = k.hotel_id
        LEFT JOIN tbl_inv_item i ON i.id = k.inv_item_id`,
     [hotelIds, itemIds]
   );
+  const trackedKeys = [];
   for (const o of owners) {
     const k = sorted[Number(o.ord) - 1];
+    if (o.track_expiry === true) trackedKeys.push(k);
     if (o.hotel_company !== k.companyId) {
       throw new InventoryError('VALIDATION', 'Hotel not found for this company', { index: k.index, field: 'hotelId' });
     }
@@ -398,6 +571,7 @@ export async function postMovements(t, movements) {
       { qty: toScaled(b.qty), avg: toScaled(b.avg_cost), value: toScaled(b.value) },
     ])
   );
+  const batchSets = await loadBatchSets(t, trackedKeys, state);
 
   const shortfalls = [];
   const posted = [];
@@ -429,9 +603,26 @@ export async function postMovements(t, movements) {
       }
       costed = { ...line, unitCost: balance.avg };
     }
-    const { unitCost, value, next } = apply(balance, costed);
-    state.set(k, next);
-    posted.push({ ...line, unitCost, value, qtyAfter: next.qty, avgCostAfter: next.avg });
+    const set = batchSets.get(k);
+    // One part per batch for a tracked outbound line; the line itself otherwise.
+    const parts =
+      set && line.qty < 0n
+        ? draw(set, line, -line.qty).map(({ bucket, qty }) => ({
+            ...costed,
+            qty: -qty,
+            batchNo: bucket.batchNo || null,
+            expiryDate: bucket.expiry === NO_EXPIRY_DATE ? null : bucket.expiry,
+          }))
+        : [costed];
+    if (set && line.qty > 0n) {
+      shift(bucketFor(set, line), line.qty);
+      settleDeficit(set);
+    }
+    for (const part of parts) {
+      const { unitCost, value, next } = apply(state.get(k), part);
+      state.set(k, next);
+      posted.push({ ...part, unitCost, value, qtyAfter: next.qty, avgCostAfter: next.avg });
+    }
   }
   if (shortfalls.length) throw await negativeStockError(t, shortfalls);
 
@@ -499,6 +690,7 @@ export async function postMovements(t, movements) {
       finals.map((s) => toDecimalString(s.value)),
     ]
   );
+  await saveBatchSets(t, batchSets);
 
   // Ids follow insertion order, which follows input order.
   return rows

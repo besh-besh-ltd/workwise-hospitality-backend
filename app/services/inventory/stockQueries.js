@@ -13,6 +13,7 @@
 
 import { hotelIdsWithPermission } from './scope.js';
 import { RECEIVABLE_PO_STATUSES } from './grnService.js';
+import { NO_EXPIRY_DATE } from './ledger.js';
 import {
   PAGE_SIZE, IST_TODAY, IST_MONTH_START, positiveInt, notFound, num, money, iso, pageOf, flag, optionalDay,
   assertDocAccess,
@@ -284,7 +285,12 @@ export async function getStockItem(t, user, { hotelId, invItemId } = {}) {
       belowReorder: reorderLevel != null && qty <= reorderLevel,
     },
     barcodes: barcodes.map((b) => ({ id: Number(b.id), code: b.code, packFactor: Number(b.pack_factor), source: b.source })),
-    batches: batches.map((b) => ({ batchNo: b.batch_no || null, expiryDate: b.expiry_date, qty: Number(b.qty) })),
+    // the ledger's undated bucket (no expiry recorded) is stored at NO_EXPIRY_DATE
+    batches: batches.map((b) => ({
+      batchNo: b.batch_no || null,
+      expiryDate: b.expiry_date === NO_EXPIRY_DATE ? null : b.expiry_date,
+      qty: Number(b.qty),
+    })),
     recentMovements: recent.map(toMovement),
   };
 }
