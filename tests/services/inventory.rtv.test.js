@@ -287,19 +287,28 @@ describe("return to vendor", () => {
     });
   });
 
-  it("needs grn.approve at the GRN's hotel; another company's RTV is not found", async () => {
+  it("needs grn.approve at the GRN's hotel; a GRN or RTV the caller can't see is not found (rule C3)", async () => {
     await withTx(async (t) => {
       await grantStores(t);
       const { poId, lineIds: [line] } = await makeRfqPo(t);
       const grn = await postReceiptGrn(t, { poId, lines: [{ poLineId: line, accepted: 10 }] });
       const input = { grnId: grn.grnId, disposition: "CREDIT", lines: [{ grnLineId: grn.lines[0].grnLineId, qty: 1, reason: "x" }] };
+      const member = { id: IDS.users.a1_proc_techEval, user_type: 2 };
 
-      // Mapped to company A but no grn grant at A1.
-      await expectInvError(createRtv(t, { id: IDS.users.a1_proc_techEval, user_type: 2 }, input), "FORBIDDEN");
+      // Mapped to company A but no grn grant at A1: the GRN reads as missing.
+      await expectInvError(createRtv(t, member, input), "NOT_FOUND");
       await expectInvError(createRtv(t, OTHER_COMPANY, input), "NOT_FOUND");
       const rtv = await createRtv(t, STORES, input);
+      await expectInvError(getRtv(t, member, rtv.id), "NOT_FOUND");
       await expectInvError(getRtv(t, OTHER_COMPANY, rtv.id), "NOT_FOUND");
       await expectInvError(getRtv(t, STORES, 999999999), "NOT_FOUND");
+
+      // Seeing A1's receipts (Storekeeper: grn.read) without grn.approve: 403.
+      const storekeeper = await t.one(`SELECT id FROM tbl_roles WHERE title = 'Storekeeper' AND created_by IS NULL`);
+      await grantRoleScope(t, { userId: member.id, roleId: storekeeper.id, companyId: CO, hotelId: A1 });
+      await expectInvError(createRtv(t, member, input), "FORBIDDEN");
+      expect((await getRtv(t, member, rtv.id)).id).toBe(rtv.id);
+      await expectInvError(cancelRtv(t, member, rtv.id), "FORBIDDEN");
     });
   });
 

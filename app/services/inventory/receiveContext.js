@@ -53,10 +53,10 @@ export async function getReceiveContext(t, user, { poId, hotelId = null } = {}, 
     if (askedHotel) {
       await assertReceiveAccess(t, user, ctx, askedHotel, { action: 'create' });
     } else if (!choices.length) {
-      // Explain the refusal the way a direct attempt would (404 outside the
-      // company, 403 inside it).
-      if (!ctx.hotelIds.length) throw notFound('Purchase order not found');
-      await assertReceiveAccess(t, user, ctx, ctx.hotelIds[0], { action: 'create' });
+      // Rule C3: a PO at none of the hotels the caller can see (grn.read or
+      // grn.create) reads as missing; one they see but can't receive at is 403.
+      const visible = new Set(await hotelIdsWithPermission(t, user, 'grn', ['read', 'create']));
+      if (!ctx.hotelIds.some((h) => visible.has(h))) throw notFound('Purchase order not found');
       throw new InventoryError('FORBIDDEN', "You can't receive this purchase order at any of its hotels", {
         resource: 'grn', action: 'create',
       });

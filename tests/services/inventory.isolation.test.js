@@ -10,9 +10,10 @@
 //             does; a Company A hotel / item / delivery id in the query or
 //             body is never trusted.
 //   A_OTHER   every permission, in Company A, at hotel A2 only. A resource at
-//             A1 is out of scope: 404 by the C3 ruling, or 403 where the
-//             service still answers the B-era rule "403 inside the company"
-//             (each such row says so; see the task report).
+//             A1 is out of scope: 404 by rule C3, word for word what a
+//             missing id gets, although it is the caller's own company.
+//             Company-level routes (items, settings) are the exception: a
+//             grant at any hotel of the company covers them (B3).
 //   A_NOPERM  in Company A AT the resource's hotel, holding every permission
 //             EXCEPT the route's own (`perm`, resource.action): 403 when the
 //             record stays visible, 404 when the missing permission is the
@@ -81,12 +82,6 @@ const SECRETS_A = [
 ];
 // What a Company A user scoped to A2 must never see from a hotel-scoped list.
 const SECRETS_A1 = ["ISOA1SECRET", "ISO-A1-ONLY", "Hotel A-1"];
-
-// In-company, out-of-scope hotel. The C3 ruling is 404; these rows follow the
-// rule their service documents (scope.js assertHotelPermission: "FORBIDDEN
-// (403) when the user is in the hotel's company") and are listed in the task
-// report as inconsistent with C3.
-const IN_CO_403 = 403;
 
 const W = {}; // the world: ids, numbers, names
 const C = {}; // http clients by user
@@ -529,15 +524,13 @@ const DOC_ROWS = [
 
   // ── receiving ──
   {
-    // receiveContext.js: "404 outside the company, 403 inside it" (B1).
-    key: "GET /receive/po/:poId", perm: "grn.create", scoped: IN_CO_403, noPerm: 403, ok: 200,
+    key: "GET /receive/po/:poId", perm: "grn.create", scoped: 404, noPerm: 403, ok: 200,
     ids: () => ({ poId: W.poA.poId }), idKey: "poId",
     req: (x) => q("get", `/receive/po/${x.poId}?hotelId=${A1}`),
     foreign: (x) => [q("get", `/receive/po/${x.poId}`), q("get", `/receive/po/${x.poId}?hotelId=${B1}`)],
   },
   {
-    // assertReceiveAccess → assertHotelPermission: 403 inside the company (B1).
-    key: "POST /grn", perm: "grn.create", scoped: IN_CO_403, noPerm: 403, ok: 201,
+    key: "POST /grn", perm: "grn.create", scoped: 404, noPerm: 403, ok: 201,
     ids: () => ({ poId: W.poA.poId }), idKey: "poId",
     req: (x) => q("post", "/grn", {
       poId: x.poId, hotelId: A1, receivedAt: TODAY, post: false, clientEventId: randomUUID(),
@@ -599,15 +592,15 @@ const DOC_ROWS = [
     req: (x) => q("delete", `/grn/${x.id}/attachments/${x.attId}`),
   },
   {
-    // grnPdf.assertGrnDocumentAccess lets FORBIDDEN through: 403 in-company.
-    key: "GET /grn/:id/pdf", perm: "grn.read", scoped: IN_CO_403, noPerm: 403, ok: 200,
+    // Exactly what GET /grn/:id answers.
+    key: "GET /grn/:id/pdf", perm: "grn.read", scoped: 404, noPerm: 404, ok: 200,
     ids: () => ({ id: W.grnA.id }), idKey: "id",
     req: (x) => q("get", `/grn/${x.id}/pdf`),
   },
 
-  // ── returns to vendor (rtvService.gate: 403 inside the company) ──
+  // ── returns to vendor ──
   {
-    key: "POST /rtv", perm: "grn.approve", scoped: IN_CO_403, noPerm: 403, ok: 200,
+    key: "POST /rtv", perm: "grn.approve", scoped: 404, noPerm: 403, ok: 200,
     ids: () => ({ grnId: W.grnA.id, grnLineId: W.grnA.lines[0].id }), idKey: "grnId",
     req: (x) => q("post", "/rtv", {
       grnId: x.grnId, disposition: "REPLACE", remarks: "ISO-A1-ONLY return", lines: [{ grnLineId: x.grnLineId, qty: 1, reason: "damaged" }],
@@ -618,17 +611,17 @@ const DOC_ROWS = [
     })],
   },
   {
-    key: "GET /rtv/:id", perm: "grn.read", scoped: IN_CO_403, noPerm: 403, ok: 200,
+    key: "GET /rtv/:id", perm: "grn.read", scoped: 404, noPerm: 404, ok: 200,
     fresh: () => newRtv(W.grnA.lines[0].id), ids: (f) => ({ id: f.id }), idKey: "id",
     req: (x) => q("get", `/rtv/${x.id}`),
   },
   {
-    key: "POST /rtv/:id/dispatch", perm: "grn.approve", scoped: IN_CO_403, noPerm: 403, ok: 200,
+    key: "POST /rtv/:id/dispatch", perm: "grn.approve", scoped: 404, noPerm: 403, ok: 200,
     fresh: () => newRtv(W.grnA.lines[0].id), ids: (f) => ({ id: f.id }), idKey: "id",
     req: (x) => q("post", `/rtv/${x.id}/dispatch`, { challanNo: "ISO-A1-ONLY-GP" }),
   },
   {
-    key: "POST /rtv/:id/close", perm: "grn.approve", scoped: IN_CO_403, noPerm: 403, ok: 200,
+    key: "POST /rtv/:id/close", perm: "grn.approve", scoped: 404, noPerm: 403, ok: 200,
     // A CREDIT return: closing a REPLACE one waits on the re-delivery.
     fresh: async () => {
       const r = await newRtv(W.grnA.lines[0].id, "CREDIT");
@@ -639,7 +632,7 @@ const DOC_ROWS = [
     req: (x) => q("post", `/rtv/${x.id}/close`, { creditNoteRef: "ISO-A1-ONLY-CN" }),
   },
   {
-    key: "POST /rtv/:id/cancel", perm: "grn.approve", scoped: IN_CO_403, noPerm: 403, ok: 200,
+    key: "POST /rtv/:id/cancel", perm: "grn.approve", scoped: 404, noPerm: 403, ok: 200,
     fresh: () => newRtv(W.grnA.lines[0].id), ids: (f) => ({ id: f.id }), idKey: "id",
     req: (x) => q("post", `/rtv/${x.id}/cancel`),
   },
@@ -679,32 +672,32 @@ const DOC_ROWS = [
     foreign: (x) => [q("delete", `/items/${W.itemB}/barcodes/${x.barcodeId}`)],
   },
 
-  // ── hotel setup (assertHotelPermission straight: 403 inside the company, B3) ──
+  // ── hotel setup ──
   {
-    key: "PUT /hotel-items/:hotelId/:invItemId", perm: "inventory.update", scoped: IN_CO_403, noPerm: 403, ok: 200,
+    key: "PUT /hotel-items/:hotelId/:invItemId", perm: "inventory.update", scoped: 404, noPerm: 403, ok: 200,
     ids: () => ({ hotelId: A1, invItemId: W.itemA1 }), idKey: "hotelId",
     req: (x) => q("put", `/hotel-items/${x.hotelId}/${x.invItemId}`, { minQty: 1, reorderLevel: 2, maxQty: 50, binLabel: "ISO-A1-ONLY-BIN" }),
     // B's own hotel naming A's item.
     foreign: (x) => [q("put", `/hotel-items/${B1}/${x.invItemId}`, { minQty: 1, reorderLevel: 2, maxQty: 50, binLabel: null })],
   },
   {
-    key: "GET /settings/hotel/:hotelId", perm: "inventory.read", scoped: IN_CO_403, noPerm: 403, ok: 200,
+    key: "GET /settings/hotel/:hotelId", perm: "inventory.read", scoped: 404, noPerm: 404, ok: 200,
     ids: () => ({ hotelId: A1 }), idKey: "hotelId",
     req: (x) => q("get", `/settings/hotel/${x.hotelId}`),
   },
   {
-    key: "PUT /settings/hotel/:hotelId", perm: "inventory.admin", scoped: IN_CO_403, noPerm: 403, ok: 200,
+    key: "PUT /settings/hotel/:hotelId", perm: "inventory.admin", scoped: 404, noPerm: 403, ok: 200,
     ids: () => ({ hotelId: A1 }), idKey: "hotelId",
     req: (x) => q("put", `/settings/hotel/${x.hotelId}`, { docCode: "ISOA1SECRET" }),
   },
   {
-    key: "POST /opening/:hotelId/preview", perm: "inventory.admin", scoped: IN_CO_403, noPerm: 403, ok: 200, hotel: A3,
+    key: "POST /opening/:hotelId/preview", perm: "inventory.admin", scoped: 404, noPerm: 403, ok: 200, hotel: A3,
     fresh: async () => ({ sheet: await openingSheet() }),
     ids: (f) => ({ hotelId: A3, sheet: f.sheet }), idKey: "hotelId",
     req: (x) => ({ method: "post", path: `/opening/${x.hotelId}/preview`, attach: x.sheet }),
   },
   {
-    key: "POST /opening/:hotelId/post", perm: "inventory.admin", scoped: IN_CO_403, noPerm: 403, ok: 200, hotel: A3,
+    key: "POST /opening/:hotelId/post", perm: "inventory.admin", scoped: 404, noPerm: 403, ok: 200, hotel: A3,
     ids: () => ({ hotelId: A3, invItemId: W.itemOpen, key: randomUUID() }), idKey: "hotelId",
     req: (x) => q("post", `/opening/${x.hotelId}/post`, {
       rows: [{ invItemId: x.invItemId, stockQty: 5, unitCost: 10, binLabel: null }], clientEventId: x.key,
@@ -811,7 +804,7 @@ const DOC_ROWS = [
 
   // ── labels and short links ──
   {
-    key: "POST /labels/items", perm: "inventory.update", scoped: IN_CO_403, noPerm: 403, ok: 200,
+    key: "POST /labels/items", perm: "inventory.update", scoped: 404, noPerm: 403, ok: 200,
     ids: () => ({ hotelId: A1, invItemId: W.itemA1 }), idKey: "hotelId",
     req: (x) => q("post", "/labels/items", { layout: "A4_65", hotelId: x.hotelId, items: [{ invItemId: x.invItemId, copies: 1 }] }),
     foreign: (x) => [
@@ -820,8 +813,8 @@ const DOC_ROWS = [
     ],
   },
   {
-    // labelService.renderGrnLabels lets FORBIDDEN through: 403 in-company.
-    key: "POST /labels/grn/:grnId", perm: "grn.read", scoped: IN_CO_403, noPerm: 403, ok: 200,
+    // Exactly what GET /grn/:id answers.
+    key: "POST /labels/grn/:grnId", perm: "grn.read", scoped: 404, noPerm: 404, ok: 200,
     ids: () => ({ grnId: W.grnA.id }), idKey: "grnId",
     req: (x) => q("post", `/labels/grn/${x.grnId}`, { layout: "A4_65", mode: "per_pack" }),
   },
@@ -884,7 +877,8 @@ const LIST_ROWS = [
     probes: () => [
       { who: "B", req: q("get", "/items"), expect: 200, has: ["ISO-B Rice"] },
       { who: "B", req: q("get", "/items?search=ISO-A-SECRET"), expect: "empty" },
-      { who: "B", req: q("get", `/items?hotelId=${A1}`), expect: 404 },
+      { who: "B", req: q("get", `/items?hotelId=${A1}`), expect: 404, sameAs: q("get", `/items?hotelId=${BOGUS}`) },
+      { who: "OTHER", req: q("get", `/items?hotelId=${A1}`), expect: 404, sameAs: q("get", `/items?hotelId=${BOGUS}`) },
       // The hint only narrows among B's own companies: naming A narrows to nothing.
       { who: "B", req: q("get", `/items?hospitality_company_id=${CO_A}`), expect: "empty", sameAs: q("get", `/items?hospitality_company_id=${BOGUS}`) },
       { who: "A", req: q("get", "/items"), expect: 200, has: ["ISO-A-SECRET Saffron"] },
@@ -905,7 +899,7 @@ const LIST_ROWS = [
     probes: () => [
       { who: "B", req: q("get", `/hotel-items?hotelId=${B1}`), expect: 200 },
       { who: "B", req: q("get", `/hotel-items?hotelId=${A1}`), expect: 404, sameAs: q("get", `/hotel-items?hotelId=${BOGUS}`) },
-      { who: "OTHER", req: q("get", `/hotel-items?hotelId=${A1}`), expect: IN_CO_403 },
+      { who: "OTHER", req: q("get", `/hotel-items?hotelId=${A1}`), expect: 404, sameAs: q("get", `/hotel-items?hotelId=${BOGUS}`) },
       { who: "A", req: q("get", `/hotel-items?hotelId=${A1}`), expect: 200, has: ["ISO-A1-ONLY-BIN"] },
     ],
   },
@@ -968,8 +962,8 @@ const LIST_ROWS = [
       // A's hotel or PO as the scan context.
       { who: "B", req: q("get", `/scan/resolve?code=${W.barcodeA.code}&context=hotel:${A1}`), expect: 404, sameAs: q("get", `/scan/resolve?code=${W.barcodeA.code}&context=hotel:${BOGUS}`) },
       { who: "B", req: q("get", `/scan/resolve?code=${W.barcodeA.code}&context=po:${W.poA.poId}`), expect: 404, sameAs: q("get", `/scan/resolve?code=${W.barcodeA.code}&context=po:${BOGUS}`) },
-      // scanService.assertReadOnAny: FORBIDDEN when the caller could see the hotel's company.
-      { who: "OTHER", req: q("get", `/scan/resolve?code=${W.barcodeA.code}&context=hotel:${A1}`), expect: IN_CO_403 },
+      { who: "OTHER", req: q("get", `/scan/resolve?code=${W.barcodeA.code}&context=hotel:${A1}`), expect: 404, sameAs: q("get", `/scan/resolve?code=${W.barcodeA.code}&context=hotel:${BOGUS}`) },
+      { who: "OTHER", req: q("get", `/scan/resolve?code=${W.barcodeA.code}&context=po:${W.poA.poId}`), expect: 404, sameAs: q("get", `/scan/resolve?code=${W.barcodeA.code}&context=po:${BOGUS}`) },
       { who: "A", req: q("get", `/scan/resolve?code=${W.barcodeA.code}&context=hotel:${A1}`), expect: 200, kind: "item", has: ["ISO-A-SECRET Saffron"] },
     ],
   },
@@ -1162,6 +1156,21 @@ describe("records addressed by id", () => {
     // Positive control.
     const good = await send(C.aAll, real);
     expect({ route, status: good.status, body: good.status < 300 ? null : good.body }).toEqual({ route, status: row.ok, body: null });
+  });
+});
+
+describe("a GRN's PDF and labels", () => {
+  it("refuse exactly as GET /grn/:id does, for every caller who can't see the GRN", async () => {
+    await grantNoPerm("grn.read", A1);
+    const callers = { B: C.bAll, "A at A2 only": C.other, "A without grn.read": C.noPerm };
+    for (const [who, client] of Object.entries(callers)) {
+      for (const id of [W.grnA.id, BOGUS]) {
+        const grn = signature(await client.get(`${BASE}/grn/${id}`));
+        const pdfRes = signature(await client.get(`${BASE}/grn/${id}/pdf`));
+        const labels = signature(await client.post(`${BASE}/labels/grn/${id}`).send({ layout: "A4_65", mode: "per_pack" }));
+        expect({ who, id, grn: grn.status, pdf: pdfRes, labels }).toEqual({ who, id, grn: 404, pdf: grn, labels: grn });
+      }
+    }
   });
 });
 

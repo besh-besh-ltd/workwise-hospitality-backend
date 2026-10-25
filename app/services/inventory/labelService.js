@@ -19,7 +19,8 @@ import crypto from 'crypto';
 import { fileURLToPath } from 'url';
 import Handlebars from 'handlebars';
 import { InventoryError } from './errors.js';
-import { assertHotelPermission, hotelIdsWithPermission } from './scope.js';
+import { assertHotelPermission, assertVisibleHotelPermission, hotelIdsWithPermission } from './scope.js';
+import { assertGrnAccess } from './grnCommon.js';
 import { qrSvg } from './qr.js';
 import { shortUrl } from './shortUrl.js';
 import { pdfRenderer, NO_MARGIN } from '../../util/pdfRenderer.js';
@@ -261,7 +262,8 @@ function validateItemsPayload(payload) {
  * @returns {Promise<{url:string}>}
  * @throws InventoryError VALIDATION (field: layout | hotelId | items |
  *   invItemId | copies | batchNo | expiryDate), NOT_FOUND (item or hotel
- *   outside scope), FORBIDDEN (visible, but no inventory.update)
+ *   outside scope: no inventory.read or inventory.update there), FORBIDDEN
+ *   (visible, but no inventory.update)
  */
 export async function renderItemLabels(t, user, payload) {
   const { layout, hotelId, items } = validateItemsPayload(payload);
@@ -278,7 +280,8 @@ export async function renderItemLabels(t, user, payload) {
   const companies = [...new Set(rows.map((r) => Number(r.hospitality_company_id)))];
 
   if (hotelId) {
-    const { companyId } = await assertHotelPermission(t, user, {
+    // Rule C3: a hotel the caller can't see reads as missing.
+    const { companyId } = await assertVisibleHotelPermission(t, user, {
       resource: 'inventory', action: 'update', hotelId,
     });
     if (companies.some((c) => c !== companyId)) throw itemNotFound();
@@ -315,8 +318,8 @@ export async function renderItemLabels(t, user, payload) {
  * @param {number|string} grnId
  * @param {{layout:string, mode?:'per_unit'|'per_pack'}} payload  mode defaults to per_unit
  * @returns {Promise<{url:string}>}
- * @throws InventoryError NOT_FOUND 'GRN not found' (missing or foreign GRN,
- *   one message for both), FORBIDDEN (no grn.read at the GRN's hotel),
+ * @throws InventoryError NOT_FOUND 'GRN not found' (missing, foreign or no
+ *   grn.read at its hotel: exactly what GET /grn/:id answers),
  *   VALIDATION (layout | mode | grnId for a draft, a reversal, a reversed
  *   receipt or nothing to label | copies over the cap)
  */
@@ -334,12 +337,7 @@ export async function renderGrnLabels(t, user, grnId, payload) {
     )
     : null;
   if (!grn) throw grnNotFound();
-  try {
-    await assertHotelPermission(t, user, { resource: 'grn', action: 'read', hotelId: Number(grn.hotel_id) });
-  } catch (err) {
-    if (err instanceof InventoryError && err.code === 'NOT_FOUND') throw grnNotFound();
-    throw err;
-  }
+  await assertGrnAccess(t, user, grn, 'read'); // exactly what GET /grn/:id answers (rule C3)
   if (grn.doc_type !== 'RECEIPT' || grn.status === 'reversed') {
     throw invalid('grnId', 'Labels are printed from a receipt that still stands');
   }

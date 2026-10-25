@@ -26,7 +26,7 @@
 
 import ExcelJS from 'exceljs';
 import { InventoryError } from './errors.js';
-import { assertHotelPermission } from './scope.js';
+import { assertVisibleHotelPermission } from './scope.js';
 import { getEffectiveSettings } from './settings.js';
 import { nextDocNumber } from './docNumber.js';
 import { postMovements } from './ledger.js';
@@ -170,7 +170,7 @@ async function movedSinceStart(t, { companyId, hotelId, invItemIds }) {
  *   and a count is open at the hotel).
  */
 export async function previewOpeningStock(t, user, hotelId, buffer) {
-  const { companyId } = await assertHotelPermission(t, user, { resource: 'inventory', action: 'admin', hotelId });
+  const { companyId } = await assertVisibleHotelPermission(t, user, { resource: 'inventory', action: 'admin', hotelId });
   const hotel = Number(hotelId);
   if (!buffer || !buffer.length) throw bad('Attach the opening stock .xlsx file', 'file');
   const sheet = await readSheet(buffer);
@@ -354,7 +354,7 @@ export async function previewOpeningStock(t, user, hotelId, buffer) {
  * @returns {Promise<{result:{adjustmentId:number, adjustmentNumber:string}, audit:object}>}
  */
 export async function postOpeningStock(t, user, hotelId, rows, clientEventId) {
-  const { companyId } = await assertHotelPermission(t, user, { resource: 'inventory', action: 'admin', hotelId });
+  const { companyId } = await assertVisibleHotelPermission(t, user, { resource: 'inventory', action: 'admin', hotelId });
   const hotel = Number(hotelId);
   if (typeof clientEventId !== 'string' || !UUID_RE.test(clientEventId)) {
     throw bad('clientEventId must be a UUID', 'clientEventId');

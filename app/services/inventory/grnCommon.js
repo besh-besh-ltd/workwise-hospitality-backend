@@ -6,7 +6,7 @@
 // tolerance checks have no float drift.
 
 import { InventoryError } from './errors.js';
-import { assertHotelPermission } from './scope.js';
+import { assertHotelPermission, assertVisibleHotelPermission } from './scope.js';
 import { recomputePoReceipt } from './receiptRollup.js';
 import { advanceLegacyPoStatus } from './poStatus.js';
 
@@ -155,10 +155,10 @@ export async function tokenHotelId(t, viaToken) {
 
 /**
  * Who may receive this PO at this hotel: the hotel must be in the PO's hotel
- * set (else NOT_FOUND), and the user must hold grn.<action> there
- * (assertHotelPermission: NOT_FOUND outside the company, FORBIDDEN inside).
- * Outside the company the refusal reads exactly like a missing PO, so it
- * cannot be used to probe another company's PO ids.
+ * set (else NOT_FOUND), and the user must hold grn.<action> there. Rule C3:
+ * without grn.read or grn.<action> at the hotel the PO reads as missing
+ * (NOT_FOUND 'Purchase order not found', inside the caller's company too);
+ * seeing it without the action is FORBIDDEN.
  * A site-rep token is bound to its PO (and hotel) instead.
  */
 export async function assertReceiveAccess(t, actor, ctx, hotelId, { viaToken = null, action = 'create' } = {}) {
@@ -170,12 +170,7 @@ export async function assertReceiveAccess(t, actor, ctx, hotelId, { viaToken = n
     await assertToken(t, viaToken, ctx.po.id, hotel);
     return;
   }
-  try {
-    await assertHotelPermission(t, actor, { resource: 'grn', action, hotelId: hotel });
-  } catch (err) {
-    if (err instanceof InventoryError && err.code === 'NOT_FOUND') throw notFound('Purchase order not found');
-    throw err;
-  }
+  await assertVisibleHotelPermission(t, actor, { resource: 'grn', action, hotelId: hotel, missing: 'Purchase order not found' });
 }
 
 /**

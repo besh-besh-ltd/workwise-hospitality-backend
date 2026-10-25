@@ -432,13 +432,16 @@ describe("resolveScan and resolveShortLink", () => {
     });
   });
 
-  it("a context the caller can see but holds no read grant on is 403; bad input is 400", async () => {
+  it("a context without a read grant is 404 even inside the company (rule C3); bad input is 400", async () => {
     await withTx(async (t) => {
       // Mapped to company A but no grn / inventory grant anywhere.
       const { poId } = await makeRfqPo(t, { lines: [{ qty: 1 }] });
       for (const context of [`hotel:${A1}`, `po:${poId}`]) {
         const err = await thrownBy(t, (sp) => resolveScan(sp, USER, { code: "X-1", context }));
-        expect([context, err.code, err.httpStatus]).toEqual([context, "FORBIDDEN", 403]);
+        expect([context, err.code, err.httpStatus]).toEqual([context, "NOT_FOUND", 404]);
+        // Word for word what a context that does not exist gets.
+        const missing = await thrownBy(t, (sp) => resolveScan(sp, USER, { code: "X-1", context: context.replace(/\d+$/, "999999999") }));
+        expect(err.message).toBe(missing.message);
       }
       const none = await thrownBy(t, (sp) => resolveScan(sp, USER, { code: "X-1" }));
       expect(none.code).toBe("FORBIDDEN");

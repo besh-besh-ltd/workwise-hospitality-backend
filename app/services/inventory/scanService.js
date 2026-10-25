@@ -17,7 +17,7 @@
 //
 // Scope (spec §6.1, §10.1): the context is `po:<id>` or `hotel:<id>`, and the
 // caller needs grn.read or inventory.read on that hotel / one of the PO's
-// hotels (a foreign context is 404, a visible one without the grant 403). With
+// hotels (rule C3: any other context is 404, inside the company too). With
 // no context, the companies of the caller's own readable hotels are searched.
 // Codes resolve inside that company only, so another tenant's code is simply
 // 'unknown'. In a PO context only items on the PO's lines are candidates (and
@@ -248,22 +248,21 @@ async function readableHotelIds(t, user) {
 }
 
 /**
- * grn.read or inventory.read on one of `hotelIds`. Throws the most telling
- * refusal: FORBIDDEN when the caller could see any of the hotels, else NOT_FOUND.
+ * grn.read or inventory.read on one of `hotelIds`, else NOT_FOUND: rule C3,
+ * a hotel (or PO) the caller can't see reads as missing, inside their
+ * company too.
  */
 async function assertReadOnAny(t, user, hotelIds) {
-  let refusal = notFound();
   for (const hotelId of hotelIds) {
     for (const resource of ['grn', 'inventory']) {
       try {
         return await assertHotelPermission(t, user, { resource, action: 'read', hotelId });
       } catch (err) {
-        if (!(err instanceof InventoryError)) throw err;
-        if (err.code === 'FORBIDDEN') refusal = err;
+        if (!(err instanceof InventoryError) || !['FORBIDDEN', 'NOT_FOUND'].includes(err.code)) throw err;
       }
     }
   }
-  throw refusal;
+  throw notFound();
 }
 
 /** Parse and gate `po:<id>` / `hotel:<id>`; returns where codes resolve. */
@@ -536,9 +535,9 @@ async function itemPayload(t, { invItemId, packFactor }, ctx) {
  *         stockedAtHotel:boolean|null}|null,
  *   poId?:number, grnId?:number, dispatchId?:number}>}
  *   `code` is echoed as received (trimmed).
- * @throws InventoryError VALIDATION (code / context), NOT_FOUND (foreign or
- *   missing context, vendor / token user), FORBIDDEN (visible context without
- *   grn.read or inventory.read; no readable hotel at all without a context).
+ * @throws InventoryError VALIDATION (code / context), NOT_FOUND (a context
+ *   without grn.read or inventory.read, foreign or missing; vendor / token
+ *   user), FORBIDDEN (no readable hotel at all without a context).
  */
 export async function resolveScan(t, user, { code, context } = {}) {
   if (isOutsider(user)) throw notFound();

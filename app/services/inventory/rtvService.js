@@ -36,12 +36,13 @@
 //             booked to is received again or short-closed.
 //
 // Permissions: grn.approve at the GRN's hotel for every action, grn.read to
-// view (assertHotelPermission: NOT_FOUND outside the company, FORBIDDEN
-// inside it). Lock order (planCore): PO row → delivery lines → balances, and
+// view. Rule C3: without grn.read or the action there the return (or GRN)
+// reads as missing, inside the caller's company too; FORBIDDEN only when it
+// is visible. Lock order (planCore): PO row → delivery lines → balances, and
 // nextDocNumber before postMovements (ledger rule b).
 
 import { InventoryError } from './errors.js';
-import { assertHotelPermission } from './scope.js';
+import { assertVisibleHotelPermission } from './scope.js';
 import { getPoContext } from './planCore.js';
 import { recomputePoReceipt } from './receiptRollup.js';
 import { nextDocNumber } from './docNumber.js';
@@ -102,20 +103,13 @@ async function loadRtvRow(t, rtvId, { forUpdate = false } = {}) {
 }
 
 /**
- * Gate on the RTV's (or GRN's) hotel; a refusal outside the company reads as
- * "not found", in the words a missing id of that record gets (`missing`), so
- * it cannot be used to probe which ids exist.
+ * Gate on the RTV's (or GRN's) hotel. Rule C3: without grn.read or
+ * grn.<action> there the record reads as missing, in the words a missing id
+ * of it gets (`missing`), inside the caller's company too; seeing it without
+ * the action is FORBIDDEN.
  */
-async function gate(t, user, hotelId, action, missing = null) {
-  try {
-    return await assertHotelPermission(t, user, { resource: 'grn', action, hotelId });
-  } catch (err) {
-    if (err instanceof InventoryError && err.code === 'NOT_FOUND') {
-      throw missing ? new InventoryError('NOT_FOUND', missing) : notFound();
-    }
-    throw err;
-  }
-}
+const gate = (t, user, hotelId, action, missing = 'Return to vendor not found') =>
+  assertVisibleHotelPermission(t, user, { resource: 'grn', action, hotelId, missing });
 
 /**
  * Returnable qty per GRN line: accepted − reversed − on other live RTVs.

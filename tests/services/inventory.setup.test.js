@@ -205,8 +205,9 @@ describe("inventory setup", () => {
       const list = await setup.listHotelItems(t, ADMIN_USER, { hotelId: HOTEL_A1 });
       expect(list.rows.find((r) => r.invItemId === item.id)).toMatchObject({ reorderLevel: 8, minQty: null });
 
-      // the grant covers hotel A1 only
-      expect((await thrownBy(t, (sp) => setup.saveHotelItem(sp, ADMIN_USER, { hotelId: HOTEL_A2, invItemId: item.id }, {}))).code).toBe("FORBIDDEN");
+      // the grant covers hotel A1 only: A2 reads as a missing hotel (rule C3)
+      const outside = await thrownBy(t, (sp) => setup.saveHotelItem(sp, ADMIN_USER, { hotelId: HOTEL_A2, invItemId: item.id }, {}));
+      expect([outside.code, outside.message]).toEqual(["NOT_FOUND", "Hotel not found"]);
     });
   });
 
