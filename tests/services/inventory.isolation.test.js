@@ -93,6 +93,7 @@ const ALL_KEYS = [
   "grn.read", "grn.create", "grn.update", "grn.approve",
   "inventory.read", "inventory.create", "inventory.update", "inventory.approve", "inventory.admin",
   "awarding.read", "awarding.create", // PO_SCOPE_PERMISSIONS / PO_INITIATE_PERMISSIONS
+  "mr.create", // a reorder MR draft, at the hotel and department
   ...INVENTORY_REPORTS.map((d) => d.permission),
 ];
 const WIDE = { from: "2020-04-01", to: "2031-03-31" }; // every report period the world can touch
@@ -1148,7 +1149,7 @@ const DOC_ROWS = [
     req: (x) => q("get", `/reorder?hotelId=${x.hotelId}`),
   },
   {
-    key: "POST /reorder/mr-draft", perm: "inventory.update", scoped: 404, noPerm: 403, ok: 201,
+    key: "POST /reorder/mr-draft", perm: "mr.create", scoped: 404, noPerm: 403, ok: 201,
     ids: () => ({ hotelId: A1, invItemId: W.itemA1 }), idKey: "hotelId",
     req: (x) => q("post", "/reorder/mr-draft", {
       hotelId: x.hotelId, departmentId: FB, clientEventId: randomUUID(), items: [{ invItemId: x.invItemId, qty: 1 }],
@@ -1747,7 +1748,7 @@ describe("lists and aggregates", () => {
     expect(await stockOfA()).not.toEqual(aBefore);
   });
 
-  it("GET /reorder: no hotel means the caller's own; Create MR draft follows inventory.update", async () => {
+  it("GET /reorder: no hotel means the caller's own; Create MR draft follows mr.create", async () => {
     const own = await C.bAll.get(`${BASE}/reorder`);
     expect({ status: own.status, hotel: own.body.data?.hotelId, leaks: leaksIn(own.body) }).toEqual({ status: 200, hotel: B1, leaks: [] });
     expect(own.body.data.hotels.map((h) => h.id).filter((id) => [A1, A2, A3].includes(id))).toEqual([]);
@@ -1758,9 +1759,11 @@ describe("lists and aggregates", () => {
 
     const mine = await C.aAll.get(`${BASE}/reorder?hotelId=${A1}`);
     expect({ status: mine.status, can: mine.body.data?.can }).toEqual({ status: 200, can: { createMrDraft: true } });
-    await grantNoPerm("inventory.update", A1);
-    const readOnly = await C.noPerm.get(`${BASE}/reorder?hotelId=${A1}`);
-    expect({ status: readOnly.status, can: readOnly.body.data?.can }).toEqual({ status: 200, can: { createMrDraft: false } });
+    // every inventory permission (inventory.update too), but no mr.create
+    await grantNoPerm("mr.create", A1);
+    const noMr = await C.noPerm.get(`${BASE}/reorder?hotelId=${A1}`);
+    expect({ status: noMr.status, can: noMr.body.data?.can, departments: noMr.body.data?.departments })
+      .toEqual({ status: 200, can: { createMrDraft: false }, departments: [] });
   });
 });
 

@@ -31,22 +31,26 @@
 //   for, in stock units. Shown, never subtracted (they may not be approved).
 //
 // Security: the hotel comes from the query but is gated against the caller's
-// own role scopes (inventory.read for the list; inventory.update plus an MR
-// cell for the draft). A foreign or out-of-scope hotel or department is
-// NOT_FOUND. Never can().
+// own role scopes: inventory.read at the hotel for the list and the draft (a
+// foreign or out-of-scope hotel is NOT_FOUND), and for the draft a buyer
+// account holding mr.create at the exact cell (the hotel row's company, the
+// hotel, the department), checked by authorizationService.assertUserHasScope
+// as the MR's own call-off recovery does (an MR has no process, so only grants
+// with no process count). A refusal at a hotel the caller can see is
+// FORBIDDEN. Never can().
 
 import cron from 'node-cron';
 import db from '../../config/dbConn.js';
 import { logError } from '../../helper/common.js';
 import mrModel from '../../models/mr/mrModel.js';
+import { assertUserHasScope, isAuthorizationError } from '../authorizationService.js';
 import { logger } from '../../util/logger.js';
 import { hotelIdsWithPermission } from './scope.js';
 import { RECEIVABLE_PO_STATUSES } from './grnService.js';
 import { uomKey } from './uom.js';
 import { notifyLowStockDigest, LOW_STOCK_DIGEST_TYPE } from './notices/digestNotices.js';
 import {
-  MAX_LINES, IST_TODAY, positiveInt, invalid, notFound, num, iso, toQty, assertDocAccess, loadCompanyItems, holds,
-  requireUuid,
+  MAX_LINES, IST_TODAY, positiveInt, invalid, notFound, num, iso, toQty, assertDocAccess, loadCompanyItems, requireUuid,
 } from './stockCommon.js';
 import { InventoryError } from './errors.js';
 
@@ -258,13 +262,36 @@ async function withStoredRates(t, lines) {
   return lines.map((l) => ({ ...l, stored_rate: rates.get(Number(l.arc_contract_line_id)) ?? Number(l.current_rate) }));
 }
 
-/** Departments the user may raise an MR for at the hotel (super admin: all). */
-async function mrDepartments(t, user, hotelId) {
+/**
+ * Departments the user may raise an MR for at the hotel: a buyer's grants of
+ * mr.create there (a grant with no department covers them all; super admin:
+ * all). The predicate is assertUserHasScope's with no process, so every
+ * department listed is one the POST admits.
+ */
+async function mrDepartments(t, user, { hotelId, companyId }) {
   if (Number(user?.user_type) === SUPER_ADMIN) {
     return t.any(`SELECT id, title FROM tbl_department ORDER BY title`);
   }
   if (!MR_USER_TYPES.includes(Number(user?.user_type))) return [];
-  return mrModel.hotelDepartmentsForUser(positiveInt(user.id), hotelId, t);
+  return t.any(
+    `WITH grants AS (
+       SELECT urs.department_id
+         FROM tbl_user_role_scopes urs
+         JOIN tbl_role_permissions rp ON rp.role_id = urs.role_id
+         JOIN tbl_permissions p ON p.id = rp.permission_id
+        WHERE urs.user_id = $1
+          AND urs.company_id = $2
+          AND (urs.hotel_id IS NULL OR urs.hotel_id = $3)
+          AND urs.process_id IS NULL
+          AND (p.resource || '.' || p.action) = 'mr.create'
+     )
+     SELECT d.id, d.title
+       FROM tbl_department d
+      WHERE EXISTS (SELECT 1 FROM grants WHERE department_id IS NULL)
+         OR d.id IN (SELECT department_id FROM grants WHERE department_id IS NOT NULL)
+      ORDER BY d.title`,
+    [positiveInt(user.id), companyId, hotelId]
+  );
 }
 
 /**
@@ -351,8 +378,9 @@ const toContracted = (l) => ({
  *   contracted: the cheapest line over the caller's departments (null when
  *   none); contractedLines: the cheapest per department. A line's unitRate
  *   is the rate the MR stores; remainingQty / hotelRemainingQty are in the
- *   contract's unit. can.createMrDraft mirrors the POST /reorder/mr-draft
- *   gate (inventory.update here, and a buyer).
+ *   contract's unit. departments are those the caller may raise an MR for
+ *   here (a buyer holding mr.create); can.createMrDraft is true when there is
+ *   one. The POST checks the exact department again.
  * @throws {InventoryError} NOT_FOUND for a hotel the caller cannot read
  */
 export async function getReorderList(t, user, { hotelId } = {}) {
@@ -375,7 +403,6 @@ export async function getReorderList(t, user, { hotelId } = {}) {
   };
   if (!hotel) return empty;
   const { companyId } = await assertDocAccess(t, user, hotel, 'read');
-  const canCreateMrDraft = MR_USER_TYPES.includes(Number(user?.user_type)) && (await holds(t, user, hotel, 'update'));
 
   const started = await t.oneOrNone(`SELECT stock_started_at FROM tbl_inv_hotel_settings WHERE hotel_id = $1`, [hotel]);
   const base = await belowReorderItems(t, { hotelId: hotel, companyId });
@@ -386,7 +413,10 @@ export async function getReorderList(t, user, { hotelId } = {}) {
   const { onOrder, group, incomplete } = await onOrderAt(t, { hotelId: hotel, companyId, items, factorOf });
   const openMr = await openMrAt(t, { hotelId: hotel, companyId, ids, factorOf });
   const variants = await variantsOf(t, companyId, ids);
-  const departments = (await mrDepartments(t, user, hotel)).map((d) => ({ id: Number(d.id), title: d.title }));
+  const departments = (await mrDepartments(t, user, { hotelId: hotel, companyId })).map((d) => ({
+    id: Number(d.id),
+    title: d.title,
+  }));
   const lines = await contractedLines(t, {
     hotelId: hotel,
     companyId,
@@ -467,7 +497,7 @@ export async function getReorderList(t, user, { hotelId } = {}) {
       .filter(([, q]) => q > 0)
       .map(([invItemId, openQty]) => ({ invItemId, openQty }))
       .sort((a, b) => a.invItemId - b.invItemId),
-    can: { createMrDraft: canCreateMrDraft },
+    can: { createMrDraft: departments.length > 0 },
   };
 }
 
@@ -580,19 +610,22 @@ async function replayDraft(t, user, clientEventId, { hotelId, departmentId, comp
  *   departmentId:number, items:Array<{invItemId, productVariantId, arcContractId, arcContractLineId,
  *   quantity, uom, unitRate}>, warnings:Array<{invItemId, arcContractLineId, hotelId, quantity,
  *   hotelRemainingQty, message}>, replayed?:true, no_op?:true}>}
- * @throws {InventoryError} NOT_FOUND (hotel or department out of the caller's
- *   scope, or a foreign item) | FORBIDDEN (no inventory.update, or not a buyer)
- *   | CONFLICT (clientEventId already made another requisition)
- *   | VALIDATION ({field:'items', index, invItemId, reason:'NOT_CONTRACTED' |
- *   'UOM_FACTOR_REQUIRED' | 'EXCEEDS_CONTRACT_REMAINING' (with quantity and
- *   remaining, in the contract's unit), lines:[...every refused item]})
+ * @throws {InventoryError} NOT_FOUND (a hotel the caller cannot read, an
+ *   unknown department, or a foreign item) | FORBIDDEN (not a buyer, or no
+ *   mr.create at this hotel and department) | CONFLICT (clientEventId
+ *   already made another requisition) | VALIDATION ({field:'items', index,
+ *   invItemId, reason:'NOT_CONTRACTED' | 'UOM_FACTOR_REQUIRED' |
+ *   'EXCEEDS_CONTRACT_REMAINING' (with quantity and remaining, in the
+ *   contract's unit), lines:[...every refused item]})
  */
 export async function createReorderMrDraft(t, user, input = {}) {
   const clientEventId =
     input.clientEventId == null || input.clientEventId === '' ? null : requireUuid(input.clientEventId);
   const hotelId = positiveInt(input.hotelId);
   if (!hotelId) throw invalid('Choose a hotel', { field: 'hotelId' });
-  const { companyId } = await assertDocAccess(t, user, hotelId, 'update');
+  // The hotel must be one the caller can see (else NOT_FOUND, as a missing
+  // hotel); from here a refusal is FORBIDDEN.
+  const { companyId } = await assertDocAccess(t, user, hotelId, 'read');
   const superAdmin = Number(user?.user_type) === SUPER_ADMIN;
   if (!MR_USER_TYPES.includes(Number(user?.user_type))) {
     throw new InventoryError('FORBIDDEN', 'Only buyers can raise a material requisition', { hotelId });
@@ -600,16 +633,25 @@ export async function createReorderMrDraft(t, user, input = {}) {
 
   const departmentId = positiveInt(input.departmentId);
   if (!departmentId) throw invalid('Choose a department', { field: 'departmentId' });
-  const department = await t.oneOrNone(`SELECT id, title FROM tbl_department WHERE id = $1`, [departmentId]);
-  const inCell =
-    department &&
-    (superAdmin ||
-      (await mrModel.hasScopeForCell(
+  const department = await t.oneOrNone(`SELECT id FROM tbl_department WHERE id = $1`, [departmentId]);
+  if (!department) throw notFound('Department not found', { field: 'departmentId' });
+  if (!superAdmin) {
+    try {
+      await assertUserHasScope(
         positiveInt(user.id),
-        { hotel_id: hotelId, department_id: departmentId, hospitality_company_id: companyId },
+        'mr.create',
+        { hospitality_company_id: companyId, hotel_id: hotelId, department_id: departmentId },
         t
-      )));
-  if (!inCell) throw notFound('Department not found', { field: 'departmentId' });
+      );
+    } catch (err) {
+      if (!isAuthorizationError(err)) throw err;
+      throw new InventoryError(
+        'FORBIDDEN',
+        "You don't have permission to raise a material requisition for this department at this hotel",
+        { resource: 'mr', action: 'create', hotelId, departmentId }
+      );
+    }
+  }
 
   if (clientEventId) {
     // Serialise copies of one request, then answer from the first.
