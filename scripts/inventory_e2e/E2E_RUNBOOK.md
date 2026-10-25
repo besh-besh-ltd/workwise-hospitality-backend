@@ -55,10 +55,12 @@ Two checks are tagged **`[D3 mr.create gate]`**: the Storekeeper must get `can.c
 
 ```bash
 cd .worktrees/inventory/frontend
-NEXT_PUBLIC_API_URL=http://localhost:8092/api/v1 npx next dev --turbopack   # http://localhost:3000
+NEXT_TELEMETRY_DISABLED=1 NEXT_PUBLIC_API_URL=http://localhost:8092/api/v1 npx next dev --turbopack   # http://localhost:3000
 ```
 
-The worktree has no `.env.development`, so `npm run dev` fails. Use the command above. Do not copy the main checkout's `.env.development` here: it points at the stage API and turns PostHog on. With no env file, PostHog is off and browser OTel targets `localhost:4318`.
+The worktree has no `.env.development`, so `npm run dev` fails. Use the command above. Do not copy the main checkout's `.env.development` here: it points at the stage API and turns PostHog on. With no env file, PostHog is off and browser OTel targets `localhost:4318`. `NEXT_TELEMETRY_DISABLED=1` stops the Next.js dev server from sending its own usage telemetry.
+
+The browser still loads a few third-party assets on every page, the public token page included: Google Fonts (`fonts.googleapis.com`, `fonts.gstatic.com`) and the Google Sign-In script (`accounts.google.com/gsi/client`). They are static loads by the browser, not calls from the backend, and they carry no app data.
 
 ## 3. Logins
 
@@ -109,7 +111,7 @@ Company B has its own "Paneer (Indigo)" item (96811) carrying the **same** barco
 | PO | What | Lines (PO unit, rate, GST) | Total |
 |---|---|---|---|
 | **96801 `E2E-INV-PO-1001`** | Multi-hotel RFQ PO (RFQ 96801, delivers to A1 + A2). It has no delivery plan yet: the first read creates one unallocated delivery, due vendor acceptance + 3 days. | Paneer 40 kg @ ₹380 (5%); Rice 10 Bag @ ₹2,250 (5%); Caps 500 pc @ ₹4 (18%). Line ids 96801–96803. | ₹41,945 |
-| **96802 `E2E-INV-CO-1002`** | Call-off PO for **A1** only, from the active ARC `ARC-E2E-INV-0001` (contract 96801, F&B) via MR `MR-E2E-INV-0001`. Its due date is the MR's required-by date, today + 2. | Paneer 15 kg @ ₹360 (5%); Caps 300 pc @ ₹3.80 (18%). Line ids 96811–96812. | ₹7,015.20 |
+| **96802 `E2E-INV-CO-1002`** | Call-off PO for **A1** only, from the active ARC `ARC-E2E-INV-0001` (contract 96801, F&B) via MR `MR-E2E-INV-0001`. The MR's required-by date is today + 2, but the PO has no delivery plan, so Receive lists it as "Not scheduled" (the Unscheduled tab). | Paneer 15 kg @ ₹360 (5%); Caps 300 pc @ ₹3.80 (18%). Line ids 96811–96812. | ₹7,015.20 |
 
 **Rate contract.** ARC `ARC-E2E-INV-0001` (96801) is active, single-hotel A1, department F&B (contract 96801). Reorder's MR draft matches against its lines. Remaining = committed − what the call-off PO 96802 already consumed.
 
@@ -137,9 +139,9 @@ To mint another link, use the buyer's PO page → Deliveries → Site representa
 
 Dates below are relative to the day you run it. "P1" means today + 2 and "P2" means today + 9.
 
-Every expected number below comes from `api_scenario.mjs` on a fresh seed: 80 of 80 checks passed on 2026-10-25, against backend integration with D3 (`89139f45`). The 2 gate checks were pending. In the examples, today is 2026-10-25, so the paneer batch `PNR-E2E-01` expires 2026-11-04 (today + 10) and the expired lot `PNR-E2E-OLD` expired 2026-10-24 (yesterday).
+Every expected number below comes from `api_scenario.mjs` on a fresh seed: 80 of 80 checks passed on 2026-10-25, against backend integration with D3 (`89139f45`), and again against `29e7c4b5` (with E1's strict 404 for hotels you cannot see). The 2 gate checks were pending both times. In the examples, today is 2026-10-25, so the paneer batch `PNR-E2E-01` expires 2026-11-04 (today + 10) and the expired lot `PNR-E2E-OLD` expired 2026-10-24 (yesterday).
 
-The UI steps have not been run in a browser against D1 and D3 yet. The frontend integration branch (`84048339`) now has D1 to D5: Stock, Mark out, Adjustments, Setup, Counts, Reorder, Reports and the token page. The page names and button labels below may need small corrections after the browser run. The API equivalents are verified.
+The UI steps were run in a browser on 2026-10-25 against frontend integration `84048339` and backend integration `29e7c4b5`: everything at 1440×900, and the scan screens (steps 3, 6, 7, 9 and 12) again at 375×812. The page names, labels and on-screen numbers below match that run. Defects found in it are tracked in the E3 browser report, not here.
 
 Routes (frontend):
 
@@ -179,7 +181,7 @@ Expected:
 3. Click **Record dispatch**.
 
 Expected:
-- `DSP/A1/<FY>/00001` shows "On the road".
+- `DSP/A1/<FY>/00001` is listed under **Dispatch notes** as "In transit", and the "Saffron Grand Mumbai (A1) · Phase 1" card says "On the road".
 - The buyer gets the mail "Dispatch Update: PO #E2E-INV-PO-1001 marked as Dispatched".
 - The buyer's plan now shows "Plan locked", and only due dates can move.
 
@@ -191,8 +193,8 @@ Expected:
      - Scanning the plain `8901234500019` also works, but then you type the expiry yourself. It is required for an expiry-tracked item, and must be at least 3 days out or you get a warning.
    - `8901234500026` three times. Each scan adds 1 Bag (25 kg).
    - `8901234500057` once (+100 pc), then `8901234500040` fifty times, or type 150 into Received.
-3. On the paneer line, open "Reject, batch and expiry" (on mobile) or the line details (on desktop). Set Rejected qty `2` and reason **Quality**. Accepted becomes 10.
-4. Under Delivery documents → **Against dispatch**, pick `DSP/A1/… · challan FK-DC-1001`. It fills the challan, and fills quantities only for lines you have not already scanned.
+3. On the paneer line, open "Reject, batch and expiry" (on mobile) or the line details (on desktop). Set Rejected qty `2` and reason **Quality issue**. Accepted becomes 10.
+4. Under Delivery documents → **Against dispatch**, pick `DSP/A1/… · challan FK-DC-1001`. It fills the challan number, and fills quantities only for lines you have not already scanned. Today it does not fill the challan date, vehicle or e-way bill (see the E3 browser report).
 5. Click **Post receipt** → check the summary → **Confirm and post**.
 
 Expected:
@@ -227,19 +229,19 @@ Expected:
 
 1. Go to Inventory → GRNs → `GRN/A1/…/00001` → **Return to vendor**.
 2. Choose **Replacement**. On Shower Cap, set Return `10` with reason Damaged. Click **Create return**.
-3. Then **Dispatch now**, with return challan `RTV-DC-01`.
+3. Then **Dispatch now**, with return challan `RTV-DC-01`. The sheet confirms "Return RTV/A1/<FY>/00001 dispatched. The stock has gone out."
 
 Expected:
 - `RTV/A1/<FY>/00001` is dispatched, and caps at A1 drop to **140** pc (₹560).
 - On the plan, caps show "Returned 10" and 10 open again at A1 P1 (the vendor owes the replacement).
-- The vendor gets the mail "RTV/A1/…: goods returned".
+- The vendor gets the mail "RTV/A1/…: goods returned on PO E2E-INV-PO-1001".
 - The RTV PDF lands in the AWS sink.
 
 ### 6. Mark out paneer to F&B by scan (`INVE2E-STORE`)
 
-1. Go to Inventory → Mark out, choose department **F&B**, scan `8901234500019`, enter `6` kg, then post.
+1. Go to Inventory → Mark out (the **Mark out** toggle is on by default), choose department **F&B**, optionally type "Chef Arun" under Requested by, scan `8901234500019`, enter `6` on the weigh pad, **Add kg**, then **Post mark out**.
 2. Expected:
-   - `OUT/A1/<FY>/00001`, ₹2,280; paneer goes to **4** kg.
+   - `OUT/A1/<FY>/00001`, ₹2,280; paneer goes to **4** kg. The success screen shows the document number only; the value is on the paneer bin card (−6 at ₹380) and in report 7.3.
    - FEFO takes the 6 kg from `PNR-E2E-01`, which drops to 4 kg.
 3. API equivalent (`POST /inventory/out`):
 
@@ -249,7 +251,7 @@ Expected:
 
 ### 7. Return 2 kg (`INVE2E-STORE`)
 
-1. Same page, choose Return, F&B, paneer `2` kg.
+1. Same page, switch the toggle to **Return to stock**, department F&B (the picker now reads "Returned by…"). Type "Paneer" under Find an item, click **Paneer · PNR-001**, enter `2` kg, **Add kg**, then **Post return**.
 2. Expected:
    - `RET/A1/<FY>/00001`, ₹760; paneer goes to **6** kg.
    - A return with no batch goes to the **undated bucket**. The paneer card now lists two rows: undated 2 kg first (FEFO treats an unknown expiry as the soonest), then `PNR-E2E-01` 4 kg.
@@ -257,10 +259,10 @@ Expected:
 
 ### 8. Wastage adjustment, then approve
 
-1. As `INVE2E-STORE`: go to Inventory → Adjustments → new. Reason **Wastage**, paneer `-0.5` kg, remarks "Paneer soured in chiller". Submit.
-   - It goes to "pending approval", because the auto-approve limit is 0.
-   - The Storekeeper cannot approve it (HTTP 403 "You don't have permission to do this at this hotel").
-2. As `INVE2E-CTRL`: approve it.
+1. As `INVE2E-STORE`: go to Inventory → Adjustments → **New adjustment**. Reason **Wastage (out)**, find Paneer, quantity `0.5` (the form shows the minus sign for an "out" reason, so type the number without it), remarks "Paneer soured in chiller". Click **Submit adjustment**.
+   - The page says "ADJ/A1/<FY>/00001 sent for approval" and the row is "Pending approval", because the auto-approve limit is 0.
+   - The Storekeeper sees no Approve or Reject button. The API refuses too: `POST /inventory/adjustments/<id>/approve` as the Storekeeper is HTTP 403 "You don't have permission to do this at this hotel".
+2. As `INVE2E-CTRL`: Adjustments → **Approve** on the row → **Approve** in the sheet.
 3. Expected:
    - `ADJ/A1/<FY>/00001` is posted, −₹190; paneer goes to **5.5** kg.
    - FEFO draws the undated bucket: undated 1.5 kg, `PNR-E2E-01` 4 kg.
@@ -273,10 +275,10 @@ Expected:
 1. As `INVE2E-STORE`: go to Inventory → Counts → **Start count**.
    - Hotel A1; **Full count** (all 3 items).
    - Leave **Blind count** on.
-2. Enter Paneer `5`, Basmati Rice `75`, Shower Cap `140`. A FULL count needs every line counted before it can be submitted. Click **Submit for approval**. The blind count hides the system quantity from the storekeeper.
+2. Enter Paneer `5`, Basmati Rice `75`, Shower Cap `140`. Scanning a code in "Scan or type a code" jumps to that item's counted-qty box; type the number. Each line saves on its own ("Saved"). A FULL count needs every line counted before it can be submitted. Click **Submit for approval** → **Submit count**. The blind count hides the system quantity from the storekeeper.
 3. As `INVE2E-CTRL`: open `CNT/A1/<FY>/00001`.
    - Expected review: Paneer counted 5, system 5.5, variance −0.5, value −₹190, "Reason needed". Rice and caps have no variance.
-   - Enter a reason on paneer (e.g. "Trim loss while portioning") → **Approve and post**.
+   - Enter a reason on paneer (e.g. "Trim loss while portioning"); **Approve and post** stays disabled until every difference has a reason. Then **Approve and post** → **Post differences**.
 4. Expected:
    - Paneer at A1 is **5** kg (₹1,900).
    - A1 stock total is ₹9,210 (rice ₹6,750 + caps ₹560 + paneer ₹1,900).
@@ -293,9 +295,10 @@ Expected:
 This shows the one exception to FEFO. An adjustment with reason **Expiry** draws expired lots first, earliest expiry first. Every other outbound movement takes the undated bucket first, then the earliest expiry.
 
 1. As `INVE2E-STORE`: Inventory → Receive → `E2E-INV-PO-1001` · A1. Receive paneer only: received 3, accepted 3, batch `PNR-E2E-OLD`, expiry **yesterday**, challan `FK-DC-1009`. Post it.
+   - While you type, the line already says "Already expired: reject it as short shelf life, or check the date", and the confirm sheet repeats it.
    - Expected: the GRN posts, with an **EXPIRED** warning ("Paneer expired on <yesterday>; consider rejecting it (short shelf life)"). An expired date warns but does not block.
    - The paneer card, in FEFO order: undated 1 kg; `PNR-E2E-OLD` (yesterday) 3 kg; `PNR-E2E-01` (today + 10) 4 kg. Paneer is 8 kg.
-2. Reports → **7.7 Near expiry**, business unit A1:
+2. Reports → **7.7 Near Expiry**, business unit A1 (as `INVE2E-CTRL` or the buyer; the Storekeeper has no report access and sees "No reports available"):
 
    | Batch | Days to expiry | Status | Qty |
    |---|---|---|---|
@@ -303,7 +306,7 @@ This shows the one exception to FEFO. An adjustment with reason **Expiry** draws
    | PNR-E2E-01 | 10 | Expiring | 4 |
 
    The report lists batches expiring within 30 days, expired ones included. The undated bucket never appears.
-3. As `INVE2E-STORE`: Inventory → Adjustments → new. Reason **Expiry**, paneer `-3` kg, remarks "Expired lot PNR-E2E-OLD". Submit. Then, as `INVE2E-CTRL`, approve it.
+3. As `INVE2E-STORE`: Inventory → Adjustments → **New adjustment**. Reason **Expired (out)**, paneer `3` kg, remarks "Expired lot PNR-E2E-OLD". Submit. Then, as `INVE2E-CTRL`, approve it. If you run the 7.7 report (item 2) as the Controller, you can do it after the Storekeeper submits and before you approve: a pending adjustment does not move stock.
 4. Expected:
    - The second adjustment is posted, −₹1,140; paneer goes back to **5** kg.
    - The ledger (`GET /inventory/stock/96801/items/96801/ledger`) has **one** ADJUST_OUT row for it: batch `PNR-E2E-OLD`, expiry yesterday, −3 kg, −₹1,140.
@@ -320,7 +323,7 @@ The Controller can create the draft. It is a buyer-type user holding **MR Raiser
 
 The gate is changing. The ruling: a reorder MR draft requires `mr.create` at the exact company / hotel / department cell, and `inventory.update` is no longer part of it. D3 is implementing this. The current backend still gates on `inventory.update` plus any role scope at the cell. The seed grants `mr.create` at the cells either way, so the Controller passes both gates.
 
-1. Go to Inventory → Reorder, hotel A1. Expected worklist (after steps 1–9b):
+1. Go to Inventory → Reorder (`/dashboard/buyer/inventory/reorder?hotelId=96801`). Expected worklist (after steps 1–9b); rows with a suggestion are pre-selected, so Basmati Rice starts ticked with order qty 150:
 
    | Item | On hand | Reorder at | Max | On order | Suggested | Contract |
    |---|---|---|---|---|---|---|
@@ -335,11 +338,11 @@ The gate is changing. The ruling: a reorder MR draft requires `mr.create` at the
      - caps: 10 (the RTV replacement still owed on P1) + 150 on P2 + 300 on PO 96802 = 460.
    - **Suggested** = max − on hand − on order, rounded up to the smallest pack above 1. Rice: 300 − 75 − 75 = 150, already a multiple of the 25 kg bag. Paneer and caps are covered by what is on order, so they get 0.
    - Unallocated group orders: none, because step 1 split PO 96801 by hotel.
-2. Department (MR): **F&B**. Select Basmati Rice (order qty 150, the suggestion) and Paneer, and type order qty `10` for Paneer. Click **Create MR draft (2)**.
+2. Department (MR): **F&B** (the default). Keep Basmati Rice (order qty 150, the suggestion), tick Paneer and type order qty `10`. Click **Create MR draft (2)**. There is no confirm step.
 3. Expected:
-   - "Draft requisition MR-… created with 2 items".
+   - "Draft requisition MR-… created with 2 items.", with **Submit for approval** and **Open MR** links.
    - The MR is a draft at A1 / F&B, raised by the Controller. The lines are in the **contract's unit** at the contract rate: rice **6 Bag** @ ₹2,200 (150 kg ÷ 25), paneer **10 kg** @ ₹360.
-   - Reload: rice now shows open MR 150 kg and paneer 10 kg (drafts and pending MRs count as "open MR").
+   - Reload: under On order, rice shows "MR draft/pending: 150" and paneer "MR draft/pending: 10". Open MRs are shown, never subtracted, so rice still suggests 150 and is pre-selected again. Clicking **Create MR draft** a second time makes a second draft.
 4. API, with the checks `api_scenario.mjs` makes:
 
    | Request | Expected |
@@ -360,12 +363,12 @@ The gate is changing. The ruling: a reorder MR draft requires `mr.create` at the
 | `GET /inventory/reorder?hotelId=96801` | 200, `can.createMrDraft: false` (the worklist stays readable with `inventory.read`) | 200, `can.createMrDraft: true` |
 | `POST /inventory/reorder/mr-draft` at A1 / F&B, rice 25 kg | **403** | 201: a draft is created |
 
-`api_scenario.mjs` runs both as the `[D3 mr.create gate]` checks (see section 1). In the UI, after the merge, the Storekeeper sees the Reorder list with no "Department (MR)" picker and no **Create MR draft** button. Copy to RFQ is still offered.
+`api_scenario.mjs` runs both as the `[D3 mr.create gate]` checks (see section 1). In the UI, after the merge, the Storekeeper sees the Reorder list with no "Department (MR)" picker and no **Create MR draft** button. Copy to RFQ is still offered. On `29e7c4b5` (no gate yet) the browser run saw the picker and the button for the Storekeeper, as expected.
 
 ### 11. Reports (`INVE2E-CTRL`, or the buyer)
 
-1. Go to Insights → Reports. The Inventory family (7.1–7.7) and Receiving & Deliveries (8.1–8.3) are all ready.
-2. Run with FY 2026-27, business unit A1:
+1. Go to Insights → Reports. The Inventory family (7.1–7.7) and Receiving & Deliveries (8.1–8.3) are all ready. Each report is a tile; click it to open the on-screen preview. Use the preview: **Download Excel** is not needed for these checks.
+2. Financial year defaults to the current one (FY 2026-27). Choose business unit **Saffron Grand Mumbai (A1)**. The Storekeeper has no report access.
 
    | Report | Expected after steps 1–10 |
    |---|---|
@@ -373,9 +376,9 @@ The gate is changing. The ruling: a reorder MR draft requires `mr.create` at the
    | 7.3 Consumption by Department | F&B / PANEER: out ₹2,280, returns ₹760, net ₹1,520 |
    | 7.4 Wastage & Adjustments | Wastage −0.5 kg, −₹190; Expiry −3 kg, −₹1,140 |
    | 7.5 Count Variance | Paneer −0.5 kg, −₹190 |
-   | 7.7 Near expiry | One row: `PNR-E2E-01`, 10 days, Expiring, 4 kg. The expired lot was written off in 9b. |
-   | 8.1 GRN register | |
-   | 8.2 Pending deliveries | |
+   | 7.7 Near Expiry | One row: `PNR-E2E-01`, 10 days, Expiring, 4 kg. The expired lot was written off in 9b. |
+   | 8.1 GRN Register | Two rows on `E2E-INV-PO-1001`: `GRN/A1/…/00001` (challan FK-DC-1001, 3 lines, 1 rejected, ₹11,150) and `GRN/A1/…/00002` (FK-DC-1009, 1 line, ₹1,140) |
+   | 8.2 Pending Deliveries | Four rows at A1: P1 caps open 10 (150 planned, 140 net received); P2 paneer open 11 (1 received), rice open 3 Bag, caps open 150 |
 
    API: `POST /reports/<key>/preview {"filters":{"fy":"2026-27","hotel_ids":[96801]}}`. Keys: `stock_on_hand`, `consumption_by_department`, `stock_adjustments`, `count_variance`, `near_expiry`. Near expiry takes `hotel_ids` only.
 
@@ -384,13 +387,13 @@ The gate is changing. The ruling: a reorder MR draft requires `mr.create` at the
 1. Open the seeded link in a private window: `http://localhost:3000/receive/token#t=DfLUwzb2t53bWyHuSGKl4MG80SA965zxjSjE2yvAtpk`.
    - Expected: "Receive goods" for `E2E-INV-CO-1002` at Saffron Grand Mumbai (A1), Call-off. Paneer 15 kg and caps 300 pc are open.
    - **No price, rate or value anywhere.** The API omits them; this was checked on the context and on the posted GRN.
-2. Scan `(01)…PNR-E2E-01` → `15`. Scan `8901234500057` ×3 (300 pc). Attach a photo if you want. Click **Post receipt**.
+2. Scan `(01)…PNR-E2E-01`: the weigh pad shows "Open 15 kg" and offers **Add 15 kg**. Scan `8901234500057` ×3 (300 pc). Attach a photo if you want. Click **Post receipt** → **Confirm and post**. The page keeps your entries if it reloads ("Restored the entries you had on this page before it reloaded").
 3. Expected:
    - `GRN/A1/<FY>/0000n` is posted.
    - The GS1 code carries the same batch and expiry as step 3, so the 15 kg join that batch: the paneer card shows undated 1 kg and `PNR-E2E-01` **19** kg (paneer 20 kg).
    - Mails go to the buyer and the vendor.
-   - The link keeps working until it expires or is revoked: Deliveries → Site representatives → **Revoke** on the buyer's call-off PO.
-   - An unknown or garbled token gets HTTP 401.
+   - The link keeps working until it expires or is revoked: Deliveries → Site representatives → **Revoke** on the buyer's call-off PO. Once the order is fully received (as here), it only takes paperwork, for 24 hours after the last receipt: the page header switches from the link's own expiry to that time, and lists "Receipts from this link" with **Attach paperwork**. The buyer's Site representatives panel still shows the link's own expiry date.
+   - An unknown or garbled token gets HTTP 401, and the page says "Link expired".
 
 ### 13. Vendor deliveries view (`INVE2E-VENDOR`)
 
@@ -398,8 +401,8 @@ The gate is changing. The ruling: a reorder MR draft requires `mr.create` at the
 2. Expected:
    - The plan shows four phases with accepted / rejected / returned / short-closed / open columns.
    - **Dispatch notes**: `DSP/A1/…` received.
-   - **Received at the hotel**: two GRNs. `GRN/A1/…/00001`: paneer 10 accepted / 2 rejected, reason quality. The 9b receipt: paneer 3 accepted.
-   - **Returned to you**: `RTV/A1/…` Replacement, dispatched, challan RTV-DC-01.
+   - **Received at the hotel**: two GRNs. `GRN/A1/…/00001`: paneer 10 accepted / 2 rejected, reason "Quality issue". The 9b receipt: paneer 3 accepted.
+   - **Returned to you**: `RTV/A1/…` "Sent back", "For replacement", challan RTV-DC-01, Shower Cap damaged 10.
    - **Short-closed**: three rows at A2 P2, "No longer needed".
    - No prices in this section.
 
@@ -407,10 +410,12 @@ The gate is changing. The ruling: a reorder MR draft requires `mr.create` at the
 
 | Who | Request | Expected |
 |---|---|---|
-| `INVE2E-STORE` | `GET /inventory/receive/po/96801?hotelId=96802` (A2) | 403 "You don't have permission to do this at this hotel" |
+| `INVE2E-STORE` | `GET /inventory/receive/po/96801?hotelId=96802` (A2) | 404 "Purchase order not found". Rule C3: a hotel you cannot see answers exactly like a missing record. 403 is only for a record you can see but may not act on, such as the Storekeeper approving an adjustment. |
 | `INVE2E-BBUYER` | `GET /inventory/po/96801/deliveries` | 404 |
-| `INVE2E-BBUYER` | `GET /inventory/receive/po/96801?hotelId=96801` | 404 "Hotel not found" |
+| `INVE2E-BBUYER` | `GET /inventory/receive/po/96801?hotelId=96801` | 404 "Purchase order not found" |
 | `INVE2E-BBUYER` | scans `8901234500019` (hotel B1) | resolves to Paneer (Indigo) 96811, never company A's item |
+
+In the browser: as `INVE2E-STORE`, `/dashboard/buyer/inventory/receive/96801?hotelId=96802` shows "Purchase order not found". As `INVE2E-BBUYER`, `/dashboard/buyer/inventory/receive/96801?hotelId=96801` shows the same, and `/dashboard/buyer/purchase-orders/96801` shows "Unable to load this purchase order". On Mark out, scanning `8901234500019` opens the weigh pad for "Paneer (Indigo)".
 
 ---
 
@@ -442,6 +447,8 @@ What it does, and what to expect after step 12:
   - RTV, labels and the receive confirmation are sheets as well.
   - Check that "Post receipt" stays reachable above the fold after scanning.
   - Do the token page (step 12) at 375×812 too: a site rep will use it on a phone.
+  - On the landing page at 375 px, **Log in** sits behind the menu button (top right).
+  - Mark out, Return, the count sheet and the receive form keep their main button (**Post mark out**, **Post return**, **Submit for approval**, **Post receipt**) in a bar pinned to the bottom of the screen.
 - Weighed units (kg, g, l, ml, m, …) always open the weigh pad on scan. Counted units add one pack per scan: Bag = 25 kg, Carton = 100 pc.
 
 ## 7. Proving nothing left the machine
@@ -482,5 +489,6 @@ Three caveats:
 | `GET /inventory/reorder` returns 501 | The backend does not have D3 (in backend integration from `88a6db42`). |
 | Reorder shows no "Create MR draft" button | `can.createMrDraft` is false. Once D3's gate is merged, the user needs `mr.create` (MR Raiser) at that hotel and department. Before that, it needs `inventory.update` at the hotel and a role scope at some department there. |
 | `api_scenario.mjs` says "ABORT: the world is not freshly seeded" | It ran before, or you clicked through. Stop the backend and start it with `E2E_RESET=seed`. |
+| You are logged out mid-run, and the next login shows "Active Session Detected" | One session per user. Logging in as the same user anywhere else (another browser, a curl login, `api_scenario.mjs`) ends the browser session: the next API call is 401 and the app logs you out. Click **Continue on This Device**. During a browser run, do API checks with the browser's own token or with psql, never by logging in again as a user who is logged in there. Drafts autosave, so a receive in progress resumes. |
 | `low_stock_digest.sh` prints "no digest rows for that date" | Stock has not started at any hotel (approve step 9's FULL count), or nothing is at or below its reorder level. |
 | The digest prints `alreadyDigested: 1` | It already ran today for that hotel. Use `E2E_DIGEST_DATE=<another day>`, or re-seed. |

@@ -387,7 +387,9 @@ check("rejection reason visible", r.data?.grns?.flatMap((g) => g.lines).find((l)
 check("no price keys", priceKeys(r.json), []);
 
 step("Isolation");
-check("storekeeper at A2", (await api(STORE, "GET", `/inventory/receive/po/${PO}?hotelId=${A2}`)).status, 403);
+// Rule C3 (E1): a hotel the caller cannot see answers 404, the same body as a missing PO.
+r = await api(STORE, "GET", `/inventory/receive/po/${PO}?hotelId=${A2}`);
+check("storekeeper at A2 (not visible: 404 like a missing PO)", [r.status, r.json?.message], [404, "Purchase order not found"]);
 check("company B buyer on PO 96801 deliveries", (await api(BBUYER, "GET", `/inventory/po/${PO}/deliveries`)).status, 404);
 r = await api(BBUYER, "GET", `/inventory/scan/resolve?code=${M.items.paneer.barcodes[0].code}&context=hotel:${B1}`);
 check("company B scan of the shared barcode", r.data?.item?.invItemId, M.companyBItem.invItemId);
