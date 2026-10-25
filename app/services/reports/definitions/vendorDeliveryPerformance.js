@@ -320,11 +320,11 @@ export default {
       ["Period", `${periodLabel(period)} (by due date)`],
       ["Business units", hotelsLabel(names)],
       ["In scope", "Rows whose due date has passed, or already received or short-closed; legacy orders excluded"],
-      ["Assessed", "Rows in scope except those short-closed for a buyer reason (counted under Buyer-closed)"],
+      ["Assessed", "Rows in scope except those short-closed for a reason not attributed to the vendor (counted under Buyer-closed)"],
       ["On time", "First receipt on or before the due date"],
       ["In full", "Every line's net accepted quantity reached plan, with nothing short-closed for a vendor reason"],
       ["Vendor reasons", "Vendor cannot supply, price dispute, and credit returns to vendor"],
-      ["Buyer reasons", "No longer needed, substituted, other"],
+      ["Not attributed to the vendor", "No longer needed, substituted, other"],
       ["Rates", "Value-weighted (quantity × PO line rate) over every row in scope"],
     ];
     const ws = reportSheet(wb, "By Vendor", { footerTitle: "Vendor Delivery Performance" });

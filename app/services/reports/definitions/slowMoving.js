@@ -116,6 +116,7 @@ export default {
                SELECT m.posted_at
                  FROM tbl_inv_movement m
                 WHERE ${SAME_ITEM}
+                  AND m.posted_at >= COALESCE(ran_out.posted_at, '-infinity'::timestamptz)
                   AND (ran_out.id IS NULL OR (m.posted_at, m.id) > (ran_out.posted_at, ran_out.id))
                 ORDER BY m.posted_at, m.id
                 LIMIT 1
