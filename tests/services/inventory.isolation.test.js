@@ -18,6 +18,11 @@
 //             EXCEPT the route's own (`perm`, resource.action): 403 when the
 //             record stays visible, 404 when the missing permission is the
 //             one that makes it visible.
+//   A_MEMBER  a member of Company A (mapped to the company, and a role scope
+//             there) holding no inventory, GRN or PO permission at all, like
+//             a Technical Evaluator: every record answers 404, word for word
+//             what a missing id gets (E1 M-4: company-level item routes once
+//             told a real item from a made-up one with 403 / 404).
 //   A_ALL     the positive control: 2xx, so every 404 above is isolation and
 //             not a broken fixture.
 //
@@ -84,6 +89,7 @@ const U = {
   A_NOPERM: 88704,
   A_CREATOR: 88705, // raises the adjustments / counts A_ALL decides (no self-approval)
   SUPER: 88706, // user_type 8: the platform super admin (IDS.users.superAdmin is not one)
+  A_MEMBER: 88707, // in Company A with no inventory, GRN or PO permission (te.read only)
 };
 
 // The inventory and receiving reports, from the registry itself.
@@ -519,6 +525,7 @@ async function createUsers() {
     [U.A_NOPERM, "E1 A without", IDS.companies.A],
     [U.A_CREATOR, "E1 A storekeeper", IDS.companies.A],
     [U.SUPER, "E1 super admin", null, 8], // no mapping, no role: user_type 8 alone
+    [U.A_MEMBER, "E1 A member", IDS.companies.A],
   ];
   for (const [id, name, company, type = 2] of users) {
     await db.none(
@@ -536,14 +543,17 @@ async function createUsers() {
   await map(U.A_OTHER, CO_A, A2);
   await map(U.A_NOPERM, CO_A, A1);
   await map(U.A_CREATOR, CO_A, null);
+  await map(U.A_MEMBER, CO_A, null);
 
   const all = await makeRole("E1 every inventory permission", ALL_KEYS);
   const creator = await makeRole("E1 storekeeper", CREATOR_KEYS);
+  const member = await makeRole("E1 technical evaluator", ["te.read"]);
   scopeIds.push(
     await grantRoleScope(db, { userId: U.A_ALL, roleId: all, companyId: CO_A }),
     await grantRoleScope(db, { userId: U.B_ALL, roleId: all, companyId: CO_B }),
     await grantRoleScope(db, { userId: U.A_OTHER, roleId: all, companyId: CO_A, hotelId: A2 }),
     await grantRoleScope(db, { userId: U.A_CREATOR, roleId: creator, companyId: CO_A }),
+    await grantRoleScope(db, { userId: U.A_MEMBER, roleId: member, companyId: CO_A }),
   );
 }
 
@@ -657,9 +667,10 @@ beforeAll(async () => {
     await db.none(`UPDATE tbl_users SET user_type = 3, status = 1 WHERE id = $1`, [id]);
   }
   await createUsers();
-  [C.aAll, C.bAll, C.other, C.noPerm, C.creator, C.vendor, C.otherVendor, C.anon, C.super] = await Promise.all([
+  [C.aAll, C.bAll, C.other, C.noPerm, C.creator, C.vendor, C.otherVendor, C.anon, C.super, C.member] = await Promise.all([
     httpClient(U.A_ALL), httpClient(U.B_ALL), httpClient(U.A_OTHER), httpClient(U.A_NOPERM),
     httpClient(U.A_CREATOR), httpClient(VENDOR), httpClient(OTHER_VENDOR), httpClient(null), httpClient(U.SUPER),
+    httpClient(U.A_MEMBER),
   ]);
   await buildWorld();
 });
@@ -708,7 +719,8 @@ afterAll(async () => {
 //   foreign(ids)  more requests by B carrying Company A ids in query/body
 //   perm          resource.action the route's service gates on
 //   scoped        A_OTHER's status; noPerm: A_NOPERM's; ok: A_ALL's
-//   hotel         where A_NOPERM's grant sits (the record's hotel; A1 default)
+//   member        A_MEMBER's status (default 404; always equal to the missing twin's)
+//   hotel        where A_NOPERM's grant sits (the record's hotel; A1 default)
 //   fresh()       a record of the row's own when the positive control
 //                 consumes it (posts, deletes, cancels ...)
 
@@ -1632,6 +1644,13 @@ describe("records addressed by id", () => {
     if (row.noPerm === 404) {
       await expectSame({ route, actor: `A without ${row.perm}` }, route, noPerm, real, await send(C.noPerm, missingSpec), missingSpec);
     }
+
+    // A member of Company A holding no inventory, GRN or PO permission: a real
+    // record answers exactly as a missing one does (404 unless the row says
+    // otherwise; the twin comparison holds whatever the status).
+    const member = await send(C.member, real);
+    await expectRefused(member, { route, actor: "A member, no role", status: row.member ?? 404 });
+    await expectSame({ route, actor: "A member, no role" }, route, member, real, await send(C.member, missingSpec), missingSpec);
 
     // Positive control.
     const good = await send(C.aAll, real);

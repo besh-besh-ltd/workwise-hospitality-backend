@@ -13,6 +13,10 @@
 // 401, for "not allowed" (401 opens the session-expired modal).
 
 import { logError } from '../../helper/common.js';
+import { logger } from '../../util/logger.js';
+
+/** Postgres numeric_value_out_of_range: a value too large for its numeric / integer column. */
+const PG_NUMERIC_OUT_OF_RANGE = '22003';
 
 /** HTTP status for each code, used when the thrower does not pass one. */
 export const INVENTORY_ERROR_STATUS = Object.freeze({
@@ -48,6 +52,10 @@ export class InventoryError extends Error {
  * - PoAccessError (assertPoAccess) → 404 {status:2, message:'Not found'};
  * - PoWritePermissionError (assertPoInitiateAccess) → 403 {status:0, message, code};
  * - AuthorizationError (authorizationService) → its .status, {status:0, message, code};
+ * - a Postgres 22003 (numeric_value_out_of_range: a number too large for its
+ *   column) → 400 VALIDATION {status:0, message, code, details:{}}. The
+ *   services cap their inputs and name the line; this is the backstop for a
+ *   number that got past them, so it is logged as a warning, never a 500;
  * - anything else is logged and answered 500 {status:3, message:'Something
  *   went wrong'} (internals never reach the client).
  *
@@ -75,6 +83,10 @@ export function sendInventoryError(res, err) {
       return res.status(err.status || 403).json({ status: 0, message: err.message, code: err.code });
     default:
       break;
+  }
+  if (err?.code === PG_NUMERIC_OUT_OF_RANGE) {
+    logger.warn({ err: err.message }, '[inventory] a number too large for its column reached the database');
+    return res.status(400).json({ status: 0, message: 'A number is too large to record', code: 'VALIDATION', details: {} });
   }
   logError('inventory request failed', err);
   return res.status(500).json({ status: 3, message: 'Something went wrong' });

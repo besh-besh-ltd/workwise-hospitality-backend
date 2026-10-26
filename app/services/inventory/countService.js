@@ -40,7 +40,7 @@ import { postMovements } from './ledger.js';
 import { getEffectiveSettings } from './settings.js';
 import {
   MAX_LINES, PAGE_SIZE, positiveInt, invalid, notFound, conflict, num, money, iso, pageOf, requireUuid, toQty,
-  flag, assertDocAccess, holds, loadCompanyItems, lockBalances, hasNoCost,
+  flag, assertDocAccess, holds, loadCompanyItems, lockBalances, hasNoCost, MAX_AMOUNT,
 } from './stockCommon.js';
 
 export const COUNT_SCOPES = Object.freeze(['FULL', 'SELECTED']);
@@ -445,7 +445,8 @@ const UNCOUNTED_LIST_MAX = 50;
  * current average) of the counted lines.
  * @throws {InventoryError} NOT_FOUND | FORBIDDEN | CONFLICT (not open) |
  *   VALIDATION {field:'lines'}: nothing counted, or (FULL) lines left
- *   uncounted: {uncounted:[{lineId, invItemId, displayName}] (first 50), uncountedTotal}
+ *   uncounted: {uncounted:[{lineId, invItemId, displayName}] (first 50), uncountedTotal},
+ *   or a variance too large to value: {reason:'TOO_LARGE', lines:[{lineId, invItemId, displayName}]}
  */
 export async function submitCount(t, user, countId) {
   const count = await lockCount(t, user, countId, 'create', ['open']);
@@ -473,6 +474,25 @@ export async function submitCount(t, user, countId) {
     });
   }
   if (!n) throw invalid('Count at least one item before submitting', { field: 'lines' });
+  // A variance valued at the average must fit numeric(18,4) (|x| < MAX_AMOUNT):
+  // refuse here, naming the lines, rather than fail on the write below.
+  const outsized = await t.any(
+    `SELECT l.id, l.inv_item_id, i.display_name
+       FROM tbl_inv_count_line l
+       JOIN tbl_inv_item i ON i.id = l.inv_item_id
+       LEFT JOIN tbl_inv_balance b ON b.hotel_id = $2 AND b.inv_item_id = l.inv_item_id
+      WHERE l.count_id = $1 AND l.counted_qty IS NOT NULL
+        AND abs(round((l.counted_qty - l.system_qty_at_count) * COALESCE(b.avg_cost, 0), 4)) >= $3
+      ORDER BY i.display_name, l.id`,
+    [count.id, count.hotelId, MAX_AMOUNT]
+  );
+  if (outsized.length) {
+    throw invalid(`The difference on ${outsized.length} line(s) is too large to value: check the counted quantities`, {
+      field: 'lines',
+      reason: 'TOO_LARGE',
+      lines: outsized.map((r) => ({ lineId: Number(r.id), invItemId: Number(r.inv_item_id), displayName: r.display_name })),
+    });
+  }
   await t.none(
     `UPDATE tbl_inv_count_line l
         SET variance_qty = l.counted_qty - l.system_qty_at_count,

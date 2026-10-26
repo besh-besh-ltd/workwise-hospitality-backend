@@ -289,22 +289,25 @@ describe("resolveScan and resolveShortLink", () => {
     });
   });
 
-  it("in a PO context the alias of the item on the PO wins over a closer match off it", async () => {
+  it("in a PO context only the PO's items are candidates, so an alias shared with an item off the PO is not ambiguous", async () => {
     await withTx(async (t) => {
       await grantStorekeeper(t, A1);
       const [v1] = await freeVariants(t, 1);
-      const onPo = await makeItem(t, { name: "Mixed-case alias, on the PO" });
+      const onPo = await makeItem(t, { name: "EAN-13 alias, on the PO" });
       await mapVariant(t, { invItemId: onPo, variantId: v1 });
-      const offPo = await makeItem(t, { name: "Exact alias, off the PO" });
-      const code = `MIX-${process.pid}`;
-      await addBarcode(t, { invItemId: offPo, code });
-      await addBarcode(t, { invItemId: onPo, code: code.toLowerCase(), packFactor: 6 });
+      const offPo = await makeItem(t, { name: "UPC-A alias, off the PO" });
+      // One product's two printed forms on two items (older data; setup now
+      // refuses the second, E1 M-5).
+      await addBarcode(t, { invItemId: offPo, code: "012345678905" });
+      await addBarcode(t, { invItemId: onPo, code: "0012345678905", packFactor: 6 });
       const { poId, lineIds } = await makeRfqPo(t, { lines: [{ qty: 6, variantId: v1 }] });
 
-      // Off the PO, the exact alias is the better match ...
-      expect((await resolveScan(t, USER, { code, context: `hotel:${A1}` })).item.invItemId).toBe(offPo);
-      // ... on the PO only the PO's item is a candidate, so it is found, not "unknown".
-      expect((await resolveScan(t, USER, { code, context: `po:${poId}` })).item).toMatchObject({
+      // Off the PO both items claim the code: the scan says so instead of picking one ...
+      const err = await resolveScan(t, USER, { code: "012345678905", context: `hotel:${A1}` }).catch((e) => e);
+      expect({ code: err.code, items: err.details?.candidates?.map((c) => c.invItemId).sort((a, b) => a - b) })
+        .toEqual({ code: "CONFLICT", items: [onPo, offPo].sort((a, b) => a - b) });
+      // ... on the PO only the PO's item is a candidate, so it is found.
+      expect((await resolveScan(t, USER, { code: "012345678905", context: `po:${poId}` })).item).toMatchObject({
         invItemId: onPo, packFactor: 6, poLineId: lineIds[0],
       });
     });

@@ -28,6 +28,7 @@ DROP TABLE IF EXISTS public.tbl_inv_batch;
 DROP TABLE IF EXISTS public.tbl_inv_balance;
 DROP TABLE IF EXISTS public.tbl_inv_movement;   -- drops its trigger with it
 DROP FUNCTION IF EXISTS public.tbl_inv_movement_immutable();
+DROP TABLE IF EXISTS public.tbl_inv_doc_code_history;
 DROP TABLE IF EXISTS public.tbl_inv_doc_sequence;
 DROP TABLE IF EXISTS public.tbl_inv_hotel_item;
 DROP TABLE IF EXISTS public.tbl_inv_item_barcode;

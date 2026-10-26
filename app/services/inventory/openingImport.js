@@ -23,6 +23,16 @@
 // deltas against them.
 //
 // A count freeze (spec §8.5) blocks the post; preview reports it.
+//
+// Size (E1 I-2): a row is refused, in the preview and the post, when its stock
+// quantity reaches 1e12, its unit cost 1e10, or their product 1e14 (what
+// numeric(18,4) holds), so an outsized row is a row error, not a database
+// error for the whole sheet.
+//
+// Idempotency: the post's clientEventId shares tbl_inv_adjustment's key with
+// stock adjustments (and the same advisory lock, 'inv:adjustment'). A key
+// already used for an adjustment is CONFLICT, never answered with that
+// adjustment (E1 M-3).
 
 import ExcelJS from 'exceljs';
 import { InventoryError } from './errors.js';
@@ -32,11 +42,20 @@ import { nextDocNumber } from './docNumber.js';
 import { postMovements } from './ledger.js';
 import { resolveItemForVariant } from './items.js';
 import { resolveUomFactor, normalizeUomLabel } from './uom.js';
-import { assertNotFrozen, freezingCount, lockBalances } from './stockCommon.js';
+import { assertNotFrozen, freezingCount, lockBalances, requireUuid, MAX_AMOUNT } from './stockCommon.js';
 
 export const MAX_ROWS = 5000;
+/** Row bounds (stock units / per stock unit); their product must stay under MAX_AMOUNT. */
+export const MAX_STOCK_QTY = 1e12;
+export const MAX_UNIT_COST = 1e10;
 
-const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+/** The row error for a stock quantity and unit cost too large to record, else null. */
+function sizeError(stockQty, unitCost) {
+  if (stockQty >= MAX_STOCK_QTY) return 'Quantity is too large';
+  if (unitCost >= MAX_UNIT_COST) return 'Unit cost is too large';
+  if (stockQty * unitCost >= MAX_AMOUNT) return 'Value is too large';
+  return null;
+}
 const HEADERS = {
   'item code': 'itemCode',
   'variant sku': 'sku',
@@ -280,6 +299,7 @@ export async function previewOpeningStock(t, user, hotelId, buffer) {
         stockQty: round4(qty),
         unitCost: round4(cost),
       });
+      res.error = sizeError(res.stockQty, res.unitCost);
       continue;
     }
     if (!item) {
@@ -321,6 +341,8 @@ export async function previewOpeningStock(t, user, hotelId, buffer) {
       continue;
     }
     res.unitCost = round4(cost / factor);
+    res.error = sizeError(res.stockQty, res.unitCost);
+    if (res.error) continue;
     seenItems.add(res.invItemId);
   }
 
@@ -349,28 +371,34 @@ export async function previewOpeningStock(t, user, hotelId, buffer) {
  * Refused: LOCKED {countId, countNumber} during a count freeze; VALIDATION
  * {field:'rows', rows:[{index, invItemId, error}]} for bad rows, including an
  * item that moved since the hotel's stock started (checked under the balance
- * locks).
+ * locks) and a row too large to record; CONFLICT {field:'clientEventId'} when
+ * the key was used for a stock adjustment or at another hotel.
  *
  * @returns {Promise<{result:{adjustmentId:number, adjustmentNumber:string}, audit:object}>}
  */
 export async function postOpeningStock(t, user, hotelId, rows, clientEventId) {
   const { companyId } = await assertVisibleHotelPermission(t, user, { resource: 'inventory', action: 'admin', hotelId });
   const hotel = Number(hotelId);
-  if (typeof clientEventId !== 'string' || !UUID_RE.test(clientEventId)) {
-    throw bad('clientEventId must be a UUID', 'clientEventId');
-  }
+  // Lower-cased, as adjustments store and lock it: one key, one lock.
+  const key = requireUuid(clientEventId);
   if (!Array.isArray(rows) || !rows.length) throw bad('There are no rows to post', 'rows');
   if (rows.length > MAX_ROWS) throw bad(`At most ${MAX_ROWS} rows can be posted at once`, 'rows');
 
-  // Serialise replays of one client event, then answer from the first.
-  await t.one(`SELECT pg_advisory_xact_lock(hashtext('inv:opening'), hashtext($1))`, [clientEventId]);
+  // Serialise every use of this key, by an import or an adjustment (they
+  // share tbl_inv_adjustment.client_event_id), then answer from the first.
+  await t.one(`SELECT pg_advisory_xact_lock(hashtext('inv:adjustment'), hashtext($1))`, [key]);
   const prior = await t.oneOrNone(
-    `SELECT id, adjustment_number, hotel_id, hospitality_company_id FROM tbl_inv_adjustment WHERE client_event_id = $1`,
-    [clientEventId]
+    `SELECT id, adjustment_number, hotel_id, hospitality_company_id, reason_code
+       FROM tbl_inv_adjustment WHERE client_event_id = $1`,
+    [key]
   );
   if (prior) {
-    if (Number(prior.hotel_id) !== hotel || Number(prior.hospitality_company_id) !== companyId) {
-      throw new InventoryError('CONFLICT', 'That clientEventId was used for another document');
+    if (
+      Number(prior.hotel_id) !== hotel ||
+      Number(prior.hospitality_company_id) !== companyId ||
+      prior.reason_code !== 'OPENING'
+    ) {
+      throw new InventoryError('CONFLICT', 'That clientEventId was used for another document', { field: 'clientEventId' });
     }
     return {
       result: { adjustmentId: Number(prior.id), adjustmentNumber: prior.adjustment_number },
@@ -406,6 +434,7 @@ export async function postOpeningStock(t, user, hotelId, rows, clientEventId) {
       if (r?.stockQty === '' || r?.stockQty == null || !Number.isFinite(stockQty) || stockQty < 0) error = 'Invalid quantity';
       else if (r?.unitCost === '' || r?.unitCost == null || !Number.isFinite(unitCost) || unitCost < 0) error = 'Invalid unit cost';
       else if (bin.length > 64) error = 'Bin label is too long';
+      else error = sizeError(round4(stockQty), round4(unitCost));
     }
     if (error) problems.push({ index, invItemId, error });
     else {
@@ -433,8 +462,11 @@ export async function postOpeningStock(t, user, hotelId, rows, clientEventId) {
   }
   if (!problems.length) {
     // Create the missing items here, in the posting transaction: a failure
-    // anywhere below rolls them back with everything else.
-    for (const r of clean.filter((x) => !x.invItemId)) {
+    // anywhere below rolls them back with everything else. In variant order,
+    // as grnService does: each creation takes the variant's advisory lock, so
+    // a shared order keeps two first postings from deadlocking (E1 M-2).
+    const missing = clean.filter((x) => !x.invItemId).sort((a, b) => a.variantId - b.variantId || a.index - b.index);
+    for (const r of missing) {
       const made = await resolveItemForVariant(t, {
         companyId,
         productVariantId: r.variantId,
@@ -502,7 +534,7 @@ export async function postOpeningStock(t, user, hotelId, rows, clientEventId) {
         approved_by, approved_at, client_event_id, created_by, updated_by)
      VALUES ($1, $2, $3, 'OPENING', 'posted', 'Opening stock', $4, now(), $5, $4, $4)
      RETURNING id`,
-    [adjustmentNumber, companyId, hotel, user.id, clientEventId]
+    [adjustmentNumber, companyId, hotel, user.id, key]
   );
   const lines = await t.any(
     `INSERT INTO tbl_inv_adjustment_line (hospitality_company_id, adjustment_id, inv_item_id, qty, unit_cost, remarks)

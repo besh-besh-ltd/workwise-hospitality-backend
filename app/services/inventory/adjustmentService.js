@@ -33,7 +33,7 @@ import { postMovements } from './ledger.js';
 import {
   MAX_LINES, PAGE_SIZE, positiveInt, invalid, notFound, conflict, num, money, iso, pageOf, requireUuid, toQty,
   optionalText, assertDocAccess, holds, loadCompanyItems, assertNotFrozen, approverIds, explainMissingCost,
-  lockBalances, hasNoCost,
+  lockBalances, hasNoCost, assertLinesFit,
 } from './stockCommon.js';
 
 export const ADJUSTMENT_REASONS = Object.freeze(['WASTAGE', 'BREAKAGE', 'EXPIRY', 'THEFT_LOSS', 'CORRECTION', 'FOUND']);
@@ -256,17 +256,20 @@ export async function listAdjustments(t, user, { hotelId, status, page } = {}) {
 
 /**
  * The adjustment an earlier request with this client event id created, or
- * null. A key used at another company is NOT_FOUND; at another hotel, CONFLICT.
+ * null. A key used at another company is NOT_FOUND; at another hotel, or for
+ * an opening-stock import (which shares tbl_inv_adjustment.client_event_id),
+ * CONFLICT: a key names one document, so it is never answered with a
+ * document of another kind, and never creates a second one.
  */
 export async function replayAdjustment(t, user, clientEventId, { hotelId = null, companyId = null } = {}) {
   const key = requireUuid(clientEventId);
   const prior = await t.oneOrNone(
-    `SELECT id, hotel_id, hospitality_company_id FROM tbl_inv_adjustment WHERE client_event_id = $1`,
+    `SELECT id, hotel_id, hospitality_company_id, reason_code FROM tbl_inv_adjustment WHERE client_event_id = $1`,
     [key]
   );
   if (!prior) return null;
   if (companyId != null && Number(prior.hospitality_company_id) !== companyId) throw notFound('Adjustment not found');
-  if (hotelId != null && Number(prior.hotel_id) !== hotelId) {
+  if ((hotelId != null && Number(prior.hotel_id) !== hotelId) || prior.reason_code === 'OPENING') {
     throw conflict('That clientEventId was used for another document', { field: 'clientEventId' });
   }
   await assertDocAccess(t, user, Number(prior.hotel_id), 'create');
@@ -349,9 +352,11 @@ function assertGainsHaveCost(lines, balances, items) {
  * @returns {Promise<{adjustment:object, replayed:boolean, needsApproval:boolean}>}
  *   adjustment.status is 'posted' when it was auto-approved, else
  *   'pending_approval' (needsApproval true: notify the approvers after commit).
- * @throws {InventoryError} VALIDATION | NOT_FOUND (a hotel the caller can
- *   neither read nor post at) | FORBIDDEN (can read it, cannot post) |
- *   CONFLICT | LOCKED (count freeze) | NEGATIVE_STOCK (auto-post only)
+ * @throws {InventoryError} VALIDATION (incl. {field:'lines', index,
+ *   reason:'TOO_LARGE'}: a quantity or value too large to record) |
+ *   NOT_FOUND (a hotel the caller can neither read nor post at) | FORBIDDEN
+ *   (can read it, cannot post) | CONFLICT (the clientEventId names another
+ *   document) | LOCKED (count freeze) | NEGATIVE_STOCK (auto-post only)
  */
 export async function createAdjustment(t, user, input = {}) {
   const clientEventId = requireUuid(input.clientEventId);
@@ -360,6 +365,7 @@ export async function createAdjustment(t, user, input = {}) {
   // Out of the caller's sight (another company, or no read here): NOT_FOUND.
   const { companyId } = await assertDocAccess(t, user, hotelId, 'create');
 
+  // The opening-stock import takes the same lock: the two share the key column.
   await t.one(`SELECT pg_advisory_xact_lock(hashtext('inv:adjustment'), hashtext($1))`, [clientEventId]);
   const prior = await replayAdjustment(t, user, clientEventId, { hotelId, companyId });
   if (prior) return prior;
@@ -388,6 +394,8 @@ export async function createAdjustment(t, user, input = {}) {
     companyId, hotelId, invItemIds: lines.map((l) => l.invItemId), create: mayAutoPost,
   });
   assertGainsHaveCost(lines, balances, items);
+  // Too large to record is refused now, not when an approver posts it.
+  assertLinesFit(lines, balances, items);
   const value = lines.reduce((s, l) => s + Math.abs(l.qty * (balances.get(l.invItemId)?.avgCost ?? 0)), 0);
   const autoPost = mayAutoPost && Math.round(value * 10000) / 10000 <= limit;
 
@@ -454,7 +462,8 @@ async function lockForDecision(t, user, adjustmentId) {
  * POST /adjustments/:id/approve: posts the adjustment.
  * @throws {InventoryError} NOT_FOUND | FORBIDDEN (no inventory.approve, or
  *   details.reason 'SELF_APPROVAL') | CONFLICT (not pending) | LOCKED |
- *   NEGATIVE_STOCK | VALIDATION
+ *   NEGATIVE_STOCK | VALIDATION (incl. {field:'lines', reason:'TOO_LARGE'}:
+ *   at today's average the line no longer fits; reject it instead)
  */
 export async function approveAdjustment(t, user, adjustmentId) {
   const adj = await lockForDecision(t, user, adjustmentId);
@@ -479,6 +488,8 @@ export async function approveAdjustment(t, user, adjustmentId) {
     companyId: adj.companyId, hotelId: adj.hotelId, invItemIds: lines.map((l) => l.invItemId), create: true,
   });
   assertGainsHaveCost(lines, balances, items);
+  // The average may have moved since it was raised.
+  assertLinesFit(lines, balances, items);
   const userId = positiveInt(user.id);
   await post(t, { companyId: adj.companyId, hotelId: adj.hotelId, adjustmentId: adj.id, reasonCode: adj.reasonCode, userId }, lines, items);
 

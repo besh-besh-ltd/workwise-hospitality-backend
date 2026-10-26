@@ -10,6 +10,9 @@
 
 import { InventoryError } from './errors.js';
 
+/** Conversion factors must stay under what factor_to_stock (NUMERIC(18,6)) holds (E1 I-2). */
+export const MAX_UOM_FACTOR = 1e12;
+
 const positiveInt = (v) => {
   const n = Number(v);
   return Number.isInteger(n) && n > 0 ? n : null;
@@ -92,6 +95,9 @@ export async function setUomFactor(t, { invItemId, uomLabel, factor, userId = nu
   const rounded = Math.round(f * 1e6) / 1e6; // factor_to_stock is NUMERIC(18,6)
   if (rounded <= 0) {
     throw new InventoryError('VALIDATION', 'The conversion factor is too small', { field: 'factor' });
+  }
+  if (rounded >= MAX_UOM_FACTOR) {
+    throw new InventoryError('VALIDATION', 'The conversion factor is too large', { field: 'factor' });
   }
 
   const row = await t.one(

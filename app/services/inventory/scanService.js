@@ -14,6 +14,11 @@
 // EAN/UPC/GTIN codes match whatever their length (8, 12, 13 or 14 digits):
 // they are compared as GTIN-14, so a UPC-A alias matches its EAN-13 or GS1 read,
 // and a UPC-E is expanded to its UPC-A (not zero-padded) on either side.
+// Other codes match ignoring case. barcode.js holds that rule, and item setup
+// refuses a new alias the rule would read as one on file (E1 M-5). A step that
+// still matches more than one item (data written around setup, or a code known
+// in two of the caller's companies) is CONFLICT with the candidates: the scan
+// never picks one.
 //
 // Scope (spec §6.1, §10.1): the context is `po:<id>` or `hotel:<id>`, and the
 // caller needs grn.read or inventory.read on that hotel / one of the PO's
@@ -35,6 +40,9 @@ import { hotelIdsWithPermission, assertHotelPermission } from './scope.js';
 import { getPoContext } from './planCore.js';
 import { assertPoAccess } from '../../models/purchaseOrderModel.js';
 import { inventoryGrn, inventoryPoDeliveries } from '../notificationLinks.js';
+import { validGtinCheckDigit, upcEToUpcA, upcAToUpcE, gtinForms, SAME_BARCODE } from './barcode.js';
+
+export { validGtinCheckDigit, upcEToUpcA, upcAToUpcE };
 
 const VENDOR = 3;
 const MAX_CODE_LENGTH = 512;
@@ -76,14 +84,6 @@ function aiAt(s, pos) {
   const two = s.slice(pos, pos + 2);
   if (AI_2[two]) return { ai: two, ...AI_2[two] };
   return null;
-}
-
-/** GS1 mod-10 check digit over every digit but the last. */
-export function validGtinCheckDigit(digits) {
-  if (!/^\d{8,14}$/.test(digits)) return false;
-  let sum = 0;
-  for (let i = digits.length - 2, w = 3; i >= 0; i -= 1, w = 4 - w) sum += Number(digits[i]) * w;
-  return (10 - (sum % 10)) % 10 === Number(digits[digits.length - 1]);
 }
 
 const lastDayOfMonth = (year, month) => new Date(Date.UTC(year, month, 0)).getUTCDate();
@@ -181,61 +181,6 @@ export function parseShortUrl(code) {
   if (!m) return null;
   const id = positiveInt(m[2]);
   return id ? { t: m[1].toLowerCase(), id } : null;
-}
-
-// ─── EAN / UPC equivalence ────────────────────────────────────────────────────
-
-/**
- * UPC-E (8 digits: number system 0/1, six data digits, check digit) to the
- * UPC-A it zero-suppresses, or null when the code is not a valid UPC-E.
- * The last data digit says where the zeros go.
- */
-export function upcEToUpcA(code) {
-  if (typeof code !== 'string' || !/^[01]\d{7}$/.test(code)) return null;
-  const [a, b, c, d, e, f] = code.slice(1, 7);
-  let body;
-  if (f <= '2') body = `${a}${b}${f}0000${c}${d}${e}`; // manufacturer ab f00, product 00cde
-  else if (f === '3') body = `${a}${b}${c}00000${d}${e}`; // abc00, 000de
-  else if (f === '4') body = `${a}${b}${c}${d}00000${e}`; // abcd0, 0000e
-  else body = `${a}${b}${c}${d}${e}0000${f}`; // abcde, 0000f (f 5-9)
-  const upcA = `${code[0]}${body}${code[7]}`;
-  return validGtinCheckDigit(upcA) ? upcA : null;
-}
-
-/** The UPC-E of a UPC-A that zero-suppresses, else null (inverse of upcEToUpcA). */
-export function upcAToUpcE(upcA) {
-  if (typeof upcA !== 'string' || !/^[01]\d{11}$/.test(upcA)) return null;
-  const m = upcA.slice(1, 6);
-  const p = upcA.slice(6, 11);
-  let data = null;
-  if ('012'.includes(m[2]) && m.slice(3) === '00' && p.startsWith('00')) data = `${m[0]}${m[1]}${p.slice(2)}${m[2]}`;
-  else if (m.slice(3) === '00' && p.startsWith('000')) data = `${m.slice(0, 3)}${p.slice(3)}3`;
-  else if (m[4] === '0' && p.startsWith('0000')) data = `${m.slice(0, 4)}${p[4]}4`;
-  else if (p.startsWith('0000') && p[4] >= '5') data = `${m}${p[4]}`;
-  if (!data) return null;
-  const upcE = `${upcA[0]}${data}${upcA[11]}`;
-  return upcEToUpcA(upcE) === upcA ? upcE : null;
-}
-
-/**
- * How one numeric read can be stored as an alias:
- *   keys  — GTIN-14 forms (EAN-8 / UPC-A / EAN-13 / GTIN-14 zero-padded; for a
- *           valid UPC-E also its UPC-A), compared with lpad(alias, 14, '0');
- *   forms — the 8-digit UPC-E of the same product, compared as text (padding
- *           a UPC-E does not give its GTIN, so it cannot be a key).
- * An 8-digit read is kept as an EAN-8 too: the digits alone do not say which.
- */
-function gtinForms(code) {
-  if (!/^(\d{8}|\d{12,14})$/.test(code)) return { keys: [], forms: [] };
-  const keys = new Set([code.padStart(14, '0')]);
-  const upcA = code.length === 8 ? upcEToUpcA(code) : null;
-  if (upcA) keys.add(upcA.padStart(14, '0'));
-  const forms = new Set();
-  for (const key of keys) {
-    const upcE = key.startsWith('00') ? upcAToUpcE(key.slice(2)) : null;
-    if (upcE) forms.add(upcE);
-  }
-  return { keys: [...keys], forms: [...forms] };
 }
 
 // ─── Scope helpers ────────────────────────────────────────────────────────────
@@ -418,53 +363,80 @@ const ON_CONTEXT_PO = (column, param) => `($${param}::int IS NULL OR ${column} I
               ON iv_po.product_variant_id = COALESCE(pop.product_variant_id, rp.product_variant_id)
            WHERE pop.purchase_order_id = $${param}))`;
 
+/** CONFLICT for a code that matches more than one item (or pack) in one step. */
+function ambiguous(rows) {
+  const names = [...new Set(rows.map((r) => r.display_name))].join(', ');
+  return new InventoryError('CONFLICT', `That code matches more than one item (${names}). Fix the codes in item setup.`, {
+    field: 'code',
+    candidates: rows.map((r) => ({
+      invItemId: Number(r.inv_item_id),
+      displayName: r.display_name,
+      packFactor: Number(r.pack_factor),
+    })),
+  });
+}
+
+/**
+ * The one hit of a step, null for none, CONFLICT for several distinct
+ * (item, pack factor) pairs.
+ */
+function oneHit(rows) {
+  const seen = new Map();
+  for (const r of rows) seen.set(`${r.inv_item_id}|${Number(r.pack_factor)}`, r);
+  if (seen.size > 1) throw ambiguous([...seen.values()]);
+  const [hit] = seen.values();
+  return hit ? { invItemId: Number(hit.inv_item_id), packFactor: Number(hit.pack_factor) } : null;
+}
+
 /**
  * Steps 3-5: alias, item code, variant SKU. In a PO context only items on the
  * PO's lines are candidates, so a closer match off the PO cannot hide the one
  * on it. Returns {invItemId, packFactor} or null.
+ * @throws InventoryError CONFLICT {field:'code', candidates:[{invItemId,
+ *   displayName, packFactor}]} when the first step that matches finds more
+ *   than one item.
  */
 async function lookupItem(t, ctx, code) {
   const { companyIds } = ctx;
   const poId = ctx.po ? ctx.po.id : null;
   const { keys, forms } = gtinForms(code);
-  const alias = await t.oneOrNone(
-    `SELECT b.inv_item_id, b.pack_factor::text AS pack_factor
+  const aliases = await t.any(
+    `SELECT b.inv_item_id, b.pack_factor::text AS pack_factor, i.display_name
        FROM tbl_inv_item_barcode b
+       JOIN tbl_inv_item i ON i.id = b.inv_item_id
       WHERE b.hospitality_company_id = ANY($1::int[])
-        AND (b.code = $2
-             OR lower(b.code) = lower($2)
-             OR b.code = ANY($4::text[])
-             OR (b.code ~ '^([0-9]{8}|[0-9]{12,14})$' AND lpad(b.code, 14, '0') = ANY($3::text[])))
+        AND ${SAME_BARCODE('b', { code: 2, keys: 3, forms: 4 })}
         AND ${ON_CONTEXT_PO('b.inv_item_id', 5)}
-      ORDER BY (b.code = $2) DESC, (lower(b.code) = lower($2)) DESC, b.id
-      LIMIT 1`,
+      ORDER BY b.id`,
     [companyIds, code, keys, forms, poId]
   );
-  if (alias) return { invItemId: Number(alias.inv_item_id), packFactor: Number(alias.pack_factor) };
+  const alias = oneHit(aliases);
+  if (alias) return alias;
 
-  const coded = await t.oneOrNone(
-    `SELECT id FROM tbl_inv_item
+  const coded = await t.any(
+    `SELECT id AS inv_item_id, '1' AS pack_factor, display_name FROM tbl_inv_item
       WHERE hospitality_company_id = ANY($1::int[]) AND item_code IS NOT NULL
         AND lower(item_code) = lower($2)
         AND ${ON_CONTEXT_PO('id', 3)}
-      ORDER BY id LIMIT 1`,
+      ORDER BY id`,
     [companyIds, code, poId]
   );
-  if (coded) return { invItemId: Number(coded.id), packFactor: 1 };
+  const byCode = oneHit(coded);
+  if (byCode) return byCode;
 
-  const bySku = await t.oneOrNone(
-    `SELECT iv.inv_item_id
+  const skus = await t.any(
+    `SELECT DISTINCT iv.inv_item_id, '1' AS pack_factor, i.display_name
        FROM tbl_inv_item_variant iv
+       JOIN tbl_inv_item i ON i.id = iv.inv_item_id
        JOIN tbl_product_variant pv ON pv.id = iv.product_variant_id
       WHERE iv.hospitality_company_id = ANY($1::int[])
         AND COALESCE(pv.is_deleted, 0) = 0
         AND pv.sku IS NOT NULL AND lower(pv.sku) = lower($2)
         AND ${ON_CONTEXT_PO('iv.inv_item_id', 3)}
-      ORDER BY iv.id LIMIT 1`,
+      ORDER BY iv.inv_item_id`,
     [companyIds, code, poId]
   );
-  if (bySku) return { invItemId: Number(bySku.inv_item_id), packFactor: 1 };
-  return null;
+  return oneHit(skus);
 }
 
 /**
@@ -537,7 +509,8 @@ async function itemPayload(t, { invItemId, packFactor }, ctx) {
  *   `code` is echoed as received (trimmed).
  * @throws InventoryError VALIDATION (code / context), NOT_FOUND (a context
  *   without grn.read or inventory.read, foreign or missing; vendor / token
- *   user), FORBIDDEN (no readable hotel at all without a context).
+ *   user), FORBIDDEN (no readable hotel at all without a context), CONFLICT
+ *   {field:'code', candidates} (the code matches more than one item).
  */
 export async function resolveScan(t, user, { code, context } = {}) {
   if (isOutsider(user)) throw notFound();
