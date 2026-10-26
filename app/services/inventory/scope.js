@@ -61,6 +61,20 @@ export async function companyIdForHotel(t, hotelId) {
 }
 
 /**
+ * {id, name} of these hotels, by name: a list screen's hotel picker. Pass ids
+ * from hotelIdsWithPermission, never from the client.
+ * @returns {Promise<Array<{id:number, name:string}>>}
+ */
+export async function hotelOptions(t, ids) {
+  if (!ids.length) return [];
+  const rows = await t.any(
+    `SELECT id, name FROM tbl_hospitality_company_hotels WHERE id = ANY($1::int[]) ORDER BY name, id`,
+    [ids]
+  );
+  return rows.map((r) => ({ id: Number(r.id), name: r.name }));
+}
+
+/**
  * Live hotels where the user holds resource.action (any of the actions when an
  * array is given), ascending. A user object (req.user) is also accepted: a
  * super admin then gets every live hotel, a vendor or token user none.

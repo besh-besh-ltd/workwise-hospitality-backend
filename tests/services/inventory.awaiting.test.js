@@ -209,7 +209,11 @@ describe("awaiting deliveries", () => {
     expect(poIdsOf(all)).not.toContain(foreign.poId);
 
     // Asking for an out-of-scope hotel narrows to nothing; it never widens.
-    expect(await awaiting("all", { hotelId: A2 })).toEqual({ rows: [], total: 0 });
+    // The filter's choices are the hotels in scope, A2 not among them.
+    const narrowed = await awaiting("all", { hotelId: A2 });
+    expect(narrowed).toMatchObject({ rows: [], total: 0 });
+    expect(narrowed.hotels.map((h) => h.id)).toEqual([A1]);
+    expect(all.hotels).toEqual([{ id: A1, name: expect.any(String) }]);
     // Search matches the PO number.
     expect(poIdsOf(await awaiting("all", { search: soon.poNumber }))).toEqual([soon.poId]);
   });

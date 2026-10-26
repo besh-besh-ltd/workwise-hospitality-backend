@@ -3,7 +3,7 @@
 // reversals), one GRN behind its access check, and the paged GRN list
 // scoped to the hotels the user may read GRNs at.
 
-import { hotelIdsWithPermission } from './scope.js';
+import { hotelIdsWithPermission, hotelOptions } from './scope.js';
 import {
   LIST_PAGE_SIZE, positiveInt, round4, toIso, numOrNull, notFound, isoDay, attachmentUrl, assertGrnAccess,
   loadGrnRow,
@@ -259,15 +259,18 @@ export async function getGrn(t, user, grnId, { hidePrices = false, viaToken = nu
 /**
  * GET /grn — GRNs at hotels where the user holds grn.read. Drafts only when
  * asked for (status=draft). Newest receipt first, 50 a page.
- * @returns {Promise<{rows:object[], total:number}>} rows are GrnSummary.
+ * @returns {Promise<{rows:object[], total:number, hotels:Array<{id:number, name:string}>}>} rows
+ *   are GrnSummary; hotels are every hotel the user may read GRNs at (the filter's choices).
  */
 export async function listGrns(t, user, { hotelId, poId, from, to, status, page } = {}) {
-  let hotels = await hotelIdsWithPermission(t, user, 'grn', 'read');
+  const readable = await hotelIdsWithPermission(t, user, 'grn', 'read');
+  const hotelList = await hotelOptions(t, readable);
+  let hotels = readable;
   if (hotelId != null && hotelId !== '') {
     const h = positiveInt(hotelId);
     hotels = hotels.filter((x) => x === h);
   }
-  if (!hotels.length) return { rows: [], total: 0 };
+  if (!hotels.length) return { rows: [], total: 0, hotels: hotelList };
   const where = ['g.hotel_id = ANY($1::int[])'];
   const params = [hotels];
   const add = (sql, value) => {
@@ -287,5 +290,5 @@ export async function listGrns(t, user, { hotelId, poId, from, to, status, page 
       LIMIT $${params.length - 1} OFFSET $${params.length}`,
     params
   );
-  return { rows: rows.map((r) => toSummary(r)), total: rows.length ? Number(rows[0].total) : 0 };
+  return { rows: rows.map((r) => toSummary(r)), total: rows.length ? Number(rows[0].total) : 0, hotels: hotelList };
 }

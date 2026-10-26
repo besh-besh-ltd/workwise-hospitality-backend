@@ -11,7 +11,7 @@
 // level row (tbl_inv_hotel_item) at the hotel; inactive items only while they
 // still hold stock. belowReorder = qty ≤ reorder_level (no level, never).
 
-import { hotelIdsWithPermission } from './scope.js';
+import { hotelIdsWithPermission, hotelOptions } from './scope.js';
 import { RECEIVABLE_PO_STATUSES } from './grnService.js';
 import { NO_EXPIRY_DATE } from './ledger.js';
 import {
@@ -25,15 +25,6 @@ export const WASTAGE_REASONS = Object.freeze(['WASTAGE', 'BREAKAGE', 'EXPIRY']);
 
 const likeTerm = (search) =>
   typeof search === 'string' && search.trim() ? `%${search.trim().replace(/[\\%_]/g, '\\$&')}%` : null;
-
-async function hotelOptions(t, ids) {
-  if (!ids.length) return [];
-  const rows = await t.any(
-    `SELECT id, name FROM tbl_hospitality_company_hotels WHERE id = ANY($1::int[]) ORDER BY name, id`,
-    [ids]
-  );
-  return rows.map((r) => ({ id: Number(r.id), name: r.name }));
-}
 
 async function stockStartedAt(t, hotelId) {
   const row = await t.oneOrNone(`SELECT stock_started_at FROM tbl_inv_hotel_settings WHERE hotel_id = $1`, [hotelId]);

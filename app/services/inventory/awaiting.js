@@ -19,7 +19,7 @@
 //   all          every non-legacy PO
 // Legacy POs appear only under `older`, and are never overdue.
 
-import { hotelIdsWithPermission } from './scope.js';
+import { hotelIdsWithPermission, hotelOptions } from './scope.js';
 import { RECEIVABLE_PO_STATUSES } from './grnService.js';
 import { InventoryError } from './errors.js';
 
@@ -48,19 +48,23 @@ const FILTER_SQL = {
  * @returns {Promise<{rows:Array<{poId:number, poNumber:string, vendorName:string|null,
  *   hotelId:number, hotelName:string, nextDueDate:string|null, overdue:boolean,
  *   openLineCount:number, openValue:number, isCallOff:boolean, receiptLegacy:boolean,
- *   hasInTransitDispatch:boolean}>, total:number}>}
+ *   hasInTransitDispatch:boolean}>, total:number, hotels:Array<{id:number, name:string}>}>}
+ *   hotels: every hotel the user may read receipts at (the filter's choices).
  */
 export async function getAwaitingDeliveries(t, user, { hotelId = null, filter = 'all', search = null, page = 1 } = {}) {
   const f = filter == null || filter === '' ? 'all' : String(filter);
   if (!AWAITING_FILTERS.includes(f)) {
     throw new InventoryError('VALIDATION', 'Unknown filter', { field: 'filter', allowed: AWAITING_FILTERS });
   }
-  let hotels = await hotelIdsWithPermission(t, user, 'grn', 'read');
+  const readable = await hotelIdsWithPermission(t, user, 'grn', 'read');
+  // The hotel filter offers exactly these (not the user's company mappings).
+  const hotelList = await hotelOptions(t, readable);
+  let hotels = readable;
   if (hotelId != null && hotelId !== '') {
     const h = positiveInt(hotelId);
     hotels = hotels.filter((x) => x === h);
   }
-  if (!hotels.length) return { rows: [], total: 0 };
+  if (!hotels.length) return { rows: [], total: 0, hotels: hotelList };
 
   const term = typeof search === 'string' && search.trim() ? `%${search.trim().replace(/[\\%_]/g, '\\$&')}%` : null;
   const p = Math.max(1, positiveInt(page) ?? 1);
@@ -164,6 +168,7 @@ export async function getAwaitingDeliveries(t, user, { hotelId = null, filter = 
       hasInTransitDispatch: r.has_in_transit === true,
     })),
     total: rows.length ? Number(rows[0].total) : 0,
+    hotels: hotelList,
   };
 }
 

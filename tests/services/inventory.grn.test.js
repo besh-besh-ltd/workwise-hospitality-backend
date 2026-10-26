@@ -1246,7 +1246,8 @@ describe("access", () => {
     const posted = await recv.post("/api/v1/inventory/grn").send(grnInput(mine.poId, A1, [grnLine(mine.lineIds[0], 1)]));
     expect((await foreign.get(`/api/v1/inventory/grn/${posted.body.data.id}`)).status).toBe(404);
     const list = await foreign.get("/api/v1/inventory/grn").query({ poId: mine.poId });
-    expect(list.body.data).toEqual({ rows: [], total: 0 });
+    expect(list.body.data).toMatchObject({ rows: [], total: 0 });
+    expect(list.body.data.hotels.map((h) => h.id)).not.toContain(A1);
   });
 
   it("moving a draft to another hotel needs grn.create there", async () => {
