@@ -92,6 +92,18 @@ ALTER TABLE public.tbl_token_login_data
   DROP COLUMN IF EXISTS expires_at,
   DROP COLUMN IF EXISTS token_hash;
 
+-- E1 additions. The indexes and columns on the new tables also go with their
+-- DROP TABLE below; dropped by name here so up and down list the same objects.
+DROP INDEX IF EXISTS public.ix_purchase_order_document_dispatch;
+DROP INDEX IF EXISTS public.ix_grn_line_inv_item;
+DROP INDEX IF EXISTS public.ix_grn_received_by_token;
+DROP INDEX IF EXISTS public.ix_grn_dispatch;
+DROP INDEX IF EXISTS public.ix_po_dispatch_delivery;
+DROP INDEX IF EXISTS public.ix_po_dispatch_line_po_line;
+DROP INDEX IF EXISTS public.ux_po_dispatch_po_client_event;
+ALTER TABLE IF EXISTS public.tbl_rtv DROP COLUMN IF EXISTS dispatched_at;
+ALTER TABLE IF EXISTS public.tbl_po_dispatch DROP COLUMN IF EXISTS client_event_id;
+
 -- Invoices.
 ALTER TABLE public.tbl_purchase_order_document
   DROP COLUMN IF EXISTS dispatch_id,

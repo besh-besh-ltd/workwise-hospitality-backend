@@ -120,9 +120,12 @@ export async function deliveryLinesOf(t, poId) {
 /**
  * Post a RECEIPT GRN at `hotelId`.
  * lines = [{poLineId, accepted, rejected = 0, rejectionReason, unitCost = 100,
- *           uomFactor = 1, batchNo, expiryDate, deliveryLineId?}]
+ *           uomFactor = 1, batchNo, expiryDate, deliveryLineId?, markOutDepartmentId?}]
  * Each line is allocated to `deliveryLineId`, else to the first delivery line
  * of that PO line at the hotel (then the unallocated row), earliest due first.
+ * The stock qty is accepted × uomFactor rounded to 4 dp, as posting does. A
+ * line with markOutDepartmentId is marked out to that department on arrival
+ * (GRN_IN then MARK_OUT, as posting does).
  * Returns {grnId, grnNumber, lines: [{grnLineId, poLineId, invItemId, deliveryLineId}]}.
  */
 export async function postReceiptGrn(t, { poId, hotelId = A1, postedBy = BUYER, receivedAt = "2026-10-24",
@@ -148,14 +151,16 @@ export async function postReceiptGrn(t, { poId, hotelId = A1, postedBy = BUYER, 
     const rejected = l.rejected ?? 0;
     const factor = l.uomFactor ?? 1;
     const unitCost = l.unitCost ?? 100;
+    const stockQty = Math.round(Math.round(l.accepted * 10000) * factor) / 10000;
+    const markOutDept = l.markOutDepartmentId ?? null;
     const gl = await t.one(
       `INSERT INTO tbl_grn_line (hospitality_company_id, grn_id, po_line_id, product_variant_id, inv_item_id, po_uom,
                                  received_qty, accepted_qty, rejected_qty, rejection_reason, uom_factor, stock_qty,
-                                 unit_cost, batch_no, expiry_date)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15) RETURNING id`,
+                                 unit_cost, batch_no, expiry_date, mark_out_department_id)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16) RETURNING id`,
       [ctx.companyId, grn.id, l.poLineId, poLine.productVariantId, item.id, poLine.unit,
         l.accepted + rejected, l.accepted, rejected, rejected > 0 ? (l.rejectionReason ?? "damaged") : null,
-        factor, l.accepted * factor, unitCost, l.batchNo ?? null, l.expiryDate ?? null]
+        factor, stockQty, unitCost, l.batchNo ?? null, l.expiryDate ?? null, markOutDept]
     );
     const deliveryLineId = l.deliveryLineId ?? Number((await t.one(
       `SELECT dl.id FROM tbl_po_delivery_line dl JOIN tbl_po_delivery d ON d.id = dl.delivery_id
@@ -174,11 +179,13 @@ export async function postReceiptGrn(t, { poId, hotelId = A1, postedBy = BUYER, 
       );
     }
     if (l.accepted > 0) {
-      movements.push({
-        companyId: ctx.companyId, hotelId, invItemId: item.id, type: "GRN_IN", qty: l.accepted * factor, unitCost,
-        productVariantId: poLine.productVariantId, batchNo: l.batchNo ?? null, expiryDate: l.expiryDate ?? null,
+      const base = {
+        companyId: ctx.companyId, hotelId, invItemId: item.id, productVariantId: poLine.productVariantId,
+        batchNo: l.batchNo ?? null, expiryDate: l.expiryDate ?? null,
         sourceType: "GRN", sourceId: Number(grn.id), sourceLineId: Number(gl.id), postedBy,
-      });
+      };
+      movements.push({ ...base, type: "GRN_IN", qty: stockQty, unitCost });
+      if (markOutDept) movements.push({ ...base, type: "MARK_OUT", qty: -stockQty, departmentId: markOutDept });
     }
     written.push({ grnLineId: Number(gl.id), poLineId: l.poLineId, invItemId: item.id, deliveryLineId });
   }

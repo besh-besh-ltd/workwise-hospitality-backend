@@ -81,6 +81,23 @@ export async function lockMrHotelLedgerRows(runner, mrId, hotelId) {
 }
 
 /**
+ * FOR UPDATE on tbl_arc_contract_line rows, ascending id. Every path that
+ * draws on or gives back to a contract line takes these before writing any of
+ * them (or inserting a tbl_arc_callof_po row, whose FK takes a key-share lock
+ * on its line), after the hotel ledger rows: so two of them touching the same
+ * lines in different orders wait instead of deadlocking.
+ */
+export async function lockContractLines(runner, ids) {
+  const sorted = [...new Set((ids || []).map(Number).filter((id) => Number.isSafeInteger(id) && id > 0))]
+    .sort((a, b) => a - b);
+  if (!sorted.length) return;
+  await runner.any(
+    `SELECT id FROM tbl_arc_contract_line WHERE id = ANY($1::bigint[]) ORDER BY id FOR UPDATE`,
+    [sorted]
+  );
+}
+
+/**
  * Resolve and group MR items into vendor-contract buckets for PO creation.
  * Returns: [{ arc_contract_id, vendor_id, hospitality_company_id, items: [ {mr_item, pricing} ], total_value }]
  */
@@ -126,6 +143,10 @@ async function buildCallOffBuckets(mrId, txContext) {
   if (items.length === 0) {
     return [];
   }
+  // Then every contract line the release draws on, in id order, before any
+  // is written (recordCallOffAndUpdateConsumption goes item by item, in an
+  // order the planner picks).
+  await lockContractLines(runner, items.map((it) => it.arc_contract_line_id));
 
   const today = new Date();
   const itemsWithPricing = await Promise.all(items.map(async (it) => {
@@ -452,10 +473,7 @@ async function lockConsumptionRows(runner, lines) {
       [withHotel.map((l) => l.arcContractLineId), withHotel.map((l) => l.hotelId)]
     );
   }
-  await runner.any(
-    `SELECT id FROM tbl_arc_contract_line WHERE id = ANY($1::bigint[]) ORDER BY id FOR UPDATE`,
-    [[...new Set(lines.map((l) => l.arcContractLineId))]]
-  );
+  await lockContractLines(runner, lines.map((l) => l.arcContractLineId));
 }
 
 /**

@@ -54,14 +54,14 @@ import { postMovements } from './ledger.js';
 import { getPoContext, listPoLines, ensureDefaultPlan } from './planCore.js';
 import { resolveItemForVariant, mapVariantToItem } from './items.js';
 import { resolveUomFactor, setUomFactor, sameUom, normalizeUomLabel } from './uom.js';
-import { resolvePoLineUnitCost } from './cost.js';
+import { resolvePoLineUnitCosts } from './cost.js';
 import { loadPlan, capacityFor, makeAllocator } from './allocation.js';
 import { assertNotFrozen } from './stockCommon.js';
 import {
   RECEIVABLE_PO_STATUSES, REJECTION_REASONS, ATTACHMENT_KINDS, SITE_REP_ACTOR, IST_TODAY, positiveInt, toQ,
   qNum, qStr, round4, round6, numOrNull, textOrNull, notFound, invalid, isoDay, dayDiff, clientEventIdOf,
   quantityQ, attachmentUrl, attachmentKeyFromUrl, assertReceivable, assertToken, tokenHotelId,
-  assertReceiveAccess, assertGrnAccess, loadGrnRow, inventoryUpdateGate, categoryDefaults, insertGrnLine,
+  assertReceiveAccess, assertGrnAccess, loadGrnRow, inventoryUpdateGate, categoryDefaults, insertGrnLines,
   afterReceiptChange,
 } from './grnCommon.js';
 import { getGrnPayload, getGrn, listGrns } from './grnRead.js';
@@ -196,7 +196,7 @@ async function assertCompanyItem(t, companyId, invItemId) {
  * Resolve one GRN line for posting: stock item (mapped on request, else
  * lazily created), unit conversion, cost per stock unit, expiry rules.
  */
-async function resolvePostLine(t, { ctx, hotelId, poLine, line, receivedAt, userId, requireInventoryUpdate, warnings, settings }) {
+async function resolvePostLine(t, { ctx, poLine, line, receivedAt, userId, requireInventoryUpdate, warnings, settings, costOf }) {
   const companyId = ctx.companyId;
   const variantId = poLine.productVariantId;
   const poUnit = poLine.unit ?? '';
@@ -284,7 +284,7 @@ async function resolvePostLine(t, { ctx, hotelId, poLine, line, receivedAt, user
   let unitCost = null;
   let stockQ = 0;
   if (accepting) {
-    const cost = await resolvePoLineUnitCost(t, { poLineId: poLine.id, hotelId, companyId });
+    const cost = await costOf(poLine.id);
     unitCost = round4(cost.costPerPoUnit / factor);
     stockQ = Math.round(line.acceptedQ * factor);
   }
@@ -478,11 +478,22 @@ async function postCore(t, actor, { ctx, hotelId, header, lines, grnId = null, c
   const resolveOrder = active
     .map((line, index) => ({ line, index, variantId: poLines.get(line.poLineId).productVariantId ?? 0 }))
     .sort((a, b) => a.variantId - b.variantId || a.index - b.index);
+  // Every accepted line's cost per PO unit, in one read, the first time a
+  // line needs one (the point where each line used to read its own).
+  let costs = null;
+  const costOf = async (poLineId) => {
+    costs ??= await resolvePoLineUnitCosts(t, {
+      poLineIds: active.filter((l) => l.acceptedQ > 0).map((l) => l.poLineId), hotelId, companyId: ctx.companyId,
+    });
+    const cost = costs.get(poLineId);
+    if (!cost) throw new InventoryError('NOT_FOUND', 'PO line not found', { poLineId });
+    return cost;
+  };
   const resolved = new Array(active.length);
   for (const { line, index } of resolveOrder) {
     resolved[index] = await resolvePostLine(t, {
-      ctx, hotelId, poLine: poLines.get(line.poLineId), line, receivedAt, userId,
-      requireInventoryUpdate, warnings, settings,
+      ctx, poLine: poLines.get(line.poLineId), line, receivedAt, userId,
+      requireInventoryUpdate, warnings, settings, costOf,
     });
   }
 
@@ -515,43 +526,51 @@ async function postCore(t, actor, { ctx, hotelId, header, lines, grnId = null, c
   } else {
     id = await insertGrnHeader(t, { ctx, hotelId, header: { ...header, receivedAt }, clientEventId, userId });
   }
-  for (const r of resolved) {
-    r.grnLineId = await insertGrnLine(t, {
-      companyId: ctx.companyId,
-      grnId: id,
-      userId,
-      line: {
-        poLineId: r.poLineId,
-        productVariantId: r.poLine.productVariantId,
-        invItemId: r.item?.id ?? null,
-        poUom: r.poLine.unit,
-        receivedQ: r.receivedQ,
-        acceptedQ: r.acceptedQ,
-        rejectedQ: r.rejectedQ,
-        rejectionReason: r.rejectedQ > 0 ? r.rejectionReason : null,
-        uomFactor: r.factor,
-        stockQ: r.item ? r.stockQ : null,
-        unitCost: r.unitCost,
-        markOutDepartmentId: r.acceptedQ > 0 ? r.markOutDepartmentId : null,
-        batchNo: r.batchNo,
-        mfgDate: r.mfgDate,
-        expiryDate: r.expiryDate,
-        remarks: r.remarks,
-      },
-    });
-  }
+  // One INSERT for the lines; ids follow input order, as before.
+  const lineIds = await insertGrnLines(t, {
+    companyId: ctx.companyId,
+    grnId: id,
+    userId,
+    lines: resolved.map((r) => ({
+      poLineId: r.poLineId,
+      productVariantId: r.poLine.productVariantId,
+      invItemId: r.item?.id ?? null,
+      poUom: r.poLine.unit,
+      receivedQ: r.receivedQ,
+      acceptedQ: r.acceptedQ,
+      rejectedQ: r.rejectedQ,
+      rejectionReason: r.rejectedQ > 0 ? r.rejectionReason : null,
+      uomFactor: r.factor,
+      stockQ: r.item ? r.stockQ : null,
+      unitCost: r.unitCost,
+      markOutDepartmentId: r.acceptedQ > 0 ? r.markOutDepartmentId : null,
+      batchNo: r.batchNo,
+      mfgDate: r.mfgDate,
+      expiryDate: r.expiryDate,
+      remarks: r.remarks,
+    })),
+  });
+  resolved.forEach((r, k) => { r.grnLineId = lineIds[k]; });
 
-  // Allocate to the plan (materialising unallocated rows for this hotel).
+  // Allocate to the plan (materialising unallocated rows for this hotel); the
+  // allocator works on the locked plan in memory and never reads these rows,
+  // so they go in afterwards, in one INSERT, in the same order.
   const allocate = makeAllocator(t, { plan, ctx, hotelId, dispatchDeliveryId: dispatch?.deliveryId ?? null, userId });
+  const allocRows = [];
   for (const r of resolved) {
     const allocs = await allocate({ poLineId: r.poLineId, acceptedQ: r.acceptedQ, rejectedQ: r.rejectedQ });
-    for (const a of allocs) {
-      await t.none(
-        `INSERT INTO tbl_grn_line_alloc (hospitality_company_id, grn_line_id, delivery_line_id, accepted_qty, rejected_qty, created_by)
-         VALUES ($1, $2, $3, $4::numeric, $5::numeric, $6)`,
-        [ctx.companyId, r.grnLineId, a.deliveryLineId, qStr(a.acceptedQ), qStr(a.rejectedQ), userId]
-      );
-    }
+    for (const a of allocs) allocRows.push({ grnLineId: r.grnLineId, ...a });
+  }
+  if (allocRows.length) {
+    await t.none(
+      `INSERT INTO tbl_grn_line_alloc (hospitality_company_id, grn_line_id, delivery_line_id, accepted_qty, rejected_qty, created_by)
+       SELECT $1, v.grn_line_id, v.delivery_line_id, v.accepted_qty, v.rejected_qty, $2
+         FROM unnest($3::int[], $4::int[], $5::numeric[], $6::numeric[]) WITH ORDINALITY
+           AS v(grn_line_id, delivery_line_id, accepted_qty, rejected_qty, ord)
+        ORDER BY v.ord`,
+      [ctx.companyId, userId, allocRows.map((a) => a.grnLineId), allocRows.map((a) => a.deliveryLineId),
+       allocRows.map((a) => qStr(a.acceptedQ)), allocRows.map((a) => qStr(a.rejectedQ))]
+    );
   }
 
   // Number (sequence lock), then the ledger (balance locks), once.
@@ -765,22 +784,22 @@ export async function saveGrnDraft(t, user, input = {}, { grnId = null, viaToken
   } else {
     id = await insertGrnHeader(t, { ctx, hotelId, header, clientEventId: header.clientEventId, userId });
   }
-  for (const line of lines) {
-    const poLine = poLines.get(line.poLineId);
-    await insertGrnLine(t, {
-      companyId: ctx.companyId,
-      grnId: id,
-      userId,
-      line: {
+  await insertGrnLines(t, {
+    companyId: ctx.companyId,
+    grnId: id,
+    userId,
+    lines: lines.map((line) => {
+      const poLine = poLines.get(line.poLineId);
+      return {
         ...line,
         productVariantId: poLine.productVariantId,
         invItemId: line.mapToInvItemId,
         poUom: poLine.unit,
         stockQ: null,
         unitCost: null,
-      },
-    });
-  }
+      };
+    }),
+  });
   return { grn: { ...(await getGrnPayload(t, id, { hidePrices: !!viaToken })), warnings: [] }, replayed: false, created: grnId == null };
 }
 

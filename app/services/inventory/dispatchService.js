@@ -23,6 +23,7 @@ import {
 } from './planService.js';
 import { INVALID_PO_STATUSES_FOR_VENDOR } from '../../util/constants.js';
 import { loadInvoices } from './invoiceService.js';
+import { clientEventIdOf } from './grnCommon.js';
 
 const SCALE = 10000;
 const toQ = (v) => {
@@ -120,18 +121,39 @@ async function openQtyByLine(t, poId, hotelId) {
  * @param {object} actor the vendor user (req.user), or {system:true, userId}
  *   for the legacy Mark-dispatched button (no lines, no challan needed).
  * @param {number} poId
- * @param {{hotelId?, deliveryId?, challanNo, challanDate, ewayBillNo?, vehicleNo?,
+ * @param {{clientEventId?, hotelId?, deliveryId?, challanNo, challanDate, ewayBillNo?, vehicleNo?,
  *   transporter?, expectedDeliveryDate, remarks?, lines:[{poLineId, qty}]}} payload
- * @returns {Promise<object>} DispatchSummary
+ *   clientEventId: a UUID the client mints once per dispatch; a retry with the
+ *   same key on the same PO records nothing and returns the dispatch it made.
+ * @returns {Promise<object>} DispatchSummary; plus replayed:true when the
+ *   key was already used on this PO (the summary is that dispatch's, as it is now).
  * @throws InventoryError NOT_FOUND (not the vendor's PO) | CONFLICT (PO not
  *   accepted, closed or fully received) | VALIDATION (fields, hotel, delivery,
- *   lines; a qty above the open qty names {poLineId, openQty}).
+ *   lines; a qty above the open qty names {poLineId, openQty}; a clientEventId
+ *   that is not a UUID).
  */
 export async function createDispatch(t, actor, poId, payload = {}) {
   const system = actor?.system === true;
   const ctx = await ownedPo(t, actor, poId, { forUpdate: true });
   const id = Number(ctx.po.id);
   const actorUserId = system ? positiveInt(actor.userId) : positiveInt(actor.id);
+
+  // A retry of a dispatch already recorded: the PO row lock above serialises
+  // two posts of one key, so the second always sees the first here. Checked
+  // before the status rules, so a retry whose original went through is never
+  // refused because of it.
+  const p = payload && typeof payload === 'object' ? payload : {};
+  const clientEventId = clientEventIdOf(p.clientEventId);
+  if (clientEventId) {
+    const prior = await t.oneOrNone(
+      `SELECT id FROM tbl_po_dispatch WHERE po_id = $1 AND client_event_id = $2`,
+      [id, clientEventId]
+    );
+    if (prior) {
+      const [summary] = await loadDispatches(t, id, { dispatchId: Number(prior.id) });
+      return { ...summary, replayed: true };
+    }
+  }
 
   const status = String(ctx.status);
   if (!LEGACY_PO_STATUS_ORDER.includes(status)) {
@@ -143,7 +165,6 @@ export async function createDispatch(t, actor, poId, payload = {}) {
     throw new InventoryError('CONFLICT', 'Everything on this purchase order has been received or closed', { receiptStatus: ctx.receiptStatus });
   }
 
-  const p = payload && typeof payload === 'object' ? payload : {};
   const fields = {
     challanNo: text(p.challanNo, 'Challan number', 64, { required: !system }),
     challanDate: day(p.challanDate, 'Challan date', { required: !system }),
@@ -231,12 +252,12 @@ export async function createDispatch(t, actor, poId, payload = {}) {
     `INSERT INTO tbl_po_dispatch
        (dispatch_number, hospitality_company_id, po_id, vendor_id, delivery_id, hotel_id, status,
         challan_no, challan_date, eway_bill_no, vehicle_no, transporter, expected_delivery_date, remarks,
-        created_by, updated_by)
-     VALUES ($1, $2, $3, $4, $5, $6, 'in_transit', $7, $8, $9, $10, $11, $12, $13, $14, $14)
+        client_event_id, created_by, updated_by)
+     VALUES ($1, $2, $3, $4, $5, $6, 'in_transit', $7, $8, $9, $10, $11, $12, $13, $15, $14, $14)
      RETURNING id`,
     [dispatchNumber, ctx.companyId, id, ctx.vendorId, deliveryId, hotelId,
      fields.challanNo, fields.challanDate, fields.ewayBillNo, fields.vehicleNo, fields.transporter,
-     fields.expectedDeliveryDate, fields.remarks, actorUserId]
+     fields.expectedDeliveryDate, fields.remarks, actorUserId, clientEventId]
   );
   if (lines.length) {
     await t.none(

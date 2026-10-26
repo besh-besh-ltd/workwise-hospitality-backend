@@ -120,6 +120,18 @@ CREATE TABLE IF NOT EXISTS public.tbl_po_dispatch_line (
   CONSTRAINT ux_po_dispatch_line_dispatch_po_line UNIQUE (dispatch_id, po_line_id)
 );
 
+-- Idempotency key of the vendor's create-dispatch request (clientEventId): a
+-- replay on the same PO returns this dispatch; the same key on another PO is
+-- a new dispatch.
+ALTER TABLE public.tbl_po_dispatch ADD COLUMN IF NOT EXISTS client_event_id UUID;
+CREATE UNIQUE INDEX IF NOT EXISTS ux_po_dispatch_po_client_event
+  ON public.tbl_po_dispatch (po_id, client_event_id) WHERE client_event_id IS NOT NULL;
+-- FK checks of PO-line and plan deletes, and the dispatch lookups.
+CREATE INDEX IF NOT EXISTS ix_po_dispatch_line_po_line
+  ON public.tbl_po_dispatch_line (po_line_id);
+CREATE INDEX IF NOT EXISTS ix_po_dispatch_delivery
+  ON public.tbl_po_dispatch (delivery_id) WHERE delivery_id IS NOT NULL;
+
 -- ---------------------------------------------------------------------------
 -- §5.4 GRN
 -- ---------------------------------------------------------------------------
@@ -232,6 +244,15 @@ CREATE TABLE IF NOT EXISTS public.tbl_grn_attachment (
 );
 CREATE INDEX IF NOT EXISTS ix_grn_attachment_grn ON public.tbl_grn_attachment (grn_id);
 
+-- cancelDispatch's received check and the FK check of a dispatch delete; the
+-- site-rep receipts list; the stock-unit change check (setupService).
+CREATE INDEX IF NOT EXISTS ix_grn_dispatch
+  ON public.tbl_grn (dispatch_id) WHERE dispatch_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS ix_grn_received_by_token
+  ON public.tbl_grn (received_by_token_id) WHERE received_by_token_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS ix_grn_line_inv_item
+  ON public.tbl_grn_line (inv_item_id) WHERE inv_item_id IS NOT NULL;
+
 -- ---------------------------------------------------------------------------
 -- §5.4 Short-close audit log (append-style: a reopen is a new row)
 -- ---------------------------------------------------------------------------
@@ -300,6 +321,13 @@ ALTER TABLE public.tbl_po_short_close
   ADD COLUMN IF NOT EXISTS rtv_id INT REFERENCES public.tbl_rtv(id);
 CREATE INDEX IF NOT EXISTS ix_po_short_close_rtv
   ON public.tbl_po_short_close (rtv_id) WHERE rtv_id IS NOT NULL;
+
+-- When the return left (set by dispatchRtv). The roll-up spreads returns over
+-- a receipt line's allocations in dispatch order, so a return dispatched
+-- later only takes what earlier ones left. Nullable with no default and no
+-- backfill: drafts have none, and the table is new (no rows anywhere). A
+-- dispatched row without one sorts first (creation order).
+ALTER TABLE public.tbl_rtv ADD COLUMN IF NOT EXISTS dispatched_at TIMESTAMPTZ;
 
 -- ---------------------------------------------------------------------------
 -- §5.4 PO-side roll-ups (caches of the delivery lines; recomputePoReceipt
@@ -385,6 +413,13 @@ BEGIN
     EXECUTE format('DROP INDEX public.%I', r.indexname);
   END LOOP;
 END $$;
+
+-- cancelDispatch's billed check and the FK check of a dispatch delete. An
+-- existing table, built non-concurrently (one query per file): every row's
+-- dispatch_id is NULL when this runs, so the partial index is empty and the
+-- build is one scan.
+CREATE INDEX IF NOT EXISTS ix_purchase_order_document_dispatch
+  ON public.tbl_purchase_order_document (dispatch_id) WHERE dispatch_id IS NOT NULL;
 
 -- ---------------------------------------------------------------------------
 -- §10.3 Site-rep token hardening (storage only; the auth change is task B6).

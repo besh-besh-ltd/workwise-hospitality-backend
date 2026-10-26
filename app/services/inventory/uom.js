@@ -50,16 +50,49 @@ export async function resolveUomFactor(t, { invItemId, uomLabel } = {}) {
   const key = uomKey(uomLabel);
   if (!key) return null;
   if (key === uomKey(item.stock_uom)) return 1;
+  return pickFactor(await uomRows(t, [item.id]), key);
+}
 
-  // Compared in JS with the same normaliser, so a label stored before
-  // normalisation (e.g. by hand) still matches.
-  const rows = await t.any(
-    `SELECT uom_label, factor_to_stock::text AS factor
-       FROM tbl_inv_item_uom WHERE inv_item_id = $1 ORDER BY id`,
-    [item.id]
+/** An item's defined conversions, in id order (the first match wins). */
+async function uomRows(t, invItemIds) {
+  return t.any(
+    `SELECT inv_item_id, uom_label, factor_to_stock::text AS factor
+       FROM tbl_inv_item_uom WHERE inv_item_id = ANY($1::int[]) ORDER BY id`,
+    [invItemIds]
   );
+}
+
+// Compared in JS with the same normaliser, so a label stored before
+// normalisation (e.g. by hand) still matches.
+function pickFactor(rows, key) {
   const hit = rows.find((r) => uomKey(r.uom_label) === key);
   return hit ? Number(hit.factor) : null;
+}
+
+/**
+ * resolveUomFactor for many items at once (the Receive screen): one query for
+ * all their conversions. Items are passed in already loaded.
+ *
+ * @param {object} t
+ * @param {Array<{id:number|string, stock_uom:string}>} items
+ * @returns {Promise<(invItemId:number, uomLabel:string) => number|null>} the
+ *   same answer resolveUomFactor gives for that item and label.
+ */
+export async function uomFactorLookup(t, items) {
+  const stockUom = new Map(items.map((i) => [Number(i.id), i.stock_uom]));
+  const byItem = new Map();
+  for (const r of stockUom.size ? await uomRows(t, [...stockUom.keys()]) : []) {
+    const id = Number(r.inv_item_id);
+    if (!byItem.has(id)) byItem.set(id, []);
+    byItem.get(id).push(r);
+  }
+  return (invItemId, uomLabel) => {
+    const id = Number(invItemId);
+    const key = uomKey(uomLabel);
+    if (!key) return null;
+    if (key === uomKey(stockUom.get(id))) return 1;
+    return pickFactor(byItem.get(id) || [], key);
+  };
 }
 
 /**
@@ -109,4 +142,4 @@ export async function setUomFactor(t, { invItemId, uomLabel, factor, userId = nu
   return { id: Number(row.id), invItemId: Number(row.inv_item_id), uomLabel: row.uom_label, factor: Number(row.factor) };
 }
 
-export default { resolveUomFactor, setUomFactor, normalizeUomLabel, uomKey, sameUom };
+export default { resolveUomFactor, uomFactorLookup, setUomFactor, normalizeUomLabel, uomKey, sameUom };

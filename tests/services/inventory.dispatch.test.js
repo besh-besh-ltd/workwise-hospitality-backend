@@ -148,6 +148,49 @@ describe("vendor dispatch notes", () => {
     expect(again.body.code).toBe("CONFLICT");
   });
 
+  it("a replayed clientEventId returns the original dispatch; the same id on another PO is a new one", async () => {
+    const make = () => db.tx((t) => fx.makeRfqPo(t, { status: "approved", tracker: tr, lines: [{ qty: 10, unit: "kg" }] }));
+    const po = await make();
+    const otherPo = await make();
+    const c = await httpClient(VENDOR);
+    const key = "6f1c2d3e-4a5b-4c6d-8e7f-9a0b1c2d3e4f";
+    const body = (p, over = {}) => note({ clientEventId: key, lines: [{ poLineId: p.lineIds[0], qty: 3 }], ...over });
+    const count = async (poId) => (await db.one(`SELECT count(*)::int AS n FROM tbl_po_dispatch WHERE po_id = $1`, [poId])).n;
+
+    const first = await c.post(`/api/v1/inventory/vendor/po/${po.poId}/dispatches`).send(body(po));
+    expect(first.status).toBe(201);
+    expect(first.body.data.replayed).toBeUndefined();
+
+    // The retry (say the response was lost) records nothing new, whatever it says now.
+    const replay = await c.post(`/api/v1/inventory/vendor/po/${po.poId}/dispatches`)
+      .send(body(po, { challanNo: "DC-OTHER", lines: [{ poLineId: po.lineIds[0], qty: 5 }] }));
+    expect(replay.status).toBe(200);
+    expect(replay.body).toMatchObject({ status: 1, data: { ...first.body.data, replayed: true, no_op: true } });
+    expect(await count(po.poId)).toBe(1);
+    const { open } = await db.one(
+      `SELECT SUM(qty)::float AS open FROM tbl_po_dispatch_line WHERE dispatch_id = $1`, [first.body.data.id]
+    );
+    expect(open).toBe(3);
+
+    // The same key on another PO is that PO's first dispatch.
+    const elsewhere = await c.post(`/api/v1/inventory/vendor/po/${otherPo.poId}/dispatches`).send(body(otherPo));
+    expect(elsewhere.status).toBe(201);
+    expect(elsewhere.body.data.id).not.toBe(first.body.data.id);
+    expect(await count(otherPo.poId)).toBe(1);
+
+    // Without a key every post is a new dispatch; a key that is not a UUID is refused.
+    const plain = await c.post(`/api/v1/inventory/vendor/po/${po.poId}/dispatches`).send(body(po, { clientEventId: undefined }));
+    expect(plain.status).toBe(201);
+    expect(await count(po.poId)).toBe(2);
+    const bad = await c.post(`/api/v1/inventory/vendor/po/${po.poId}/dispatches`).send(body(po, { clientEventId: "not-a-uuid" }));
+    expect(bad.status).toBe(400);
+    expect(bad.body).toMatchObject({ code: "VALIDATION", details: { field: "clientEventId" } });
+
+    // Another vendor replaying the key learns nothing: the PO is not theirs.
+    const foreign = await (await httpClient(OTHER_VENDOR)).post(`/api/v1/inventory/vendor/po/${po.poId}/dispatches`).send(body(po));
+    expect(foreign.status).toBe(404);
+  });
+
   it("dispatch qty above open qty rejected", async () => {
     await withTx(async (t) => {
       const po = await fx.makeRfqPo(t, { status: "approved", mappedHotels: [A1, A2], lines: [{ qty: 10 }] });

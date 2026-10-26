@@ -287,9 +287,12 @@ async function renderAndUpload(html, key) {
   }
 }
 
-/** Render a loaded GRN document; returns its URL. */
+/**
+ * Render a loaded GRN document; returns its URL. The key ends in a random
+ * UUID, so a document's URL can't be guessed from its id and number.
+ */
 export const renderGrnDocument = (ctx) =>
-  renderAndUpload(buildGrnHtml(ctx), `grn/${ctx.companyId}/${ctx.grnId}-${slug(ctx.grnNumber)}.pdf`);
+  renderAndUpload(buildGrnHtml(ctx), `grn/${ctx.companyId}/${ctx.grnId}-${slug(ctx.grnNumber)}-${crypto.randomUUID()}.pdf`);
 
 /** Load + render (convenience; holds `t` while rendering, so prefer the split in request paths). */
 export async function renderGrnPdf(t, grnId) {
@@ -406,9 +409,12 @@ export async function loadRtvDocument(t, rtvId) {
 /** The RTV delivery challan as self-contained HTML. */
 export const buildRtvHtml = (ctx) => template('rtv.html')(ctx);
 
-/** Render a loaded RTV document; returns its URL. Drafts have no number, so no challan. */
+/**
+ * Render a loaded RTV document; returns its URL. Drafts have no number, so no
+ * challan. The key ends in a random UUID, as a GRN's.
+ */
 export const renderRtvDocument = (ctx) =>
-  renderAndUpload(buildRtvHtml(ctx), `rtv/${ctx.companyId}/${ctx.rtvId}-${slug(ctx.rtvNumber)}.pdf`);
+  renderAndUpload(buildRtvHtml(ctx), `rtv/${ctx.companyId}/${ctx.rtvId}-${slug(ctx.rtvNumber)}-${crypto.randomUUID()}.pdf`);
 
 export async function renderRtvPdf(t, rtvId) {
   return renderRtvDocument(await loadRtvDocument(t, rtvId));

@@ -10,7 +10,7 @@ import { getPoContext } from './planCore.js';
 import { loadPlan } from './allocation.js';
 import {
   IST_TODAY, positiveInt, toQ, qNum, qStr, round4, numOrNull, textOrNull, invalid, quantityQ, assertGrnAccess,
-  loadGrnRow, insertGrnLine, afterReceiptChange,
+  loadGrnRow, insertGrnLine, afterReceiptChange, returnStockParts,
 } from './grnCommon.js';
 import { getGrnPayload } from './grnRead.js';
 import { assertNotFrozen } from './stockCommon.js';
@@ -26,7 +26,9 @@ import { assertNotFrozen } from './stockCommon.js';
  * and whose allocations are negative, latest phase first; posts GRN_REVERSAL
  * at the receipt's unit cost (a line marked out on arrival first takes its
  * mark-out back with RETURN_IN at the mark-out cost, same batch and expiry,
- * reason GRN_REVERSAL). Refused (NEGATIVE_STOCK, details name the
+ * reason GRN_REVERSAL). The stock qty is cumulative per receipt line
+ * (grnCommon.returnStockParts), so partial reversals and returns of one line
+ * add up to exactly what it stocked. Refused (NEGATIVE_STOCK, details name the
  * item and the shortfall) when the stock has already been marked out, and
  * (CONFLICT) below what returns to vendor already cover.
  *
@@ -145,6 +147,11 @@ export async function reverseGrn(t, user, { grnId, reason, lines } = {}) {
     (x.dueDate === y.dueDate ? 0 : x.dueDate == null ? -1 : y.dueDate == null ? 1 : x.dueDate < y.dueDate ? 1 : -1) ||
     y.lastAllocId - x.lastAllocId;
 
+  // Stock qty per line, before the draft reversal exists (drafts never count).
+  const stockParts = await returnStockParts(
+    t, [...wanted].map(([grnLineId, w]) => ({ grnLineId, qtyQ: w.acceptedQ }))
+  );
+
   // The REVERSAL document.
   const reversal = await t.one(
     `INSERT INTO tbl_grn
@@ -162,7 +169,7 @@ export async function reverseGrn(t, user, { grnId, reason, lines } = {}) {
   for (const [lineId, w] of wanted) {
     const l = byId.get(lineId);
     const factor = numOrNull(l.uom_factor);
-    const stockQ = factor == null ? 0 : Math.round(w.acceptedQ * factor);
+    const stockQ = factor == null ? 0 : stockParts.get(lineId) ?? 0;
     const revLineId = await insertGrnLine(t, {
       companyId,
       grnId: reversalId,
