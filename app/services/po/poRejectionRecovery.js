@@ -32,7 +32,7 @@ import { logError } from '../../helper/common.js';
 import { recordLifecycleEvent } from '../../models/generalModel.js';
 import { evaluateVendorTechnicalQualification } from '../technicalQualificationService.js';
 import { coversProductSql } from '../../models/negotiationModel.js';
-import { lockMrHotelLedgerRows } from '../callOffPoService.js';
+import { lockContractLines, lockMrHotelLedgerRows } from '../callOffPoService.js';
 import { logArcEvent, ARC_EVENT_TYPES } from '../arcEventLogService.js';
 import { PO_STATUSES, RFQ_STATUSES } from '../../util/constants.js';
 import { assertCanReadParentRfq, assertUserHasScope, isAuthorizationError } from '../authorizationService.js';
@@ -432,8 +432,10 @@ export async function restoreAward(t, po, actorUserId) {
         `SELECT hotel_id FROM tbl_material_requisition WHERE id = $1`, [callOff.mrId]
       ))?.hotel_id ?? null;
       // Same lock order as the release and the rejection: the requisition
-      // hotel's ledger rows (id order), then the contract lines.
+      // hotel's ledger rows (id order), then the contract lines (id order;
+      // restoreCallOffAward then writes them in link order).
       await lockMrHotelLedgerRows(tx, callOff.mrId, mrHotelId);
+      await lockContractLines(tx, callOff.links.map((link) => link.arc_contract_line_id));
     }
 
     const blockers = await findRecoveryBlockers(tx, locked);

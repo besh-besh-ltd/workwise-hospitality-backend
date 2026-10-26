@@ -8,7 +8,10 @@
 //                        GRN's allocations count negative);
 //   returned_replace /   Σ tbl_rtv_line of dispatched or closed RTVs, by
 //   returned_credit      disposition, spread over the returned GRN line's
-//                        allocations (latest allocation first, as reversals);
+//                        allocations (latest allocation first, as reversals)
+//                        in DISPATCH order (dispatched_at, then id), so a
+//                        return dispatched later only takes what earlier ones
+//                        left and never moves them;
 //   short_closed         Σ tbl_po_short_close close − reopen. A CREDIT return
 //                        is short-closed by its own log rows (task B5), so it
 //                        is not added here a second time.
@@ -227,13 +230,13 @@ export async function recomputePoReceipt(t, poId) {
   }
   for (const list of byReceiptLine.values()) list.sort((x, y) => y.firstAllocId - x.firstAllocId);
 
-  // Returns to vendor that have left the building.
+  // Returns to vendor that have left the building, in the order they left.
   const rtvLines = await t.any(
     `SELECT rl.id, rl.grn_line_id, r.disposition, rl.qty::text AS qty
        FROM tbl_rtv_line rl
        JOIN tbl_rtv r ON r.id = rl.rtv_id
       WHERE r.po_id = $1 AND r.status IN ('dispatched', 'closed')
-      ORDER BY rl.id`,
+      ORDER BY r.dispatched_at NULLS FIRST, r.id, rl.id`,
     [id]
   );
   for (const r of rtvLines) {

@@ -9,12 +9,20 @@
 //   create    each line's GRN line must carry its stock item and unit
 //             conversion (VALIDATION naming the product), so a draft can
 //             always be dispatched.
-//   dispatch  numbers the RTV (RTV/{doc_code}/{FY}/{seq}), posts RTV_OUT at
-//             the GRN line's unit cost (NEGATIVE_STOCK when the goods are no
-//             longer there; the ledger guards RTV_OUT always; the stock qty is
-//             qty × factor in SQL numeric, rounded to 4 dp, sent as a decimal
-//             string), then rolls the PO up. The roll-up counts dispatched/
-//             closed RTVs, spread in rtv line id order:
+//   dispatch  numbers the RTV (RTV/{doc_code}/{FY}/{seq}), stamps
+//             dispatched_at, posts RTV_OUT at the GRN line's unit cost
+//             (NEGATIVE_STOCK when the goods are no longer there; the ledger
+//             guards RTV_OUT always), then rolls the PO up. The stock qty is
+//             cumulative per receipt line (grnCommon.returnStockParts), so
+//             partial returns and reversals of one line add up to exactly
+//             what it stocked. A line marked out to a department on arrival
+//             comes back from that department first: RETURN_IN at the
+//             original mark-out cost, same batch and expiry, reason 'RTV',
+//             then RTV_OUT, in one postMovements call (as a GRN reversal
+//             does), so it never draws unrelated store stock. The roll-up
+//             counts dispatched/closed RTVs, spread in DISPATCH order
+//             (dispatched_at, then id), so a return only takes what earlier
+//             ones left and never moves them:
 //               REPLACE  returned_replace_qty → the qty is open again;
 //               CREDIT   returned_credit_qty, plus tbl_po_short_close rows
 //                        (rtv_id set, reason 'other', remarks "RTV <number>
@@ -23,14 +31,13 @@
 //                        returned_credit_qty, so the qty does not come back as
 //                        open; a call-off gives that qty back to its rate
 //                        contract (shortCloseService.closeForCreditReturn).
-//             Because of that order, an older draft dispatched after newer
-//             returns on the same receipt line would re-spread their credit
-//             (moving it off the lines already short-closed for it). After the
-//             roll-up, no line's credit may fall and the credit added must be
-//             exactly this RTV's CREDIT qty (0 for REPLACE); otherwise CONFLICT
-//             and the whole dispatch rolls back. Cancel and raise it again.
-//             A credit the roll-up could book nowhere (the receipt line has no
-//             delivery allocation) is its own CONFLICT, saying just that.
+//             After the roll-up, no delivery line's credit or replace qty may
+//             fall, and this RTV must add exactly its own qty to its own
+//             field and nothing to the other; otherwise CONFLICT and the
+//             whole dispatch rolls back (an assertion now that the spread
+//             follows dispatch order). A credit the roll-up could book
+//             nowhere (the receipt line has no delivery allocation) is its
+//             own CONFLICT, saying just that.
 //   close     CREDIT: records the vendor's credit-note reference.
 //             REPLACE: only once every delivery line the returned goods were
 //             booked to is received again or short-closed.
@@ -38,8 +45,8 @@
 // Permissions: grn.approve at the GRN's hotel for every action, grn.read to
 // view. Rule C3: without grn.read or the action there the return (or GRN)
 // reads as missing, inside the caller's company too; FORBIDDEN only when it
-// is visible. Lock order (planCore): PO row → delivery lines → balances, and
-// nextDocNumber before postMovements (ledger rule b).
+// is visible. Lock order (planCore): PO row → delivery lines → doc sequence
+// → balances, and nextDocNumber before postMovements (ledger rule b).
 
 import { InventoryError } from './errors.js';
 import { assertVisibleHotelPermission } from './scope.js';
@@ -49,6 +56,7 @@ import { nextDocNumber } from './docNumber.js';
 import { postMovements } from './ledger.js';
 import { closeForCreditReturn } from './shortCloseService.js';
 import { assertNotFrozen } from './stockCommon.js';
+import { returnStockParts } from './grnCommon.js';
 
 export const RTV_DISPOSITIONS = Object.freeze(['REPLACE', 'CREDIT']);
 
@@ -322,14 +330,38 @@ async function lockForAction(t, user, rtvId, action) {
 const wrongStatus = (rtv, verb) =>
   new InventoryError('CONFLICT', `A ${rtv.status} return cannot be ${verb}`, { rtvId: Number(rtv.id), status: rtv.status });
 
-async function deliveryCredits(t, poId) {
+/** Both returned fields of every delivery line of the PO, in 1/10000. */
+async function deliveryReturns(t, poId) {
   const rows = await t.any(
-    `SELECT dl.id, dl.returned_credit_qty::text AS credit
+    `SELECT dl.id, dl.returned_credit_qty::text AS credit, dl.returned_replace_qty::text AS replace
        FROM tbl_po_delivery_line dl JOIN tbl_po_delivery d ON d.id = dl.delivery_id
       WHERE d.po_id = $1`,
     [poId]
   );
-  return new Map(rows.map((r) => [Number(r.id), toQ(r.credit)]));
+  return new Map(rows.map((r) => [Number(r.id), { credit: toQ(r.credit), replace: toQ(r.replace) }]));
+}
+
+/** Per delivery line, how much each returned field moved between two snapshots. */
+function returnDeltas(before, after) {
+  return [...new Set([...before.keys(), ...after.keys()])].map((deliveryLineId) => {
+    const b = before.get(deliveryLineId) || { credit: 0, replace: 0 };
+    const a = after.get(deliveryLineId) || { credit: 0, replace: 0 };
+    return { deliveryLineId, credit: a.credit - b.credit, replace: a.replace - b.replace };
+  });
+}
+
+/** The cost each receipt line was marked out at on arrival (its first MARK_OUT row). */
+async function markOutCosts(t, { grnId, companyId, grnLineIds }) {
+  if (!grnLineIds.length) return new Map();
+  const rows = await t.any(
+    `SELECT DISTINCT ON (source_line_id) source_line_id, unit_cost::text AS unit_cost
+       FROM tbl_inv_movement
+      WHERE source_type = 'GRN' AND source_id = $1 AND source_line_id = ANY($2::int[])
+        AND movement_type = 'MARK_OUT' AND hospitality_company_id = $3
+      ORDER BY source_line_id, id`,
+    [grnId, grnLineIds, companyId]
+  );
+  return new Map(rows.map((r) => [Number(r.source_line_id), Number(r.unit_cost)]));
 }
 
 /**
@@ -352,11 +384,10 @@ export async function dispatchRtv(t, user, rtvId, { challanNo } = {}) {
   const rtvIdN = Number(rtv.id);
   const poId = Number(rtv.po_id);
 
-  // Stock qty = qty × factor in numeric, 4 dp half-up (the ledger's scale).
   const lines = await t.any(
     `SELECT rl.id, rl.grn_line_id, rl.qty::text AS qty, gl.inv_item_id, gl.product_variant_id,
-            ROUND(rl.qty * (${STOCK_FACTOR}), 4)::text AS stock_out,
-            gl.unit_cost::text AS unit_cost, gl.batch_no, gl.expiry_date::text AS expiry_date
+            gl.unit_cost::text AS unit_cost, gl.batch_no, gl.expiry_date::text AS expiry_date,
+            gl.mark_out_department_id
        FROM tbl_rtv_line rl JOIN tbl_grn_line gl ON gl.id = rl.grn_line_id
       WHERE rl.rtv_id = $1
       ORDER BY rl.id`,
@@ -366,27 +397,36 @@ export async function dispatchRtv(t, user, rtvId, { challanNo } = {}) {
     lines.map((l) => ({ grnLineId: Number(l.grn_line_id), qty: toQ(l.qty) })),
     await returnableByLine(t, Number(rtv.grn_id), { excludeRtvId: rtvIdN })
   );
+  // Stock qty per line: cumulative over the receipt line's earlier returns
+  // and reversals (4 dp, numeric), the last part taking the exact remainder.
+  const parts = await returnStockParts(t, lines.map((l) => ({ grnLineId: Number(l.grn_line_id), qtyQ: toQ(l.qty) })));
+  const companyId = Number(rtv.hospitality_company_id);
+  const markedOut = lines.filter((l) => l.mark_out_department_id != null);
+  const markOutCost = await markOutCosts(t, {
+    grnId: Number(rtv.grn_id), companyId, grnLineIds: markedOut.map((l) => Number(l.grn_line_id)),
+  });
 
-  // The delivery lines' credit before this return, from fresh source rows.
+  // The delivery lines' returned fields before this return, from fresh source rows.
   await recomputePoReceipt(t, poId);
-  const creditBefore = await deliveryCredits(t, poId);
+  const returnsBefore = await deliveryReturns(t, poId);
 
   const rtvNumber = await nextDocNumber(t, { hotelId: Number(rtv.hotel_id), docType: 'RTV' });
-  const movements = lines.map((l) => {
+  const movements = [];
+  for (const l of lines) {
+    const grnLineId = Number(l.grn_line_id);
+    const partQ = parts.get(grnLineId);
     // createRtv refuses such lines; a draft from before that check still stops here.
-    if (l.stock_out == null || l.inv_item_id == null) {
+    if (partQ == null || l.inv_item_id == null) {
       throw new InventoryError('CONFLICT', 'This receipt line has no stock item or unit conversion to return against', {
-        grnLineId: Number(l.grn_line_id),
+        grnLineId,
       });
     }
-    return {
-      companyId: Number(rtv.hospitality_company_id),
+    if (partQ <= 0) continue; // the line's stock has all gone back already (rounding residue only)
+    const base = {
+      companyId,
       hotelId: Number(rtv.hotel_id),
       invItemId: Number(l.inv_item_id),
       productVariantId: l.product_variant_id == null ? null : Number(l.product_variant_id),
-      type: 'RTV_OUT',
-      qty: `-${l.stock_out}`,
-      unitCost: l.unit_cost == null ? undefined : Number(l.unit_cost),
       batchNo: l.batch_no ?? null,
       expiryDate: l.expiry_date ?? null,
       sourceType: 'RTV',
@@ -394,27 +434,55 @@ export async function dispatchRtv(t, user, rtvId, { challanNo } = {}) {
       sourceLineId: Number(l.id),
       postedBy: positiveInt(user?.id),
     };
-  });
+    if (l.mark_out_department_id != null) {
+      // Marked out on arrival: the goods come back from that department, so
+      // its consumption is corrected first, at the cost it took them at (as a
+      // GRN reversal does), and the store's own stock is never touched.
+      if (!markOutCost.has(grnLineId)) {
+        throw new InventoryError('CONFLICT', 'Original mark-out for this line not found', {
+          grnId: Number(rtv.grn_id), grnLineId,
+        });
+      }
+      movements.push({
+        ...base,
+        type: 'RETURN_IN',
+        qty: qStr(partQ),
+        unitCost: markOutCost.get(grnLineId),
+        departmentId: Number(l.mark_out_department_id),
+        reasonCode: 'RTV',
+      });
+    }
+    movements.push({
+      ...base,
+      type: 'RTV_OUT',
+      qty: `-${qStr(partQ)}`,
+      unitCost: l.unit_cost == null ? undefined : Number(l.unit_cost),
+    });
+  }
   await postMovements(t, movements);
 
+  // clock_timestamp, not now(): two dispatches in one transaction still order.
   await t.none(
-    `UPDATE tbl_rtv SET status = 'dispatched', rtv_number = $2, challan_no = $3, updated_at = now(), updated_by = $4
+    `UPDATE tbl_rtv SET status = 'dispatched', rtv_number = $2, challan_no = $3, dispatched_at = clock_timestamp(),
+            updated_at = now(), updated_by = $4
       WHERE id = $1`,
     [rtvIdN, rtvNumber, challan, positiveInt(user?.id)]
   );
   await recomputePoReceipt(t, poId);
 
-  // The roll-up spread the credit over the returned receipt line's delivery
-  // lines (latest allocation first, RTV lines in id order). Only this RTV may
-  // add credit, and exactly its own CREDIT qty: an older draft dispatched after
-  // newer returns re-spreads theirs, which would over-close (and over-give-back).
-  const after = await deliveryCredits(t, poId);
-  const deltas = [...new Set([...creditBefore.keys(), ...after.keys()])]
-    .map((deliveryLineId) => ({ deliveryLineId, qty: (after.get(deliveryLineId) || 0) - (creditBefore.get(deliveryLineId) || 0) }));
-  const added = deltas.reduce((sum, d) => sum + Math.max(d.qty, 0), 0);
-  const expected = rtv.disposition === 'CREDIT' ? lines.reduce((sum, l) => sum + toQ(l.qty), 0) : 0;
-  const moved = deltas.some((d) => d.qty < 0);
-  if (!moved && added < expected) {
+  // The roll-up spreads returns over the returned receipt line's delivery
+  // lines (latest allocation first) in dispatch order, so this RTV, the last
+  // dispatched, only takes what earlier returns left. Check it: no field may
+  // fall anywhere, and this RTV adds exactly its own qty to its own field and
+  // nothing to the other. Otherwise an earlier return moved, which would leave
+  // a phantom open phase (REPLACE) or over-close and over-give-back (CREDIT).
+  const deltas = returnDeltas(returnsBefore, await deliveryReturns(t, poId));
+  const total = lines.reduce((sum, l) => sum + toQ(l.qty), 0);
+  const added = (field) => deltas.reduce((sum, d) => sum + Math.max(d[field], 0), 0);
+  const isCredit = rtv.disposition === 'CREDIT';
+  const expected = { credit: isCredit ? total : 0, replace: isCredit ? 0 : total };
+  const moved = deltas.some((d) => d.credit < 0 || d.replace < 0);
+  if (!moved && added('credit') < expected.credit) {
     // The roll-up had no delivery line to book the credit to: the receipt line
     // has no allocation (e.g. a legacy-received PO with no deliveries).
     throw new InventoryError(
@@ -423,7 +491,9 @@ export async function dispatchRtv(t, user, rtvId, { challanNo } = {}) {
       { rtvId: rtvIdN, grnId: Number(rtv.grn_id) }
     );
   }
-  if (moved || added !== expected) {
+  // A REPLACE booked nowhere (no allocation) reopens nothing, as before; any
+  // other difference means returns moved.
+  if (moved || added('credit') !== expected.credit || added('replace') > expected.replace) {
     throw new InventoryError(
       'CONFLICT',
       'Later returns on this receipt were dispatched first. Cancel this draft and raise it again to dispatch it.',
@@ -434,8 +504,8 @@ export async function dispatchRtv(t, user, rtvId, { challanNo } = {}) {
   if (rtv.disposition === 'CREDIT') {
     // Short-close exactly those increases.
     const rows = deltas
-      .filter((r) => r.qty > 0)
-      .map((r) => ({ deliveryLineId: r.deliveryLineId, qty: qNum(r.qty) }));
+      .filter((r) => r.credit > 0)
+      .map((r) => ({ deliveryLineId: r.deliveryLineId, qty: qNum(r.credit) }));
     if (rows.length) {
       await closeForCreditReturn(t, ctx, { rtvId: rtvIdN, rtvNumber, userId: positiveInt(user?.id), rows });
       await recomputePoReceipt(t, poId);

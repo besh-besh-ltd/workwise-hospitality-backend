@@ -25,6 +25,7 @@ import { resolveItemForVariant } from "../../app/services/inventory/items.js";
 import { ensureDefaultPlan } from "../../app/services/inventory/planCore.js";
 import { postMovements } from "../../app/services/inventory/ledger.js";
 import { hotelIdsWithPermission } from "../../app/services/inventory/scope.js";
+import { countQueries } from "../helpers/queryCounter.js";
 
 const CO = IDS.hospitality.A;
 const A1 = IDS.hotels.A1;
@@ -535,6 +536,96 @@ describe("receive context", () => {
       barcodes: [], costPerPoUnit: 100,
     });
     expect(ctx.draft).toBeNull();
+  });
+
+  // E1 M-5. Per PO line the screen used to read the unit conversion (2), the
+  // cost (2) and, for an unmapped product, suggestions (2); posting read the
+  // cost (2) and wrote the line (1) and its allocation (1) one by one, all
+  // under the PO row lock. Measured on these POs (2 vs 6 lines):
+  //   before: screen +5.5 statements per line; posting +12 per line
+  //   after : screen +0;                       posting +8 per line
+  // What stays per line in posting is the item lookup / lazy creation and its
+  // unit conversion, which must run in product order, one line after another.
+  it("the Receive screen costs the same however many lines the PO has; posting writes lines in one go (E1 M-5)", async () => {
+    // Even lines: a stock item in grams, 1000 g per kg. Odd lines: no item,
+    // but an unmapped item of the same name to suggest.
+    const fixture = async (n) => {
+      const po = await makePo({ lines: Array.from({ length: n }, (_, k) => ({ qty: 10, unit: "kg", price: 100 + k })) });
+      const items = [];
+      for (const [k, variant] of po.variants.entries()) {
+        const item = await makeItem(variant, { stockUom: "g" });
+        if (k % 2 === 0) {
+          await db.tx((t) => setUomFactor(t, { invItemId: item, uomLabel: "kg", factor: 1000, userId: BUYER }));
+        } else {
+          await db.none(`DELETE FROM tbl_inv_item_variant WHERE hospitality_company_id = $1 AND product_variant_id = $2`, [CO, variant]);
+        }
+        items.push(item);
+      }
+      expect((await recv.get(`/api/v1/inventory/receive/po/${po.poId}`).query({ hotelId: A1 })).status).toBe(200); // plan made
+      return { ...po, items };
+    };
+    const small = await fixture(2);
+    const large = await fixture(6);
+
+    const screen = async (po) => countQueries(() => recv.get(`/api/v1/inventory/receive/po/${po.poId}`).query({ hotelId: A1 }));
+    const smallScreen = await screen(small);
+    const largeScreen = await screen(large);
+    expect(largeScreen.result.status).toBe(200);
+    expect(largeScreen.count).toBe(smallScreen.count);
+
+    // The batched answers are the per-line ones.
+    const ctx = largeScreen.result.body.data;
+    ctx.lines.forEach((line, k) => {
+      expect(line).toMatchObject({
+        poLineId: large.lineIds[k],
+        invItemId: k % 2 === 0 ? large.items[k] : null,
+        stockUom: k % 2 === 0 ? "g" : null,
+        uomFactor: k % 2 === 0 ? 1000 : 1,
+        needsUomFactor: false,
+        costPerPoUnit: 100 + k,
+      });
+      if (k % 2 === 1) {
+        expect(ctx.itemSuggestions[large.lineIds[k]]).toEqual(
+          expect.arrayContaining([expect.objectContaining({ invItemId: large.items[k] })])
+        );
+      } else {
+        expect(ctx.itemSuggestions[large.lineIds[k]]).toBeUndefined();
+      }
+    });
+
+    const post = (po) => countQueries(() => recv.post("/api/v1/inventory/grn")
+      .send(grnInput(po.poId, A1, po.lineIds.map((l) => grnLine(l, 2)))));
+    const smallPost = await post(small);
+    const largePost = await post(large);
+    expect(largePost.result.status).toBe(201);
+    // Count the posting transaction only (BEGIN .. COMMIT around the GRN
+    // insert): that is the work done under the PO row lock. The notices sent
+    // after the commit race the response, so they are not part of the budget.
+    const inPostTx = ({ statements }) => {
+      const grn = statements.findIndex((st) => /^\s*INSERT INTO (public\.)?tbl_grn\s*\(/i.test(st));
+      expect(grn).toBeGreaterThan(-1);
+      let begin = grn;
+      while (begin > 0 && !/^\s*BEGIN/i.test(statements[begin])) begin -= 1;
+      let commit = grn;
+      while (commit < statements.length - 1 && !/^\s*COMMIT/i.test(statements[commit])) commit += 1;
+      return commit - begin + 1;
+    };
+    expect((inPostTx(largePost) - inPostTx(smallPost)) / 4).toBeLessThanOrEqual(8);
+
+    // And what was written is what one write per line wrote: lines in input
+    // order, each allocated, the stock at each line's cost.
+    const grnId = largePost.result.body.data.id;
+    const lines = await db.any(
+      `SELECT gl.id, gl.po_line_id, gl.accepted_qty::float8 AS accepted, gl.stock_qty::float8 AS stock,
+              gl.unit_cost::float8 AS unit_cost, (SELECT SUM(a.accepted_qty)::float8 FROM tbl_grn_line_alloc a WHERE a.grn_line_id = gl.id) AS alloc
+         FROM tbl_grn_line gl WHERE gl.grn_id = $1 ORDER BY gl.id`,
+      [grnId]
+    );
+    expect(lines.map((l) => num(l.po_line_id))).toEqual(large.lineIds);
+    lines.forEach((l, k) => {
+      expect(l).toMatchObject({ accepted: 2, alloc: 2, stock: k % 2 === 0 ? 2000 : 2, unit_cost: k % 2 === 0 ? (100 + k) / 1000 : 100 + k });
+    });
+    expect((await poState(large.poId)).lines.map((l) => l.accepted)).toEqual([2, 2, 2, 2, 2, 2]);
   });
 });
 

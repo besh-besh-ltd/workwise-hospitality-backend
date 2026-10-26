@@ -267,6 +267,17 @@ export async function categoryDefaults(t, companyId, variantIds) {
 // GRN line writes
 // ---------------------------------------------------------------------------
 
+// The per-line values of a GRN line row, in GRN_LINE_COLUMNS order (after id,
+// company, grn and before created_by / updated_by).
+const grnLineValues = (line) => [
+  line.poLineId, line.productVariantId ?? null, line.invItemId ?? null,
+  line.reversesGrnLineId ?? null, String(line.poUom ?? '').slice(0, 99),
+  qStr(line.receivedQ), qStr(line.acceptedQ), qStr(line.rejectedQ), line.rejectionReason ?? null,
+  line.uomFactor ?? null, line.stockQ == null ? null : qStr(line.stockQ), line.unitCost ?? null,
+  line.markOutDepartmentId ?? null, line.batchNo ?? null, line.mfgDate ?? null, line.expiryDate ?? null,
+  line.remarks ?? null,
+];
+
 export async function insertGrnLine(t, { companyId, grnId, userId, line }) {
   const row = await t.one(
     `INSERT INTO tbl_grn_line
@@ -276,16 +287,115 @@ export async function insertGrnLine(t, { companyId, grnId, userId, line }) {
      VALUES ($1, $2, $3, $4, $5, $6, $7, $8::numeric, $9::numeric, $10::numeric, $11, $12, $13, $14,
              $15, $16, $17, $18, $19, $20, $20)
      RETURNING id`,
-    [
-      companyId, grnId, line.poLineId, line.productVariantId ?? null, line.invItemId ?? null,
-      line.reversesGrnLineId ?? null, String(line.poUom ?? '').slice(0, 99),
-      qStr(line.receivedQ), qStr(line.acceptedQ), qStr(line.rejectedQ), line.rejectionReason ?? null,
-      line.uomFactor ?? null, line.stockQ == null ? null : qStr(line.stockQ), line.unitCost ?? null,
-      line.markOutDepartmentId ?? null, line.batchNo ?? null, line.mfgDate ?? null, line.expiryDate ?? null,
-      line.remarks ?? null, userId,
-    ]
+    [companyId, grnId, ...grnLineValues(line), userId]
   );
   return Number(row.id);
+}
+
+/**
+ * insertGrnLine for many lines in one INSERT. The ids are drawn from the
+ * sequence first, so line k gets ids[k] and the lines keep their input order
+ * by id, as one insert per line did.
+ * @returns {Promise<number[]>} the new ids, in input order
+ */
+export async function insertGrnLines(t, { companyId, grnId, userId, lines }) {
+  if (!lines.length) return [];
+  const ids = (await t.any(
+    `SELECT nextval(pg_get_serial_sequence('public.tbl_grn_line', 'id'))::int AS id
+       FROM generate_series(1, $1) ORDER BY 1`,
+    [lines.length]
+  )).map((r) => Number(r.id));
+  const cols = lines.map(grnLineValues);
+  const col = (k) => cols.map((v) => v[k]);
+  await t.none(
+    `INSERT INTO tbl_grn_line
+       (id, hospitality_company_id, grn_id, po_line_id, product_variant_id, inv_item_id, reverses_grn_line_id, po_uom,
+        received_qty, accepted_qty, rejected_qty, rejection_reason, uom_factor, stock_qty, unit_cost,
+        mark_out_department_id, batch_no, mfg_date, expiry_date, remarks, created_by, updated_by)
+     SELECT v.id, $1, $2, v.po_line_id, v.product_variant_id, v.inv_item_id, v.reverses_grn_line_id, v.po_uom,
+            v.received_qty, v.accepted_qty, v.rejected_qty, v.rejection_reason, v.uom_factor, v.stock_qty, v.unit_cost,
+            v.mark_out_department_id, v.batch_no, v.mfg_date::date, v.expiry_date::date, v.remarks, $3, $3
+       FROM unnest($4::int[], $5::int[], $6::int[], $7::int[], $8::int[], $9::text[],
+                   $10::numeric[], $11::numeric[], $12::numeric[], $13::text[], $14::numeric[], $15::numeric[],
+                   $16::numeric[], $17::int[], $18::text[], $19::text[], $20::text[], $21::text[])
+         AS v(id, po_line_id, product_variant_id, inv_item_id, reverses_grn_line_id, po_uom,
+              received_qty, accepted_qty, rejected_qty, rejection_reason, uom_factor, stock_qty, unit_cost,
+              mark_out_department_id, batch_no, mfg_date, expiry_date, remarks)
+      ORDER BY v.id`,
+    [companyId, grnId, userId, ids, ...Array.from({ length: 17 }, (_, k) => col(k))]
+  );
+  return ids;
+}
+
+// ---------------------------------------------------------------------------
+// stock qty of a return or reversal part
+// ---------------------------------------------------------------------------
+
+/**
+ * The stock qty (stock units, 4 dp) of taking `qtyQ` more PO units out of
+ * each receipt line, by a return to vendor or a reversal, so that the parts
+ * of one line never add up to more than it stocked (E1 M-2). Each part is
+ * cumulative, not rounded on its own:
+ *   part = ROUND((before + qty) × factor, 4) − stock already taken out,
+ * and the part that empties the line (before + qty = accepted) takes exactly
+ * what is left of its stock_qty. A part is capped at what is left and is
+ * never below 0. "Before" and "taken out" count dispatched or closed returns
+ * (their RTV_OUT ledger rows) and posted reversals (their lines' stock_qty);
+ * drafts count for neither. In SQL numeric, so 1.0003 × 1.5 is 1.5005.
+ *
+ * factor = the line's uom_factor, else stock_qty / accepted_qty.
+ *
+ * @param {object} t transaction
+ * @param {Array<{grnLineId:number, qtyQ:number}>} lines qtyQ a 1/10000 integer (PO units)
+ * @returns {Promise<Map<number, number|null>>} part per receipt line, a 1/10000
+ *   integer; null when the line has no unit conversion.
+ */
+export async function returnStockParts(t, lines) {
+  if (!lines.length) return new Map();
+  const rows = await t.any(
+    `WITH v AS (
+       SELECT * FROM unnest($1::int[], $2::numeric[]) AS v(grn_line_id, qty)
+     ), base AS (
+       SELECT v.grn_line_id, v.qty, gl.accepted_qty,
+              CASE WHEN gl.uom_factor > 0 THEN gl.uom_factor
+                   WHEN gl.stock_qty > 0 AND gl.accepted_qty > 0 THEN gl.stock_qty / gl.accepted_qty
+              END AS f,
+              gl.stock_qty
+         FROM v JOIN tbl_grn_line gl ON gl.id = v.grn_line_id
+     ), taken AS (
+       SELECT b.*,
+              COALESCE(b.stock_qty, ROUND(b.accepted_qty * b.f, 4)) AS total,
+              COALESCE((SELECT SUM(rl.qty)
+                          FROM tbl_rtv_line rl JOIN tbl_rtv r ON r.id = rl.rtv_id
+                         WHERE rl.grn_line_id = b.grn_line_id AND r.status IN ('dispatched', 'closed')), 0)
+              + COALESCE((SELECT SUM(ABS(x.accepted_qty))
+                            FROM tbl_grn_line x JOIN tbl_grn xg ON xg.id = x.grn_id
+                           WHERE x.reverses_grn_line_id = b.grn_line_id AND xg.doc_type = 'REVERSAL'
+                             AND xg.status <> 'draft'), 0) AS qty_before,
+              COALESCE((SELECT SUM(-m.qty)
+                          FROM tbl_rtv_line rl
+                          JOIN tbl_rtv r ON r.id = rl.rtv_id
+                          JOIN tbl_inv_movement m ON m.source_type = 'RTV' AND m.source_id = r.id
+                                                 AND m.source_line_id = rl.id AND m.movement_type = 'RTV_OUT'
+                         WHERE rl.grn_line_id = b.grn_line_id AND r.status IN ('dispatched', 'closed')), 0)
+              + COALESCE((SELECT SUM(ABS(x.stock_qty))
+                            FROM tbl_grn_line x JOIN tbl_grn xg ON xg.id = x.grn_id
+                           WHERE x.reverses_grn_line_id = b.grn_line_id AND xg.doc_type = 'REVERSAL'
+                             AND xg.status <> 'draft'), 0) AS stock_before
+         FROM base b
+     )
+     SELECT grn_line_id,
+            CASE WHEN f IS NULL THEN NULL
+                 WHEN qty <= 0 THEN 0
+                 ELSE GREATEST(0, LEAST(total - stock_before,
+                        CASE WHEN qty_before + qty >= accepted_qty THEN total
+                             ELSE ROUND((qty_before + qty) * f, 4)
+                        END - stock_before))
+            END::text AS part
+       FROM taken`,
+    [lines.map((l) => l.grnLineId), lines.map((l) => qStr(l.qtyQ))]
+  );
+  return new Map(rows.map((r) => [Number(r.grn_line_id), r.part == null ? null : toQ(r.part)]));
 }
 
 // ---------------------------------------------------------------------------

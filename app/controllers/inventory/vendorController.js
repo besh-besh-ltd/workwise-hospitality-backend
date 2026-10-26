@@ -23,17 +23,26 @@ export const getVendorPoDeliveries = async (req, res) => {
   return res.json({ status: 1, message: 'Deliveries', data });
 };
 
-/** POST /inventory/vendor/po/:poId/dispatches */
+/**
+ * POST /inventory/vendor/po/:poId/dispatches: 201 with the new dispatch, 200
+ * for a replayed clientEventId (the original dispatch plus {replayed:true,
+ * no_op:true}, as /out replays: the activity trail records nothing and no
+ * notice goes out again).
+ */
 export const createDispatch = async (req, res) => {
   let out;
   try {
     out = await db.tx(async (t) => {
       const data = await createDispatchNote(t, req.user, req.params.poId, req.body);
+      if (data.replayed) return { data };
       const scope = await dispatchActivityScope(t, req.params.poId, data.hotelId);
       return { data, scope };
     });
   } catch (err) {
     return sendInventoryError(res, err);
+  }
+  if (out.data.replayed) {
+    return res.status(200).json({ status: 1, message: 'Dispatch already recorded', data: { ...out.data, replayed: true, no_op: true } });
   }
   res.locals.activityDetail = {
     scope: out.scope,

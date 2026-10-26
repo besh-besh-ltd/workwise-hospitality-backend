@@ -199,9 +199,14 @@ export async function mapVariantToItem(t, { companyId, productVariantId, invItem
 const SUGGEST_LIMIT = 5;
 const SUGGEST_MIN_SCORE = 0.3;
 
+// pg_trgm is installed once and stays, so a yes is remembered for the
+// process; a no is asked again (installing it then takes effect at once).
+let trigramInstalled = false;
 async function hasTrigram(t) {
+  if (trigramInstalled) return true;
   const row = await t.one(`SELECT EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'pg_trgm') AS ok`);
-  return row.ok === true;
+  trigramInstalled = row.ok === true;
+  return trigramInstalled;
 }
 
 /** The variant's name (display form) and the item it already maps to, if any. */
@@ -241,20 +246,64 @@ const toSuggestions = (rows) =>
  *   score in [0.3, 1], 3 dp.
  */
 export async function suggestItems(t, { companyId, productVariantId } = {}) {
-  if (!(await hasTrigram(t))) return suggestItemsByWords(t, { companyId, productVariantId });
-  const { company, name, ownItemId } = await variantForSuggestions(t, companyId, productVariantId);
-  if (!name) return [];
+  const company = requireId(companyId, 'companyId', 'company');
+  const variant = requireId(productVariantId, 'productVariantId', 'product variant');
+  return (await suggestItemsForVariants(t, { companyId: company, productVariantIds: [variant] })).get(variant) || [];
+}
+
+/**
+ * suggestItems for many variants of one company (the Receive screen): with
+ * pg_trgm, one query for the names and one for every variant's candidates,
+ * the same filters, order, limit and threshold per variant.
+ *
+ * @returns {Promise<Map<number, Array<{invItemId:number, displayName:string, score:number}>>>}
+ *   by variant id; a variant with no candidates is absent.
+ */
+export async function suggestItemsForVariants(t, { companyId, productVariantIds } = {}) {
+  const company = requireId(companyId, 'companyId', 'company');
+  const ids = [...new Set((productVariantIds || []).map((v) => requireId(v, 'productVariantId', 'product variant')))];
+  const out = new Map();
+  if (!ids.length) return out;
+  if (!(await hasTrigram(t))) {
+    for (const id of ids) {
+      const rows = await suggestItemsByWords(t, { companyId: company, productVariantId: id });
+      if (rows.length) out.set(id, rows);
+    }
+    return out;
+  }
+  const variants = (await t.any(
+    `SELECT pv.id, pv.name,
+            (SELECT iv.inv_item_id FROM tbl_inv_item_variant iv
+              WHERE iv.hospitality_company_id = $1 AND iv.product_variant_id = pv.id) AS own_item_id
+       FROM tbl_product_variant pv WHERE pv.id = ANY($2::int[])`,
+    [company, ids]
+  ))
+    .map((v) => ({ id: Number(v.id), name: normalizeUomLabel(v.name), ownItemId: v.own_item_id == null ? null : Number(v.own_item_id) }))
+    .filter((v) => v.name);
+  if (!variants.length) return out;
   const rows = await t.any(
-    `SELECT id, display_name, similarity(display_name, $2)::float8 AS score
-       FROM tbl_inv_item
-      WHERE hospitality_company_id = $1 AND is_active
-        AND ($3::int IS NULL OR id <> $3)
-        AND similarity(display_name, $2) >= $4
-      ORDER BY score DESC, id
-      LIMIT $5`,
-    [company, name, ownItemId, SUGGEST_MIN_SCORE, SUGGEST_LIMIT]
+    `SELECT v.variant_id, s.id, s.display_name, s.score
+       FROM unnest($2::int[], $3::text[], $4::int[]) AS v(variant_id, name, own_item_id)
+       CROSS JOIN LATERAL (
+         SELECT i.id, i.display_name, similarity(i.display_name, v.name)::float8 AS score
+           FROM tbl_inv_item i
+          WHERE i.hospitality_company_id = $1 AND i.is_active
+            AND (v.own_item_id IS NULL OR i.id <> v.own_item_id)
+            AND similarity(i.display_name, v.name) >= $5
+          ORDER BY score DESC, i.id
+          LIMIT $6
+       ) s
+      ORDER BY v.variant_id, s.score DESC, s.id`,
+    [company, variants.map((v) => v.id), variants.map((v) => v.name), variants.map((v) => v.ownItemId),
+     SUGGEST_MIN_SCORE, SUGGEST_LIMIT]
   );
-  return toSuggestions(rows);
+  for (const r of rows) {
+    const id = Number(r.variant_id);
+    if (!out.has(id)) out.set(id, []);
+    out.get(id).push(r);
+  }
+  for (const [id, list] of out) out.set(id, toSuggestions(list));
+  return out;
 }
 
 /**
@@ -285,4 +334,4 @@ export async function suggestItemsByWords(t, { companyId, productVariantId } = {
   return toSuggestions(rows);
 }
 
-export default { resolveItemForVariant, mapVariantToItem, suggestItems, suggestItemsByWords };
+export default { resolveItemForVariant, mapVariantToItem, suggestItems, suggestItemsForVariants, suggestItemsByWords };

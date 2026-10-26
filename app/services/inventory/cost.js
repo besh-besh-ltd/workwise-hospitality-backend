@@ -66,6 +66,46 @@ function callOffLinePricing(line, quantity) {
   return { lineBase: Number(out.base), gstPct: Number(callOffEngineInput(engineLine).tax) };
 }
 
+const LINE_SQL = `SELECT pop.id, pop.quantity::text AS quantity, pop.unit, pop.unit_price::text AS unit_price,
+            pop.charges_meta, po.is_call_off, cl.gst_pct::text AS contract_gst_pct
+       FROM tbl_purchase_order_product pop
+       JOIN tbl_rfq_purchase_order po ON po.id = pop.purchase_order_id
+       LEFT JOIN tbl_arc_contract_line cl ON cl.id = pop.arc_contract_line_id
+      WHERE pop.id = ANY($1::int[])`;
+
+/** One PO line's cost per PO unit, given the receiving hotel's include-GST setting. */
+function lineCost(line, includeGstInCost) {
+  // Price the line at its real quantity (absolute tax / charges are per line);
+  // a zero-quantity line is priced per one unit instead.
+  const ordered = Number(line.quantity);
+  const quantity = ordered > 0 ? ordered : 1;
+  const { lineBase, gstPct } = line.is_call_off
+    ? callOffLinePricing(line, quantity)
+    : rfqLinePricing(line, quantity);
+  const taxableUnitRate = round6(lineBase / quantity);
+  const gst = Number.isFinite(gstPct) ? gstPct : 0;
+  const costPerPoUnit = round6(includeGstInCost ? taxableUnitRate * (1 + gst / 100) : taxableUnitRate);
+  return { taxableUnitRate, gstPct: gst, costPerPoUnit };
+}
+
+/**
+ * resolvePoLineUnitCost for many lines of one receiving hotel: one line query
+ * and one settings read, the same pricing per line.
+ *
+ * @param {object} t transaction
+ * @param {{poLineIds:number[], hotelId:number, companyId:number}} args
+ * @returns {Promise<Map<number, {taxableUnitRate:number, gstPct:number, costPerPoUnit:number}>>}
+ *   by PO line id; a line that does not exist is absent.
+ */
+export async function resolvePoLineUnitCosts(t, { poLineIds, hotelId, companyId } = {}) {
+  const ids = [...new Set((poLineIds || []).map(positiveInt).filter(Boolean))];
+  if (!ids.length) return new Map();
+  const lines = await t.any(LINE_SQL, [ids]);
+  if (!lines.length) return new Map();
+  const settings = await getEffectiveSettings(t, { companyId, hotelId });
+  return new Map(lines.map((line) => [Number(line.id), lineCost(line, settings.includeGstInCost)]));
+}
+
 /**
  * @param {object} t transaction
  * @param {{poLineId:number, hotelId:number, companyId:number}} args  hotelId is
@@ -80,31 +120,9 @@ function callOffLinePricing(line, quantity) {
 export async function resolvePoLineUnitCost(t, { poLineId, hotelId, companyId } = {}) {
   const id = positiveInt(poLineId);
   if (!id) throw new InventoryError('VALIDATION', 'Invalid PO line', { field: 'poLineId' });
-
-  const line = await t.oneOrNone(
-    `SELECT pop.id, pop.quantity::text AS quantity, pop.unit, pop.unit_price::text AS unit_price,
-            pop.charges_meta, po.is_call_off, cl.gst_pct::text AS contract_gst_pct
-       FROM tbl_purchase_order_product pop
-       JOIN tbl_rfq_purchase_order po ON po.id = pop.purchase_order_id
-       LEFT JOIN tbl_arc_contract_line cl ON cl.id = pop.arc_contract_line_id
-      WHERE pop.id = $1`,
-    [id]
-  );
-  if (!line) throw new InventoryError('NOT_FOUND', 'PO line not found', { poLineId: id });
-
-  // Price the line at its real quantity (absolute tax / charges are per line);
-  // a zero-quantity line is priced per one unit instead.
-  const ordered = Number(line.quantity);
-  const quantity = ordered > 0 ? ordered : 1;
-  const { lineBase, gstPct } = line.is_call_off
-    ? callOffLinePricing(line, quantity)
-    : rfqLinePricing(line, quantity);
-
-  const settings = await getEffectiveSettings(t, { companyId, hotelId });
-  const taxableUnitRate = round6(lineBase / quantity);
-  const gst = Number.isFinite(gstPct) ? gstPct : 0;
-  const costPerPoUnit = round6(settings.includeGstInCost ? taxableUnitRate * (1 + gst / 100) : taxableUnitRate);
-  return { taxableUnitRate, gstPct: gst, costPerPoUnit };
+  const cost = (await resolvePoLineUnitCosts(t, { poLineIds: [id], hotelId, companyId })).get(id);
+  if (!cost) throw new InventoryError('NOT_FOUND', 'PO line not found', { poLineId: id });
+  return cost;
 }
 
-export default { resolvePoLineUnitCost };
+export default { resolvePoLineUnitCost, resolvePoLineUnitCosts };

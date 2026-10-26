@@ -7,9 +7,9 @@ import { InventoryError } from './errors.js';
 import { hotelIdsWithPermission } from './scope.js';
 import { getEffectiveSettings } from './settings.js';
 import { getPoContext, listPoLines, ensureDefaultPlan } from './planCore.js';
-import { suggestItems } from './items.js';
-import { resolveUomFactor } from './uom.js';
-import { resolvePoLineUnitCost } from './cost.js';
+import { suggestItemsForVariants } from './items.js';
+import { uomFactorLookup } from './uom.js';
+import { resolvePoLineUnitCosts } from './cost.js';
 import { loadPlan, capacityFor } from './allocation.js';
 import {
   positiveInt, toQ, qNum, numOrNull, notFound, assertReceivable, assertToken, assertReceiveAccess,
@@ -124,12 +124,23 @@ export async function getReceiveContext(t, user, { poId, hotelId = null } = {}, 
       [itemIds, ctx.companyId]
     )
     : [];
+  // Per-line lookups, batched: unit conversions, costs and item suggestions.
+  const factorOf = await uomFactorLookup(t, [...items.values()]);
+  const costs = hidePrices
+    ? new Map()
+    : await resolvePoLineUnitCosts(t, {
+      poLineIds: poLines.filter((l) => l.productVariantId).map((l) => l.id), hotelId: hotel, companyId: ctx.companyId,
+    });
+  const suggestionsByVariant = await suggestItemsForVariants(t, {
+    companyId: ctx.companyId,
+    productVariantIds: poLines.filter((l) => l.productVariantId && !items.has(l.productVariantId)).map((l) => l.productVariantId),
+  });
 
   for (const l of poLines) {
     const item = l.productVariantId ? items.get(l.productVariantId) : null;
     const cat = defaults.get(l.productVariantId) || { trackExpiry: false, markOutOnArrival: false };
     let uomFactor = null;
-    if (item) uomFactor = await resolveUomFactor(t, { invItemId: Number(item.id), uomLabel: l.unit });
+    if (item) uomFactor = factorOf(item.id, l.unit);
     else if (l.productVariantId) uomFactor = 1; // a new item takes the PO unit as its stock unit
     const tolPct = item?.tol != null ? Number(item.tol) : settings.overReceiptTolerancePct;
     const cap = capacityFor(plan, { poLineId: l.id, hotelId: hotel, orderedQ: toQ(l.orderedQty), tolPct });
@@ -154,12 +165,13 @@ export async function getReceiveContext(t, user, { poId, hotelId = null } = {}, 
         : [],
     };
     if (!hidePrices && l.productVariantId) {
-      const cost = await resolvePoLineUnitCost(t, { poLineId: l.id, hotelId: hotel, companyId: ctx.companyId });
+      const cost = costs.get(l.id);
+      if (!cost) throw new InventoryError('NOT_FOUND', 'PO line not found', { poLineId: l.id });
       line.costPerPoUnit = cost.costPerPoUnit;
     }
     out.lines.push(line);
     if (!item && l.productVariantId) {
-      const suggestions = await suggestItems(t, { companyId: ctx.companyId, productVariantId: l.productVariantId });
+      const suggestions = suggestionsByVariant.get(l.productVariantId) || [];
       if (suggestions.length) {
         out.itemSuggestions[l.id] = suggestions.map((s) => ({ invItemId: s.invItemId, name: s.displayName }));
       }

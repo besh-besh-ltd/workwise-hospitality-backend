@@ -193,6 +193,38 @@ describe("inventory ledger", () => {
   });
 });
 
+describe("receiving indexes and keys (E1)", () => {
+  it("every receiving foreign key that a delete or a lookup checks has an index", async () => {
+    const rows = await db.any(
+      `SELECT indexname, indexdef FROM pg_indexes WHERE schemaname = 'public' AND indexname = ANY($1::text[])`,
+      [[
+        "ix_po_dispatch_line_po_line", "ix_po_dispatch_delivery", "ix_grn_dispatch", "ix_grn_received_by_token",
+        "ix_purchase_order_document_dispatch", "ix_grn_line_inv_item", "ux_po_dispatch_po_client_event",
+      ]]
+    );
+    const def = Object.fromEntries(rows.map((r) => [r.indexname, r.indexdef.replace(/\s+/g, " ")]));
+    expect(def.ix_po_dispatch_line_po_line).toMatch(/ON public\.tbl_po_dispatch_line USING btree \(po_line_id\)$/);
+    expect(def.ix_po_dispatch_delivery).toMatch(/ON public\.tbl_po_dispatch USING btree \(delivery_id\) WHERE \(delivery_id IS NOT NULL\)$/);
+    expect(def.ix_grn_dispatch).toMatch(/ON public\.tbl_grn USING btree \(dispatch_id\) WHERE \(dispatch_id IS NOT NULL\)$/);
+    expect(def.ix_grn_received_by_token)
+      .toMatch(/ON public\.tbl_grn USING btree \(received_by_token_id\) WHERE \(received_by_token_id IS NOT NULL\)$/);
+    expect(def.ix_purchase_order_document_dispatch)
+      .toMatch(/ON public\.tbl_purchase_order_document USING btree \(dispatch_id\) WHERE \(dispatch_id IS NOT NULL\)$/);
+    expect(def.ix_grn_line_inv_item).toMatch(/ON public\.tbl_grn_line USING btree \(inv_item_id\) WHERE \(inv_item_id IS NOT NULL\)$/);
+    // The vendor's create-dispatch idempotency key: unique per PO.
+    expect(def.ux_po_dispatch_po_client_event)
+      .toMatch(/UNIQUE INDEX .* ON public\.tbl_po_dispatch USING btree \(po_id, client_event_id\) WHERE \(client_event_id IS NOT NULL\)$/);
+  });
+
+  it("an RTV records when it was dispatched (roll-up order)", async () => {
+    const col = await db.oneOrNone(
+      `SELECT data_type, is_nullable, column_default FROM information_schema.columns
+        WHERE table_schema = 'public' AND table_name = 'tbl_rtv' AND column_name = 'dispatched_at'`
+    );
+    expect(col).toEqual({ data_type: "timestamp with time zone", is_nullable: "YES", column_default: null });
+  });
+});
+
 describe("inventory permissions and roles", () => {
   it("inventory permissions and roles are seeded", async () => {
     const perms = await db.any(
