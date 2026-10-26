@@ -14,6 +14,7 @@ import { httpClient } from "../helpers/http.js";
 import { getDeliveries, savePlan } from "../../app/services/inventory/planService.js";
 import { createDispatch, getVendorDeliveries } from "../../app/services/inventory/dispatchService.js";
 import { recomputePoReceipt } from "../../app/services/inventory/receiptRollup.js";
+import { getReceiveContext } from "../../app/services/inventory/receiveContext.js";
 import { handleMarkDispatched } from "../../app/models/purchaseOrderModel.js";
 
 const { A1, A2, VENDOR, BUYER } = fx;
@@ -120,6 +121,12 @@ describe("vendor dispatch notes", () => {
     const after = await db.tx((t) => getDeliveries(t, admin, po.poId));
     expect(after.dispatches).toEqual([expect.objectContaining({ id: d.id, phaseNo: 2, status: "in_transit" })]);
     expect(after.planLocked).toBe(true);
+
+    // Receiving against it at the hotel fills in the vendor's paperwork.
+    const receive = await db.tx((t) => getReceiveContext(t, admin, { poId: po.poId, hotelId: A1 }));
+    expect(receive.dispatches).toEqual([expect.objectContaining({
+      id: d.id, challanNo: "DC-778", challanDate: "2030-11-08", ewayBillNo: "EWB-1", vehicleNo: "MH01AB1234",
+    })]);
 
     // The required fields are required.
     const bad = await c.post(`/api/v1/inventory/vendor/po/${po.poId}/dispatches`).send(note({

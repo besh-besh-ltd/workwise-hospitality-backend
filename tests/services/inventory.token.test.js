@@ -505,6 +505,11 @@ describe("token receipts", () => {
     expect(Date.parse(ctx.linkExpiresAt)).toBe(postedAt + 24 * 3600_000);
     expectNoPrices(res.body);
 
+    // The buyer's site-rep panel shows the same date the link shows, not its 14 days.
+    const tab = await admin.get(`/api/v1/inventory/po/${poId}/deliveries`);
+    expect(tab.status).toBe(200);
+    expect(tab.body.data.siteReps).toEqual([expect.objectContaining({ live: true, expiresAt: ctx.linkExpiresAt })]);
+
     const more = await postReceipt(token, receipt([line(l1, 1)]));
     expect(more.status).toBe(409);
     expect(more.body.details).toMatchObject({ reason: "PO_NOT_RECEIVABLE" });

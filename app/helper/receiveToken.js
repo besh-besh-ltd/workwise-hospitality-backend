@@ -53,6 +53,21 @@ export const LIVE_TOKEN_SQL = `
                  '-infinity'::timestamptz) < now() - interval '24 hours'
   )`;
 
+/**
+ * When a link stops working (aliases tl, po), as LIVE_TOKEN_SQL decides it:
+ * its own expiry, or 24 hours after the last posted GRN once the PO is fully
+ * received or short-closed, whichever comes first. Revocation and a dead PO
+ * are not dates; LIVE_TOKEN_SQL covers those.
+ */
+export const TOKEN_EXPIRES_AT_SQL = `
+  LEAST(
+    COALESCE(tl.expires_at, tl.created_at + interval '${RECEIVE_TOKEN_TTL_DAYS} days'),
+    CASE WHEN po.receipt_status IN ('received', 'closed_short')
+         THEN (SELECT MAX(g.posted_at) FROM tbl_grn g WHERE g.po_id = po.id AND g.posted_at IS NOT NULL)
+              + interval '24 hours'
+    END
+  )`;
+
 const TOKEN_COLUMNS = `tl.id, tl.entity_id, tl.hotel_id, tl.name, tl.email, tl.phone, tl.token_type`;
 
 const toTokenRecord = (row, hotelId) => ({

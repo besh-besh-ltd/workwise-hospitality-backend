@@ -191,11 +191,69 @@ export async function getGrnPayload(t, grnId, { hidePrices = false } = {}) {
   };
 }
 
-/** GET /grn/:id — grn.read on the GRN's hotel (else NOT_FOUND). */
+/**
+ * RtvSummary[] (returns to vendor), oldest first: a PO's (the Deliveries tab)
+ * or one receipt's (its GRN page). No prices. No access check: callers check.
+ * @param {{poId?:number, grnId?:number}} by exactly one of them
+ */
+export async function listRtvSummaries(t, { poId = null, grnId = null } = {}) {
+  const rows = await t.any(
+    `SELECT r.id, r.rtv_number, r.grn_id, r.hotel_id, h.name AS hotel_name, r.disposition, r.status,
+            r.challan_no, r.credit_note_ref, r.remarks, r.created_at
+       FROM tbl_rtv r
+       LEFT JOIN tbl_hospitality_company_hotels h ON h.id = r.hotel_id
+      WHERE ${grnId != null ? 'r.grn_id' : 'r.po_id'} = $1
+      ORDER BY r.id`,
+    [grnId != null ? grnId : poId]
+  );
+  if (!rows.length) return [];
+  const lines = await rtvLines(t, rows.map((r) => Number(r.id)));
+  return rows.map((r) => ({
+    id: Number(r.id),
+    rtvNumber: r.rtv_number ?? null,
+    grnId: Number(r.grn_id),
+    hotelId: Number(r.hotel_id),
+    hotelName: r.hotel_name ?? null,
+    disposition: r.disposition,
+    status: r.status,
+    challanNo: r.challan_no ?? null,
+    creditNoteRef: r.credit_note_ref ?? null,
+    remarks: r.remarks ?? null,
+    createdAt: r.created_at ? new Date(r.created_at).toISOString() : null,
+    lines: lines.get(Number(r.id)) || [],
+  }));
+}
+
+async function rtvLines(t, rtvIds) {
+  const rows = await t.any(
+    `SELECT rl.rtv_id, rl.grn_line_id, pv.name AS product_name, rl.qty::text AS qty, rl.reason
+       FROM tbl_rtv_line rl
+       JOIN tbl_grn_line gl ON gl.id = rl.grn_line_id
+       JOIN tbl_purchase_order_product pop ON pop.id = gl.po_line_id
+       LEFT JOIN tbl_rfq_products rp ON rp.id = pop.rfq_product_id
+       LEFT JOIN tbl_product_variant pv ON pv.id = COALESCE(pop.product_variant_id, rp.product_variant_id)
+      WHERE rl.rtv_id = ANY($1::int[])
+      ORDER BY rl.rtv_id, rl.id`,
+    [rtvIds]
+  );
+  const out = new Map();
+  for (const l of rows) {
+    const key = Number(l.rtv_id);
+    if (!out.has(key)) out.set(key, []);
+    out.get(key).push({ grnLineId: Number(l.grn_line_id), productName: l.product_name ?? null, qty: Number(l.qty), reason: l.reason ?? null });
+  }
+  return out;
+}
+
+/** GET /grn/:id — grn.read on the GRN's hotel (else NOT_FOUND); with its rtvs. */
 export async function getGrn(t, user, grnId, { hidePrices = false, viaToken = null } = {}) {
   const grn = await loadGrnRow(t, grnId);
   await assertGrnAccess(t, user, grn, 'read', { viaToken });
-  return getGrnPayload(t, grn.id, { hidePrices: hidePrices || !!viaToken });
+  const payload = await getGrnPayload(t, grn.id, { hidePrices: hidePrices || !!viaToken });
+  if (viaToken) return payload;
+  // Its returns, under the same check: whoever may read the receipt finds
+  // them here, PO visibility or not (the Deliveries tab needs the PO).
+  return { ...payload, rtvs: await listRtvSummaries(t, { grnId: grn.id }) };
 }
 
 /**

@@ -193,7 +193,8 @@ export async function getReceiveContext(t, user, { poId, hotelId = null } = {}, 
 async function inTransitDispatches(t, poId, hotelId) {
   const rows = await t.any(
     `SELECT p.id, p.dispatch_number, p.hotel_id, h.name AS hotel_name, p.delivery_id, d.phase_no, p.status,
-            p.challan_no, p.expected_delivery_date::text AS expected_delivery_date
+            p.challan_no, p.challan_date::text AS challan_date, p.eway_bill_no, p.vehicle_no,
+            p.expected_delivery_date::text AS expected_delivery_date
        FROM tbl_po_dispatch p
        LEFT JOIN tbl_hospitality_company_hotels h ON h.id = p.hotel_id
        LEFT JOIN tbl_po_delivery d ON d.id = p.delivery_id
@@ -221,6 +222,10 @@ async function inTransitDispatches(t, poId, hotelId) {
     phaseNo: numOrNull(r.phase_no),
     status: r.status,
     challanNo: r.challan_no,
+    // The vendor's paperwork, so receiving "against dispatch" fills it in.
+    challanDate: r.challan_date ?? null,
+    ewayBillNo: r.eway_bill_no ?? null,
+    vehicleNo: r.vehicle_no ?? null,
     expectedDeliveryDate: r.expected_delivery_date,
     lines: lines.filter((l) => Number(l.dispatch_id) === Number(r.id))
       .map((l) => ({ poLineId: Number(l.po_line_id), productName: l.product_name ?? null, qty: Number(l.qty) })),

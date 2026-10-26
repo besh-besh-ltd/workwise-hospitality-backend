@@ -30,13 +30,13 @@ import { InventoryError } from './errors.js';
 import { getPoContext, listPoLines, ensureDefaultPlan, defaultDueDate } from './planCore.js';
 import { recomputePoReceipt } from './receiptRollup.js';
 import { hotelIdsWithPermission } from './scope.js';
-import { listGrnSummariesForPo } from './grnRead.js';
+import { listGrnSummariesForPo, listRtvSummaries } from './grnRead.js';
 import { listShortCloses } from './shortCloseService.js';
 import { loadInvoices } from './invoiceService.js';
 import { LEGACY_PO_STATUS_ORDER } from './poStatus.js';
 import { notifyPlanChanged } from './notices/planNotices.js';
 import { RECEIVABLE_PO_STATUSES } from './grnCommon.js';
-import { LIVE_TOKEN_SQL, RECEIVE_TOKEN_TTL_DAYS } from '../../helper/receiveToken.js';
+import { LIVE_TOKEN_SQL, TOKEN_EXPIRES_AT_SQL } from '../../helper/receiveToken.js';
 import { assertPoAccess, assertPoInitiateAccess, canInitiateOnTuple } from '../../models/purchaseOrderModel.js';
 import { writePoDocument } from '../poDocumentService.js';
 import { generateCallOffPoPdf } from '../../helper/arc_v2/callOffPoRenderer.js';
@@ -401,56 +401,6 @@ export async function loadDispatches(t, poId, { dispatchId = null } = {}) {
   }));
 }
 
-/** RtvSummary[] of a PO (B5's tables), oldest first. */
-async function loadRtvSummaries(t, poId) {
-  const rows = await t.any(
-    `SELECT r.id, r.rtv_number, r.grn_id, r.hotel_id, h.name AS hotel_name, r.disposition, r.status,
-            r.challan_no, r.credit_note_ref, r.remarks, r.created_at
-       FROM tbl_rtv r
-       LEFT JOIN tbl_hospitality_company_hotels h ON h.id = r.hotel_id
-      WHERE r.po_id = $1
-      ORDER BY r.id`,
-    [poId]
-  );
-  if (!rows.length) return [];
-  const lines = await rtvLines(t, rows.map((r) => Number(r.id)));
-  return rows.map((r) => ({
-    id: Number(r.id),
-    rtvNumber: r.rtv_number ?? null,
-    grnId: Number(r.grn_id),
-    hotelId: Number(r.hotel_id),
-    hotelName: r.hotel_name ?? null,
-    disposition: r.disposition,
-    status: r.status,
-    challanNo: r.challan_no ?? null,
-    creditNoteRef: r.credit_note_ref ?? null,
-    remarks: r.remarks ?? null,
-    createdAt: r.created_at ? new Date(r.created_at).toISOString() : null,
-    lines: lines.get(Number(r.id)) || [],
-  }));
-}
-
-async function rtvLines(t, rtvIds) {
-  const rows = await t.any(
-    `SELECT rl.rtv_id, rl.grn_line_id, pv.name AS product_name, rl.qty::text AS qty, rl.reason
-       FROM tbl_rtv_line rl
-       JOIN tbl_grn_line gl ON gl.id = rl.grn_line_id
-       JOIN tbl_purchase_order_product pop ON pop.id = gl.po_line_id
-       LEFT JOIN tbl_rfq_products rp ON rp.id = pop.rfq_product_id
-       LEFT JOIN tbl_product_variant pv ON pv.id = COALESCE(pop.product_variant_id, rp.product_variant_id)
-      WHERE rl.rtv_id = ANY($1::int[])
-      ORDER BY rl.rtv_id, rl.id`,
-    [rtvIds]
-  );
-  const out = new Map();
-  for (const l of rows) {
-    const key = Number(l.rtv_id);
-    if (!out.has(key)) out.set(key, []);
-    out.get(key).push({ grnLineId: Number(l.grn_line_id), productName: l.product_name ?? null, qty: Number(l.qty), reason: l.reason ?? null });
-  }
-  return out;
-}
-
 /** The vendor-safe views of the receiving documents: no prices, no buyer staff names. */
 export async function loadVendorDocuments(t, poId) {
   const [grns, rtvs, shortCloses] = await Promise.all([
@@ -462,7 +412,7 @@ export async function loadVendorDocuments(t, poId) {
         ORDER BY g.id`,
       [poId]
     ),
-    loadRtvSummaries(t, poId),
+    listRtvSummaries(t, { poId }),
     listShortCloses(t, poId),
   ]);
   const grnLines = grns.length
@@ -557,13 +507,14 @@ async function canFlags(t, user, tenancy, ctx) {
 
 /**
  * The PO's site-rep receiving links, newest first, without the token: who,
- * where, until when. `live` is LIVE_TOKEN_SQL, the predicate token auth uses;
+ * where, until when (the date the link itself shows: TOKEN_EXPIRES_AT_SQL,
+ * so a fully received PO's 24 h grace too). `live` is LIVE_TOKEN_SQL, the predicate token auth uses;
  * `revoked` means the buyer (or a newer link at that hotel) revoked it.
  */
 async function loadSiteReps(t, poId) {
   const rows = await t.any(
     `SELECT tl.id, tl.name, tl.email, tl.phone, tl.hotel_id, h.name AS hotel_name,
-            COALESCE(tl.expires_at, tl.created_at + interval '${RECEIVE_TOKEN_TTL_DAYS} days') AS expires_at,
+            ${TOKEN_EXPIRES_AT_SQL} AS expires_at,
             tl.last_used_at, tl.created_at,
             (tl.revoked_at IS NOT NULL) AS revoked,
             (${LIVE_TOKEN_SQL}) AS live
@@ -598,7 +549,7 @@ async function buyerPayload(t, user, poId, tenancy) {
     loadPoLineRolls(t, poId),
     listGrnSummariesForPo(t, poId),
     loadDispatches(t, poId),
-    loadRtvSummaries(t, poId),
+    listRtvSummaries(t, { poId }),
     loadInvoices(t, poId),
     listShortCloses(t, poId),
     loadSiteReps(t, poId),

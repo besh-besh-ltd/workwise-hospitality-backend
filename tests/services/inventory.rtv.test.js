@@ -700,7 +700,7 @@ describe("return to vendor", () => {
 // nothing here touches the append-only ledger; dispatch (which posts RTV_OUT)
 // is covered by the service tests above.
 describe("RTV and GRN document over HTTP", () => {
-  const made = { poIds: [], rfqIds: [] };
+  const made = { poIds: [], rfqIds: [], users: [] };
   const prevTypes = [];
   const scopeIds = [];
   const httpUsers = [STORES.id, OTHER_COMPANY.id];
@@ -746,6 +746,10 @@ describe("RTV and GRN document over HTTP", () => {
       await db.none(`DELETE FROM tbl_inv_item WHERE id = $1`, [stockItem.id]);
     }
     await revokeRoleScopes(db, scopeIds);
+    if (made.users.length) {
+      await db.none(`DELETE FROM tbl_activity_events WHERE actor_user_id = ANY($1::int[])`, [made.users]);
+      await db.none(`DELETE FROM tbl_users WHERE id = ANY($1::int[])`, [made.users]);
+    }
     for (const r of prevTypes) {
       await db.none(`UPDATE tbl_users SET user_type = $2 WHERE id = $1`, [r.id, r.user_type]);
     }
@@ -769,6 +773,53 @@ describe("RTV and GRN document over HTTP", () => {
     );
     return { ...po, grnId: Number(grn.id), grnLineId: Number(line.id) };
   }
+
+  it("a receipt's returns come with GET /grn/:id, for a Controller who can't see the PO itself", async () => {
+    // The system Inventory Controller role alone: every grn and inventory key,
+    // no PO (awarding) permission, so the PO's Deliveries tab is not theirs.
+    const CTRL = 81501;
+    const role = await db.one(`SELECT id FROM tbl_roles WHERE title = 'Inventory Controller' AND created_by IS NULL`);
+    let scope = null;
+    try {
+      await db.none(
+        `INSERT INTO tbl_users (id, name, email, status, user_type, company_id) VALUES ($1, 'RTV controller', 'rtv.ctrl.81501@test.local', 1, 2, $2)`,
+        [CTRL, IDS.companies.A]
+      );
+      await db.none(
+        `INSERT INTO tbl_hospitality_user_mappings (user_id, hospitality_company_id, hospitality_hotel_id, mapping_type, created_by)
+         VALUES ($1, $2, $3, 1, $4)`,
+        [CTRL, CO, A1, IDS.users.superAdmin]
+      );
+      scope = await grantRoleScope(db, { userId: CTRL, roleId: role.id, companyId: CO, hotelId: A1 });
+
+      const { poId, grnId, grnLineId } = await committedGrn();
+      const other = await committedGrn(); // another receipt's return is not this one's
+      const client = await httpClient(CTRL);
+      const made1 = await client.post("/api/v1/inventory/rtv").send({
+        grnId, disposition: "REPLACE", remarks: "caps", lines: [{ grnLineId, qty: 4, reason: "damaged" }],
+      });
+      expect(made1.status).toBe(200);
+      const made2 = await client.post("/api/v1/inventory/rtv").send({
+        grnId: other.grnId, disposition: "CREDIT", remarks: "x", lines: [{ grnLineId: other.grnLineId, qty: 1, reason: "damaged" }],
+      });
+      expect(made2.status).toBe(200);
+
+      expect((await client.get(`/api/v1/inventory/po/${poId}/deliveries`)).status).toBe(404);
+      const res = await client.get(`/api/v1/inventory/grn/${grnId}`);
+      expect(res.status).toBe(200);
+      expect(res.body.data.rtvs).toEqual([
+        expect.objectContaining({
+          id: made1.body.data.id, grnId, disposition: "REPLACE", status: "draft",
+          lines: [expect.objectContaining({ grnLineId, qty: 4, reason: "damaged" })],
+        }),
+      ]);
+      expect(JSON.stringify(res.body.data.rtvs)).not.toMatch(/cost|price|value|rate/i);
+    } finally {
+      await revokeRoleScopes(db, scope ? [scope] : []);
+      await db.none(`DELETE FROM tbl_hospitality_user_mappings WHERE user_id = $1`, [CTRL]);
+      made.users.push(CTRL); // removed after its RTVs (afterAll)
+    }
+  });
 
   it("GET /grn/:id/pdf renders the posted GRN; other companies get 404, drafts 409", async () => {
     const { grnId } = await committedGrn();

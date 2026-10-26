@@ -37,7 +37,7 @@ import {
   SITE_REP_ACTOR,
 } from './grnService.js';
 import { getPoContext, listPoLines } from './planCore.js';
-import { RECEIVE_TOKEN_TTL_DAYS } from '../../helper/receiveToken.js';
+import { TOKEN_EXPIRES_AT_SQL } from '../../helper/receiveToken.js';
 import { redactForReceiveToken } from '../../helper/receiveTokenView.js';
 
 // camelCase keys naming a buyer user: postedBy, postedByName, receivedBy,
@@ -152,13 +152,7 @@ const isNotReceivable = (err) =>
  */
 async function linkExpiresAt(t, tokenId, poId) {
   const row = await t.one(
-    `SELECT LEAST(
-              COALESCE(tl.expires_at, tl.created_at + interval '${RECEIVE_TOKEN_TTL_DAYS} days'),
-              CASE WHEN po.receipt_status IN ('received', 'closed_short')
-                   THEN (SELECT MAX(g.posted_at) FROM tbl_grn g WHERE g.po_id = po.id AND g.posted_at IS NOT NULL)
-                        + interval '24 hours'
-              END
-            ) AS expires_at
+    `SELECT ${TOKEN_EXPIRES_AT_SQL} AS expires_at
        FROM tbl_token_login_data tl
        JOIN tbl_rfq_purchase_order po ON po.id = tl.entity_id
       WHERE tl.id = $1 AND tl.entity_id = $2`,
