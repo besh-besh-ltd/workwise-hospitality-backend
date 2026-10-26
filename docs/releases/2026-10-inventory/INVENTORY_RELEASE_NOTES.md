@@ -1,8 +1,9 @@
 # Inventory module: release notes (October 2026)
 
-Backend and frontend branch `feat/inventory-management`. Design:
-`docs/superpowers/specs/2026-10-23-inventory-management-design.md`. Plan:
-`docs/superpowers/plans/2026-10-24-inventory-management.md`.
+Backend and frontend branch `feat/inventory-management`. The design
+(`2026-10-23-inventory-management-design.md`) and plan
+(`2026-10-24-inventory-management.md`) are in the workspace's
+`docs/superpowers/`, not in this repository.
 
 ## What it does
 
