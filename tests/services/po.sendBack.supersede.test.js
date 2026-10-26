@@ -393,7 +393,7 @@ async function finalizeAgain(staged, vendor = S.VENDOR_B) {
   return (await world.client(S.CREATOR)).post("/api/v1/rfq/finalize").send({
     rfq_id: staged.rfq.id, rfq_no: staged.rfq.rfq_no,
     product_variant_id: staged.product.product_variant_id, variant: staged.product.variant,
-    vendor_id: vendor, quote_id: item.id, quote_item_id: item.id,
+    vendor_id: vendor, quote_id: staged.quotes[vendor], quote_item_id: item.id,
     route_type: "PO", comment: "award it to the other vendor",
     total_value: 25000,
     product_info: {

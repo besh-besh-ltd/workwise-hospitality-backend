@@ -23,6 +23,11 @@ import { deriveScope } from "./poDashboardController.js";
 import { handleCallOffRejection, notifyCallOffRejected } from "../../services/callOffPoService.js";
 import { deferJson, isDeferred, sendDeferred } from "../../helper/deferredResponse.js";
 import { poFieldsFor } from "../../services/po/buyerOnlyPoFields.js";
+import { normalizeOwnS3Url } from "../../helper/s3Urls.js";
+import { InventoryError, sendInventoryError } from "../../services/inventory/errors.js";
+import { redactForReceiveToken } from "../../helper/receiveTokenView.js";
+import { fillDefaultDueDates, acceptanceDatesFollowUp, queuePlanChangeFollowUp } from "../../services/inventory/planService.js";
+import { bindPoPayload, awardQuoteNotFound } from "../../services/po/awardQuoteBinding.js";
 
 // Tiny tagged-error class for controllers that need to map a thrown
 // failure mode to a specific HTTP status code (instead of the historic
@@ -155,8 +160,11 @@ export const getPODetails = async (req, res) => {
 
         // Vendors and GRN token users get the row without buyer-only fields
         // (replaces_po_id: the rejected PO this one re-awards, often another
-        // vendor's).
-        const result = poFieldsFor(req.user, await getPODetailsById(po_id, id));
+        // vendor's; site_rep(s): who holds receive links). A token holder gets
+        // less again: no prices, taxes or totals at any depth, no buyer
+        // contacts, no priced documents (redactForReceiveToken).
+        const row = poFieldsFor(req.user, await getPODetailsById(po_id, id));
+        const result = req.user.is_token_user ? redactForReceiveToken(row) : row;
 
         // Additively merge the new contract-shaped detail-full object under a
         // `detail` key so the new PO Detail page can consume the structured
@@ -280,6 +288,16 @@ export const updatePO = async (req, res) => {
 /**
  * Replaces product_info.charges_meta with authoritative values from tbl_quote_items.
  * Prevents frontend normalization or stale data from corrupting PO charges.
+ *
+ * The quote line is bound to the payload's RFQ, product and vendor first
+ * (bindPoPayload) and a refusal propagates: the read below copies that line's
+ * pricing into the PO, so it must never run for another RFQ's or another
+ * vendor's line.
+ *
+ * There is no "use the payload as-is" fallback any more. A missing line or a
+ * failed read used to return the caller's payload untouched, so the PO line was
+ * priced from the request body's unit_price and charges; both now throw, and
+ * the caller's transaction drafts nothing.
  */
 export const buildAuthoritativePOPayload = async (poInfo, txn) => {
   const dbCtx = txn || db;
@@ -289,76 +307,76 @@ export const buildAuthoritativePOPayload = async (poInfo, txn) => {
     return poInfo;
   }
 
-  try {
-    const dbRow = await dbCtx.oneOrNone(
-      `SELECT qi.freight_price, qi.freight_mode,
-              qi.package_price, qi.package_mode,
-              qi.tax, qi.tax_mode,
-              qi.other_charges,
-              qi.unit_price,
-              qi.pricing_method, qi.entered_mrp,
-              qi.mrp_discount, qi.mrp_discount_mode
-       FROM tbl_quote_items qi
-       WHERE qi.id = $1`,
-      [quoteItemId]
-    );
+  await bindPoPayload(dbCtx, poInfo);
 
-    if (!dbRow) {
-      logger.warn(`buildAuthoritativePOPayload: Quote item ${quoteItemId} not found, using payload as-is`);
-      return poInfo;
-    }
+  const dbRow = await dbCtx.oneOrNone(
+    `SELECT qi.freight_price, qi.freight_mode,
+            qi.package_price, qi.package_mode,
+            qi.tax, qi.tax_mode,
+            qi.other_charges,
+            qi.unit_price,
+            qi.pricing_method, qi.entered_mrp,
+            qi.mrp_discount, qi.mrp_discount_mode
+     FROM tbl_quote_items qi
+     WHERE qi.id = $1`,
+    [quoteItemId]
+  );
 
-    // unit_price is money and must come from the quote the vendor actually
-    // submitted, not from the request body. The award payload carries a
-    // client-supplied unit_price (rfqValidation requires it) which nothing
-    // downstream re-checked, so a stale or altered value would flow straight
-    // into the PO line and its printed PDF — both of which recompute from
-    // unit_price rather than from any stored total.
-    let unitPrice = dbRow.unit_price;
+  // bindPoPayload has just read this row, so only a concurrent delete gets
+  // here. Refuse rather than price the line from the request body.
+  if (!dbRow) throw awardQuoteNotFound();
 
-    // MRP (tax-inclusive) lines: tbl_quote_items.unit_price is a numeric(15,2)
-    // column, so the stored exclusive rate is a rounded echo of a repeating
-    // decimal and pricing the PO from it reintroduces the per-unit drift.
-    // Re-derive it at full precision from the audit inputs the vendor actually
-    // entered. tbl_purchase_order_product.unit_price is unconstrained numeric,
-    // so the exact rate persists — which is what keeps every later PO recompute
-    // (PO edit, and the PDF, both of which re-run the engine off unit_price)
-    // reproducing "MRP less discount x qty" to the paisa without needing MRP
-    // columns on the PO tables at all.
-    if (dbRow.pricing_method === 'MRP' && Number(dbRow.entered_mrp) > 0) {
-      unitPrice = deriveMrpLine({
-        mrp: dbRow.entered_mrp,
-        discount: dbRow.mrp_discount,
-        discount_mode: dbRow.mrp_discount_mode,
-        gst_pct: dbRow.tax,
-      }).base;
-    }
+  // unit_price is money and must come from the quote the vendor actually
+  // submitted, not from the request body. The award payload carries a
+  // client-supplied unit_price (rfqValidation requires it) which nothing
+  // downstream re-checked, so a stale or altered value would flow straight
+  // into the PO line and its printed PDF — both of which recompute from
+  // unit_price rather than from any stored total.
+  let unitPrice = dbRow.unit_price;
 
-    return {
-      ...poInfo,
-      product_info: {
-        ...poInfo.product_info,
-        unit_price: unitPrice,
-        charges_meta: {
-          freight_price: dbRow.freight_price,
-          freight_mode: dbRow.freight_mode,
-          package_price: dbRow.package_price,
-          package_mode: dbRow.package_mode,
-          tax: dbRow.tax,
-          // GST on an MRP line is always a percentage extracted from within the
-          // price — force it so the PO can never be priced with an absolute tax.
-          tax_mode: dbRow.pricing_method === 'MRP' ? 'percentage' : dbRow.tax_mode,
-          other_charges: dbRow.other_charges || []
-        }
-      }
-    };
-  } catch (err) {
-    logError('buildAuthoritativePOPayload error, using payload as-is:', err);
-    return poInfo;
+  // MRP (tax-inclusive) lines: tbl_quote_items.unit_price is a numeric(15,2)
+  // column, so the stored exclusive rate is a rounded echo of a repeating
+  // decimal and pricing the PO from it reintroduces the per-unit drift.
+  // Re-derive it at full precision from the audit inputs the vendor actually
+  // entered. tbl_purchase_order_product.unit_price is unconstrained numeric,
+  // so the exact rate persists — which is what keeps every later PO recompute
+  // (PO edit, and the PDF, both of which re-run the engine off unit_price)
+  // reproducing "MRP less discount x qty" to the paisa without needing MRP
+  // columns on the PO tables at all.
+  if (dbRow.pricing_method === 'MRP' && Number(dbRow.entered_mrp) > 0) {
+    unitPrice = deriveMrpLine({
+      mrp: dbRow.entered_mrp,
+      discount: dbRow.mrp_discount,
+      discount_mode: dbRow.mrp_discount_mode,
+      gst_pct: dbRow.tax,
+    }).base;
   }
+
+  return {
+    ...poInfo,
+    product_info: {
+      ...poInfo.product_info,
+      unit_price: unitPrice,
+      charges_meta: {
+        freight_price: dbRow.freight_price,
+        freight_mode: dbRow.freight_mode,
+        package_price: dbRow.package_price,
+        package_mode: dbRow.package_mode,
+        tax: dbRow.tax,
+        // GST on an MRP line is always a percentage extracted from within the
+        // price — force it so the PO can never be priced with an absolute tax.
+        tax_mode: dbRow.pricing_method === 'MRP' ? 'percentage' : dbRow.tax_mode,
+        other_charges: dbRow.other_charges || []
+      }
+    }
+  };
 };
 
-export const draftPO = async (poInfo, user, txn) => {
+/**
+ * @param {object} [opts] passed to draftPurchaseOrder; `staleTargetFallback`
+ *   for an award whose approval has already committed.
+ */
+export const draftPO = async (poInfo, user, txn, opts = {}) => {
   try {
     const { rfq_id, project_id, product_info, quote_item_id, existing_po_id, selected_hierarchy } = poInfo;
     const { id: initiated_by, company_id } = user;
@@ -366,6 +384,12 @@ export const draftPO = async (poInfo, user, txn) => {
     if (!rfq_id || !product_info || !product_info.rfq_product_id) {
       throw new Error('Missing required PO fields.');
     }
+
+    // Every PO line is drafted from a quote line bound to this RFQ, product and
+    // vendor, whoever the caller is (finalize, an approval replaying a parked
+    // payload, the negotiation award). The global charges read below and the
+    // line written by draftPurchaseOrder both key on it.
+    await bindPoPayload(txn || db, poInfo);
 
     // Server-authoritative recompute: ignore the client's total_value and
     // derive it from the engine using the charges_meta that will actually
@@ -421,7 +445,8 @@ export const draftPO = async (poInfo, user, txn) => {
       selected_hierarchy,
       txn,
       globalCharges,
-      line_total
+      line_total,
+      opts
     );
 
     return result;
@@ -1301,6 +1326,7 @@ export const acceptPO = async (req, res) => {
     const { po_id } = req.params;
     const vendorUserId = req.user.id;
 
+    let planDated = 0;
     const result = await db.tx(async t => {
       // F-PO-IDEM-001: split the lookup into its three failure modes so the
       // caller can distinguish (404 not-found / 403 wrong-vendor / 409
@@ -1330,6 +1356,15 @@ export const acceptPO = async (req, res) => {
         SET status = 'approved', vendor_action_at = NOW(), updated_at = NOW()
         WHERE id = $1
       `, [po_id]);
+
+      // Delivery plan (inventory): an untouched default plan gets its due
+      // date now that the delivery period runs from today. In a savepoint, so
+      // a plan problem can never cost the vendor their acceptance.
+      try {
+        planDated = await t.tx((sp) => fillDefaultDueDates(sp, po.id));
+      } catch (planErr) {
+        logError(`[po ${po.id}] delivery plan dates at acceptance failed`, planErr);
+      }
 
       await recordLifecycleEvent({
         entity_type: 'PO',
@@ -1361,6 +1396,10 @@ export const acceptPO = async (req, res) => {
     sendPOAcceptedNotificationToTeam(result, rfqDetails).catch(err => {
       logError('Failed to send PO accepted notification to team', err);
     });
+
+    // The plan just got its dates: the PO document prints them. Rewritten in
+    // the background (never rejects); no plan notice, the vendor just accepted.
+    if (planDated > 0) queuePlanChangeFollowUp(acceptanceDatesFollowUp(result, vendorUserId));
 
     return res.json({
       status: 1,
@@ -1537,18 +1576,45 @@ export const updateHSNForProduct = async (req, res) => {
 
 export const raiseInvoice = async (req, res) => {
   try {
-    const { po_id, invoice_url } = req.body;
+    const { po_id, invoice_url, invoice_number, invoice_date, invoice_amount, dispatch_id } = req.body;
     const { id } = req.user;
 
     if (!(await guardPo(req, res, po_id))) return;
 
-    const result = await handleRaiseInvoice(po_id, invoice_url, id);
+    // Only a file we stored: a pasted third-party link would be emailed to the
+    // buyer team and shown on the PO as "the invoice". The normalized href is
+    // what gets stored.
+    const invoiceHref = normalizeOwnS3Url(invoice_url);
+    if (!invoiceHref) {
+      return res.status(400).json({
+        status: 0,
+        message: 'Please upload the invoice again: the file link is not one of ours.',
+        code: 'INVALID_DOCUMENT_URL',
+      });
+    }
+
+    // Number, date, amount and the dispatch it bills (inventory C4); a body
+    // without them is the legacy file-only invoice.
+    const { document, scope, details } = await handleRaiseInvoice(
+      po_id, invoiceHref, id, { invoice_number, invoice_date, invoice_amount, dispatch_id }, req.user
+    );
+    // Scope from the PO row (call-off POs have no RFQ for the registry's PO lookup).
+    res.locals.activityDetail = {
+      scope,
+      metadata: {
+        invoiceNumber: details.invoiceNumber,
+        invoiceDate: details.invoiceDate,
+        invoiceAmount: details.invoiceAmount,
+        dispatchId: details.dispatchId,
+      },
+    };
     return res.json({
       status: 1,
       message: 'Invoice has been raised for this PO.',
-      data: result
+      data: document
     });
   } catch (error) {
+    if (error instanceof InventoryError) return sendInventoryError(res, error);
     logError('raiseInvoice failed', error);
     return res.status(500).json({
       status: 0,
@@ -1569,13 +1635,15 @@ export const markGRN = async (req, res) => {
     // is bound to exactly this po_id).
     if (!(await guardPo(req, res, po_id))) return;
 
-    const result = await handleMarkGRN(po_id, grn_document_url, id, remarks);
+    const result = await handleMarkGRN(po_id, grn_document_url, id, remarks, req.user);
     return res.json({
       status: 1,
       message: 'GRN has been marked for this PO.',
       data: result
     });
   } catch (error) {
+    // The shim's refusals (409 USE_RECEIVE, nothing open, no grn.create, …).
+    if (error?.name === 'InventoryError') return sendInventoryError(res, error);
     logError('markGRN failed', error);
     return res.status(500).json({
       status: 0,
@@ -1599,6 +1667,8 @@ export const markDispatched = async (req, res) => {
       data: result
     });
   } catch (error) {
+    // Refusals from the dispatch service (PO not accepted, closed, received in full).
+    if (error?.name === 'InventoryError') return sendInventoryError(res, error);
     logError('markDispatched failed', error);
     return res.status(500).json({
       status: 0,
@@ -1609,29 +1679,40 @@ export const markDispatched = async (req, res) => {
 };
 
 export const addSiteRepresentative = async (req, res) => {
+  // This endpoint mints a GRN receiving link and EMAILS it to a caller-supplied
+  // address, so it hands receiving rights at a hotel to someone outside the
+  // system. handleAddSiteRepresentative gates it on PO visibility (404) AND
+  // grn.create at the link's hotel (403).
+  let result;
   try {
-    const { po_id, name, email, phone } = req.body;
-    const { id, company_id } = req.user;
-
-    // This endpoint mints a GRN login token and EMAILS it to a caller-supplied
-    // address. Without a tenant gate, any authenticated user could hand a
-    // third party standing access to another tenant's purchase order.
-    if (!(await guardPo(req, res, po_id))) return;
-
-    const result = await handleAddSiteRepresentative(po_id, id, name, email, phone);
-    return res.json({
-      status: 1,
-      message: 'Site Rep has been added for this PO',
-      data: result
-    });
+    const { po_id, hotel_id, name, email, phone } = req.body || {};
+    result = await handleAddSiteRepresentative(req.user, { po_id, hotel_id, name, email, phone });
   } catch (error) {
-    logError('addSiteRepresentative failed', error);
-    return res.status(500).json({
-      status: 0,
-      message: error.message || 'An error occurred while approving the PO.',
-      error
-    });
+    return sendInventoryError(res, error);
   }
+
+  // Activity trail: "Site rep link issued", filed under the link's hotel. Who
+  // the link went to stays out of the trail (it names an outsider's email).
+  res.locals.activityDetail = {
+    scope: {
+      hospitalityCompanyId: result.companyId,
+      hotelId: result.hotelId,
+      entityLabel: result.poNumber,
+    },
+    metadata: {
+      token_id: result.siteRep?.id ?? null,
+      revoked_token_ids: result.revokedIds,
+      email_sent: result.emailSent,
+    },
+  };
+
+  return res.json({
+    status: 1,
+    message: result.emailSent
+      ? 'Site representative added. The receiving link has been emailed to them.'
+      : 'Site representative added, but the email could not be sent. Please send the link again.',
+    data: { ...result.siteRep, email_sent: result.emailSent },
+  });
 };
 
 // ---------------------------------------------------------------------------
@@ -1660,9 +1741,11 @@ export const getMilestonesController = async (req, res) => {
 
 export const createMilestoneController = async (req, res) => {
   try {
-    if (!(await guardPo(req, res, req.body?.po_id))) return;
+    const po = await guardPo(req, res, req.body?.po_id);
+    if (!po) return;
 
-    let milestone = await createMilestone(req.body, req.user);
+    // rfq_id is the PO's own (NULL for a call-off PO), never the body's.
+    let milestone = await createMilestone(req.body, req.user, po);
     if(milestone) {
       await scheduleMilestoneReminder(milestone)
     };
@@ -1724,9 +1807,10 @@ export const getTasksController = async (req, res) => {
 
 export const createTaskController = async (req, res) => {
   try {
-    if (!(await guardPo(req, res, req.body?.po_id))) return;
+    const po = await guardPo(req, res, req.body?.po_id);
+    if (!po) return;
 
-    const milestone = await createTask(req.body, req.user);
+    const milestone = await createTask(req.body, req.user, po);
 
     return res.status(201).json({ success: true, data: milestone });
   } catch (error) {

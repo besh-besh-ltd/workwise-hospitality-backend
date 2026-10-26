@@ -28,10 +28,11 @@ import generalModel, {
   checkIfUserIsFinalApprover,
   getApprovalPolicyTenant,
   getApprovalInstanceTenant,
-  getApprovalProcessTenant
+  getApprovalProcessTenant,
+  ENTITY_APPROVE_RESOURCE_MAP
 } from '../../models/generalModel.js';
-import { resolveHospitalityCompanyScope } from '../../helper/arc_v2/resolveHospitalityCompany.js';
 import { executeApprovalAction } from '../../services/approvalActionService.js';
+import { ApprovalInstanceNotFoundError } from '../../services/approvalTargetOwner.js';
 import { PoDecisionError } from '../../services/poApprovalService.js';
 import { stageLabel } from '../../services/notificationLinks.js';
 import {
@@ -53,6 +54,7 @@ import { AVAILABLE_HIERARCHY_TYPES } from '../../util/constants.js';
 import { initiatePurchaseOrder } from '../../models/purchaseOrderModel.js';
 import db from '../../config/dbConn.js';
 import { requestIsCompanyAdmin } from '../../middleware/companyAdmin.js';
+import { resolveApprovalCompanyScope, inCompanyScope } from '../../services/approvalTenantScope.js';
 import {
   listDelegations,
   findOverlappingDelegation,
@@ -399,72 +401,11 @@ const generalController = {
 // ===========================================================================
 // Tenant scope for the approval endpoints.
 // ---------------------------------------------------------------------------
-// Every handler below derives its company scope from req.user via these two
-// helpers. A client-supplied `hospitality_company_id` may only NARROW the
-// result; it can never widen it.
+// Every handler below derives its company scope from req.user via
+// resolveApprovalCompanyScope / inCompanyScope (services/approvalTenantScope.js,
+// shared with the RFQ and ARC approval routes). A client-supplied
+// `hospitality_company_id` may only NARROW the result; it can never widen it.
 // ===========================================================================
-
-/**
- * Companies this request may read approval config for.
- *   null      → super admin (user_type 8): every company.
- *   number[]  → exactly these companies ([] = no access).
- *
- * resolveHospitalityCompanyScope() reads tbl_hospitality_user_mappings and
- * already refuses client widening for non-admins. Two active production
- * buyers (358, 407) carry RBAC role scopes but no hospitality mapping row, so
- * we union in tbl_user_role_scopes.company_id — still derived entirely from
- * req.user, and it keeps those users from losing their own tenant's policies.
- */
-async function resolveApprovalCompanyScope(req) {
-  // Memoised per request: several handlers below need the scope more than once
-  // (guard + mutation-target resolution) and it costs two queries to build.
-  if (req.__approvalCompanyScope !== undefined) return req.__approvalCompanyScope;
-
-  const scope = await computeApprovalCompanyScope(req);
-  req.__approvalCompanyScope = scope;
-  return scope;
-}
-
-async function computeApprovalCompanyScope(req) {
-  const mapped = await resolveHospitalityCompanyScope(req);
-  if (mapped === null) return null; // super admin (user_type 8)
-
-  const scoped = (await db.any(
-    `SELECT DISTINCT company_id
-       FROM tbl_user_role_scopes
-      WHERE user_id = $1 AND company_id IS NOT NULL`,
-    [req.user?.id || null]
-  )).map((r) => Number(r.company_id));
-
-  // Company admins own every business unit under their OWN parent buyer
-  // company and may carry NEITHER a hospitality mapping NOR an RBAC role scope
-  // — verified in production: all three legacy user_type-7 users have zero rows
-  // in both tables. Without this union the scope collapses to [] for the only
-  // role that may reach the Approval Wizard, so it could neither list nor save
-  // a single policy.
-  //
-  // Keyed on the capability rather than on user_type 7, or an administrator
-  // promoted the new way — an ordinary buyer holding company.admin — would fall
-  // through to whatever scope they happened to hold as a buyer, which is
-  // precisely the estate they were promoted to see beyond.
-  //
-  // tbl_users.company_id is loaded from the DB by the jwtUsr strategy, so this
-  // is still derived entirely from req.user — never from a header or the body.
-  // It is the same tenancy edge hospitalityController.js enforces everywhere as
-  // `record.buyer_company_id !== company.id`.
-  let administered = [];
-  if ((await requestIsCompanyAdmin(req)) && req.user?.company_id) {
-    administered = (await db.any(
-      `SELECT id
-         FROM tbl_hospitality_companies
-        WHERE buyer_company_id = $1
-          AND COALESCE(is_deleted, 0) = 0`,
-      [Number(req.user.company_id)]
-    )).map((r) => Number(r.id));
-  }
-
-  return [...new Set([...(mapped || []), ...scoped, ...administered])];
-}
 
 /**
  * The companies a stuck-approvals request may read.
@@ -483,12 +424,6 @@ async function resolveStuckScope(req, scopeIds) {
   return rows.map((r) => Number(r.id));
 }
 
-/** True when `companyId` is inside the request's server-derived scope. */
-function inCompanyScope(scopeIds, companyId) {
-  if (scopeIds === null) return true; // super admin
-  if (companyId === null || companyId === undefined) return false;
-  return scopeIds.includes(Number(companyId));
-}
 
 /**
  * Resolve a policy id to its owning company and 404 when it belongs to another
@@ -503,6 +438,25 @@ async function guardPolicyTenant(req, res, policyId) {
   }
   return tenant;
 }
+
+// Entity types POST /hospitality/approval/submit refuses: every instance type
+// the engine accepts (createApprovalInstance rejects anything else).
+//
+// Each one is opened by its own server workflow (RFQ/TENDER publish, TECHNICAL
+// and NEGOTIATION rounds, finalize and submit-for-approval for
+// NEGOTIATION_QUOTE, PO initiate, MR, the ARC v2 stages), and that workflow is
+// what checks the entity belongs to the caller's tenant and writes the metadata
+// the post-approval handler later trusts. This route did neither: an instance
+// could name ANY entity_id with ANY metadata, so a NEGOTIATION_QUOTE forged on
+// another company's product with a self-consistent po_payload, once approved
+// by the caller's own approver, drafted a PO on that company's RFQ priced from
+// its vendor; a forged RFQ instance published another company's RFQ.
+//
+// No screen calls this route (frontend, admin panel and mobile searched for
+// `approval/submit`, 2026-10-25: no caller). A type added to the engine later
+// is refused here by default; opening one through this route would first need
+// an entity-tenant check and handlers that trust no caller-written metadata.
+const SERVER_OWNED_APPROVAL_TYPES = new Set(Object.keys(ENTITY_APPROVE_RESOURCE_MAP));
 
 /** Same as guardPolicyTenant, for approval instances. */
 async function guardInstanceTenant(req, res, instanceId) {
@@ -1274,6 +1228,17 @@ const hospitalityApprovalController = {
         });
       }
 
+      // Server-owned approval types are opened by their own workflow only
+      // (see SERVER_OWNED_APPROVAL_TYPES). Refused before anything is read.
+      const normalizedType = String(entity_type).trim().toUpperCase();
+      if (SERVER_OWNED_APPROVAL_TYPES.has(normalizedType)) {
+        return res.status(403).json({
+          status: 3,
+          code: 'APPROVAL_TYPE_SERVER_OWNED',
+          message: `${normalizedType} approvals are opened by their own workflow, not through this route.`
+        });
+      }
+
       // SECURITY (P0, cross-tenant WRITE): hospitality_company_id was taken
       // from the request body, so a caller could open an approval instance
       // inside another tenant — binding that tenant's approvers to an entity
@@ -1345,6 +1310,12 @@ const hospitalityApprovalController = {
         });
       }
 
+      // Tenant first: an instance of another company answers exactly like one
+      // that does not exist (404), before the engine says anything about it.
+      // The engine's own answers (already decided, not an approver, an award
+      // that does not bind) are only for callers inside the instance's company.
+      if (!(await guardInstanceTenant(req, res, parseInt(approval_instance_id)))) return;
+
       // executeApprovalAction wraps submitApprovalAction and centrally dispatches
       // entity-specific post-approval handlers (RFQ, TENDER, TECHNICAL, PO, ARC,
       // NEGOTIATION, NEGOTIATION_QUOTE) via the registry in approvalActionService.
@@ -1364,6 +1335,11 @@ const hospitalityApprovalController = {
 
       res.json({ status: 1, data: result });
     } catch (e) {
+      // An instance whose target is another company's (the engine refuses it
+      // before recording anything): the same answer as an unknown id.
+      if (e instanceof ApprovalInstanceNotFoundError) {
+        return res.status(404).json({ status: 2, message: 'Approval instance not found' });
+      }
       // A refused PO rejection (unknown reason, a route that is not available,
       // a stale approval) answers with its own status and code, like the PO page.
       if (e instanceof PoDecisionError) {

@@ -16,6 +16,7 @@
 import { describe, it, expect, afterAll } from "@jest/globals";
 import { db, closeDb } from "../setup/db.js";
 import { allReports } from "../../app/services/reports/definitions/index.js";
+import { INVENTORY_REPORT_FAMILIES } from "../../app/services/reports/inventoryReportKit.js";
 
 afterAll(async () => {
   await closeDb();
@@ -47,7 +48,7 @@ describe("reports permission catalogue", () => {
     // permission with no report is an orphan in the admin picker.
     expect([...registryKeys].filter((k) => !seededKeys.has(k))).toEqual([]);
     expect([...seededKeys].filter((k) => !registryKeys.has(k))).toEqual([]);
-    expect(seededKeys.size).toBe(16);
+    expect(seededKeys.size).toBe(26);
   });
 
   it("matches each report's declared permission string", async () => {
@@ -60,7 +61,8 @@ describe("reports permission catalogue", () => {
 describe("who the migrations grant it to", () => {
   it("gives Company Administrator the whole catalogue", async () => {
     const held = await permissionsOf("Company Administrator");
-    expect(held.size).toBe(16);
+    expect(held.size).toBe(26);
+    expect(held.has("stock_on_hand")).toBe(true);
     expect(held.has("approval_audit_trail")).toBe(true);
     expect(held.has("po_rejections")).toBe(true);
   });
@@ -102,7 +104,18 @@ describe("who the migrations grant it to", () => {
         GROUP BY r.title
         ORDER BY r.title`
     );
-    // Precisely two roles, and nothing acquired reports by accident.
-    expect(rows.map((r) => r.title).sort()).toEqual(["Company Administrator", "Report Download"]);
+    // Precisely these roles, and nothing acquired reports by accident.
+    // Inventory Controller holds the ten inventory report keys only.
+    expect(rows.map((r) => r.title).sort()).toEqual([
+      "Company Administrator",
+      "Inventory Controller",
+      "Report Download",
+    ]);
+    const inventoryKeys = allReports()
+      .filter((d) => INVENTORY_REPORT_FAMILIES.includes(d.family))
+      .map((d) => d.key);
+    expect(inventoryKeys).toHaveLength(10);
+    const controller = await permissionsOf("Inventory Controller");
+    expect([...controller].sort()).toEqual(inventoryKeys.sort());
   });
 });

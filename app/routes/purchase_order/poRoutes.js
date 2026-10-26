@@ -9,6 +9,7 @@ import passport from '../../middleware/passport.js';
 import { acl, noAcl } from "../../helper/common.js";
 import auth from "../../middleware/auth.js";
 import hospitalityMiddleware from '../../middleware/hospitality.js';
+import { requireOwnS3Urls } from '../../helper/s3Urls.js';
 
 const passportSignIn = passport.authenticate('jwtUsr', { session: false });
 
@@ -136,7 +137,8 @@ PORoutes.post('/updateHSN/:po_id', passportSignIn, noAcl([3]), updateHSNForProdu
 PORoutes.post('/raiseInvoice', passportSignIn, acl([3]), hospitalityMiddleware.requireActiveSubscriptionForIssuedPo, raiseInvoice);
 PORoutes.post('/markDispatched', passportSignIn, acl([3]), hospitalityMiddleware.requireActiveSubscriptionForIssuedPo, markDispatched);
 PORoutes.post('/addSiteRepresentative', passportSignIn, noAcl([3]), addSiteRepresentative);
-PORoutes.post('/markGRN', auth.authUserOrGRNToken, noAcl([3]), markGRN);
+// The GRN document must be a file we stored (helper/s3Urls.js), checked before the handler.
+PORoutes.post('/markGRN', auth.authUserOrGRNToken, noAcl([3]), requireOwnS3Urls('grn_document_url'), markGRN);
 
 // Milestone + Task routes. Deliberately NOT noAcl([3]): the vendor Order Book
 // creates and edits milestones on its own POs (components/dashboard/vendor/

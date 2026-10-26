@@ -20,7 +20,10 @@ import { IDS } from "../fixtures/ids.js";
 import { makeRFQ } from "../factories/rfq.js";
 import { httpClient } from "../helpers/http.js";
 
-const BUYER = IDS.users.a1_proc_buyer;
+// A buyer (tender creator, procurement) on BOTH A-1 and A-2. The direct-draft
+// path below lives on A-2, and finalize now refuses a caller who cannot read
+// the RFQ (assertCanReadParentRfq), so an A-1-only buyer gets a 403 there.
+const BUYER = IDS.users.multiHotel;
 let VARIANT_A = 1;
 let VARIANT_B = 2;
 
@@ -152,7 +155,7 @@ async function makeAwardableRfq({ variants, hotel, process }) {
        RETURNING id`,
       [rfq_id, rfq_no, q.id, variant]
     );
-    products.push({ rfq_product_id: rp.id, variant, quote_item_id: qi.id });
+    products.push({ rfq_product_id: rp.id, variant, quote_id: q.id, quote_item_id: qi.id });
   }
   return { rfq_id, rfq_no, products };
 }
@@ -161,7 +164,7 @@ async function finalize({ rfq_id, rfq_no }, p) {
   const client = await httpClient(BUYER);
   return client.post("/api/v1/rfq/finalize").send({
     rfq_id, rfq_no, product_variant_id: p.variant, variant: 0,
-    vendor_id: IDS.users.vendor_alpha, quote_id: p.quote_item_id, quote_item_id: p.quote_item_id,
+    vendor_id: IDS.users.vendor_alpha, quote_id: p.quote_id, quote_item_id: p.quote_item_id,
     route_type: "PO", comment: "awarding for the line-variant test",
     total_value: 50000,
     // The shape quote-compare.js posts. It carries no variant — the line has

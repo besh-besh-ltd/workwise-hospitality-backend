@@ -396,6 +396,28 @@ export const approvalActionUrl = (entityType, entityId, ctx = {}, opts = {}) => 
   }
 };
 
+// ─── Inventory ───────────────────────────────────────────────────────────────
+
+export const inventoryGrn = (id) =>
+  isPositiveId(id) ? `/dashboard/buyer/inventory/grn/${enc(id)}` : null;
+
+/** The PO page's Deliveries tab (buyer). */
+export const inventoryPoDeliveries = (poId) =>
+  isPositiveId(poId) ? `/dashboard/buyer/purchase-orders/${enc(poId)}?tab=deliveries` : null;
+
+export const inventoryAdjustment = (id) =>
+  isPositiveId(id) ? `/dashboard/buyer/inventory/adjustments?id=${enc(id)}` : null;
+
+export const inventoryCount = (id) =>
+  isPositiveId(id) ? `/dashboard/buyer/inventory/counts/${enc(id)}` : null;
+
+export const inventoryReorder = (hotelId) =>
+  isPositiveId(hotelId) ? `/dashboard/buyer/inventory/reorder?hotelId=${enc(hotelId)}` : null;
+
+/** The PO page's Deliveries tab (vendor). */
+export const vendorPoDeliveries = (poId) =>
+  isPositiveId(poId) ? `/dashboard/vendor/purchase-orders/${enc(poId)}?tab=deliveries` : null;
+
 // ─── Absolutiser (emails only) ───────────────────────────────────────────────
 
 /**
@@ -429,6 +451,12 @@ export default {
   buyerPoApproval,
   vendorPoDetail,
   vendorPoList,
+  inventoryGrn,
+  inventoryPoDeliveries,
+  inventoryAdjustment,
+  inventoryCount,
+  inventoryReorder,
+  vendorPoDeliveries,
   buyerArcDetail,
   buyerArcList,
   arcVendorContract,

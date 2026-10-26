@@ -175,7 +175,8 @@ async function makeFinalizableRfq() {
 }
 
 // Seed a vendor's quote line for the product. Returns the quote_item id, which
-// finalize carries as both quote_id and quote_item_id from the FE.
+// finalize carries as quote_item_id; its quote_id is the line's PARENT quote
+// (parentQuoteOf below), as the comparison screen sends it.
 async function plantQuote(rfq_id, rfq_no, vendorId, unitPrice) {
   await db.none(
     `INSERT INTO tbl_rfq_product_vendors (rfq_id, product_variant_id, user_id, variant)
@@ -196,8 +197,14 @@ async function plantQuote(rfq_id, rfq_no, vendorId, unitPrice) {
      RETURNING id`,
     [rfq_id, rfq_no, q.id, VARIANT_A, unitPrice, unitPrice * 100]
   );
+  parentQuoteOf.set(qi.id, q.id);
   return qi.id;
 }
+
+// quote line id -> its tbl_quotes id. finalize's `quote_id` is the PARENT
+// quote (what the comparison screen sends, and what tbl_quote_finalization
+// stores); it is bound to the quote line, so it has to be the real one.
+const parentQuoteOf = new Map();
 
 // Configure technical evaluation for one product and seed per-vendor verdicts.
 // verdicts: [{ vendorId, status, score }] — status 1 = passed, 0 = failed.
@@ -285,7 +292,7 @@ function finalizeBody({ rfq_id, rfq_no, vendorId, quoteItemId }) {
     product_variant_id: VARIANT_A,
     variant: 0,
     vendor_id: vendorId,
-    quote_id: quoteItemId,
+    quote_id: parentQuoteOf.get(quoteItemId),
     quote_item_id: quoteItemId,
     route_type: "PO",
     comment: "awarding this vendor after evaluation",

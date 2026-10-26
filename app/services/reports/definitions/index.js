@@ -34,6 +34,16 @@ import approvalAuditTrail from "./approvalAuditTrail.js";
 import poAgingByApprover from "./poAgingByApprover.js";
 import poApprovalTat from "./poApprovalTat.js";
 import rejectedPoLog from "./rejectedPoLog.js";
+import stockOnHand from "./stockOnHand.js";
+import stockLedger from "./stockLedger.js";
+import consumptionByDepartment from "./consumptionByDepartment.js";
+import stockAdjustments from "./stockAdjustments.js";
+import countVariance from "./countVariance.js";
+import slowMoving from "./slowMoving.js";
+import nearExpiry from "./nearExpiry.js";
+import grnRegister from "./grnRegister.js";
+import pendingDeliveries from "./pendingDeliveries.js";
+import vendorDeliveryPerformance from "./vendorDeliveryPerformance.js";
 
 /** A report that is declared but not yet runnable. */
 const stub = (def) => ({ filters: [], ...def });
@@ -121,6 +131,20 @@ const DEFINITIONS = [
 
   // ── 3.6 Operational KPIs ─────────────────────────────────────────────────
   poApprovalTat,
+
+  // ── 7 Inventory (hotel stores; scoped by inventory.read) ─────────────────
+  stockOnHand,
+  stockLedger,
+  consumptionByDepartment,
+  stockAdjustments,
+  countVariance,
+  slowMoving,
+  nearExpiry,
+
+  // ── 8 Receiving & Deliveries (scoped by grn.read) ────────────────────────
+  grnRegister,
+  pendingDeliveries,
+  vendorDeliveryPerformance,
 ];
 
 const BY_KEY = new Map(DEFINITIONS.map((d) => [d.key, d]));

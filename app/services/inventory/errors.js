@@ -1,0 +1,95 @@
+// Typed refusals for the inventory module, and the one place that turns them
+// into HTTP answers.
+//
+// Services throw InventoryError inside db.tx (the throw rolls the transaction
+// back); controllers catch AFTER the transaction and call sendInventoryError,
+// so no response is ever sent from inside a transaction (check:tx-response).
+//
+// Envelope for a refusal: HTTP 4xx + {status, message, code, details}, where
+// status follows the house codes (backend CLAUDE.md): 2 for NOT_FOUND (as
+// PoAccessError → 404 {status:2}), 0 for every other business refusal.
+// Business failures always carry a 4xx code: the frontend axios interceptor
+// unwraps response.data, so a 200 {status:0} would read as success. 403, not
+// 401, for "not allowed" (401 opens the session-expired modal).
+
+import { logError } from '../../helper/common.js';
+import { logger } from '../../util/logger.js';
+
+/** Postgres numeric_value_out_of_range: a value too large for its numeric / integer column. */
+const PG_NUMERIC_OUT_OF_RANGE = '22003';
+
+/** HTTP status for each code, used when the thrower does not pass one. */
+export const INVENTORY_ERROR_STATUS = Object.freeze({
+  NOT_FOUND: 404, // missing, foreign or out-of-scope record
+  FORBIDDEN: 403, // a record the caller can see, an action they lack
+  VALIDATION: 400,
+  NEGATIVE_STOCK: 409,
+  OVER_RECEIPT: 409,
+  LOCKED: 409, // e.g. plan locked, count freeze
+  CONFLICT: 409,
+});
+
+export class InventoryError extends Error {
+  /**
+   * @param {keyof typeof INVENTORY_ERROR_STATUS|string} code
+   * @param {string} message  safe to show to the user
+   * @param {object} [details] structured context for the UI (ids, quantities)
+   * @param {number} [httpStatus] defaults to the code's status, else 400
+   */
+  constructor(code, message, details = {}, httpStatus = INVENTORY_ERROR_STATUS[code] ?? 400) {
+    super(message);
+    this.name = 'InventoryError';
+    this.code = code;
+    this.details = details ?? {};
+    this.httpStatus = httpStatus;
+  }
+}
+
+/**
+ * Answer a request that failed, the way the house sendError does:
+ * - InventoryError → its HTTP status, {status, message, code, details}
+ *   (status 2 for NOT_FOUND, else 0);
+ * - PoAccessError (assertPoAccess) → 404 {status:2, message:'Not found'};
+ * - PoWritePermissionError (assertPoInitiateAccess) → 403 {status:0, message, code};
+ * - AuthorizationError (authorizationService) → its .status, {status:0, message, code};
+ * - a Postgres 22003 (numeric_value_out_of_range: a number too large for its
+ *   column) → 400 VALIDATION {status:0, message, code, details:{}}. The
+ *   services cap their inputs and name the line; this is the backstop for a
+ *   number that got past them, so it is logged as a warning, never a 500;
+ * - anything else is logged and answered 500 {status:3, message:'Something
+ *   went wrong'} (internals never reach the client).
+ *
+ * The PO and authorization errors are recognised by name, not instanceof:
+ * importing purchaseOrderModel here would hang the whole PO model graph
+ * (cron, mail, approvals) off every inventory service, and would close an
+ * import cycle once the legacy markGRN shim in purchaseOrderModel calls the
+ * inventory services. Each name is declared exactly once in app/.
+ */
+export function sendInventoryError(res, err) {
+  if (err instanceof InventoryError) {
+    return res.status(err.httpStatus).json({
+      status: err.code === 'NOT_FOUND' ? 2 : 0,
+      message: err.message,
+      code: err.code,
+      details: err.details,
+    });
+  }
+  switch (err instanceof Error ? err.name : null) {
+    case 'PoAccessError':
+      return res.status(404).json({ status: 2, message: 'Not found' });
+    case 'PoWritePermissionError':
+      return res.status(403).json({ status: 0, message: err.message, code: err.code });
+    case 'AuthorizationError':
+      return res.status(err.status || 403).json({ status: 0, message: err.message, code: err.code });
+    default:
+      break;
+  }
+  if (err?.code === PG_NUMERIC_OUT_OF_RANGE) {
+    logger.warn({ err: err.message }, '[inventory] a number too large for its column reached the database');
+    return res.status(400).json({ status: 0, message: 'A number is too large to record', code: 'VALIDATION', details: {} });
+  }
+  logError('inventory request failed', err);
+  return res.status(500).json({ status: 3, message: 'Something went wrong' });
+}
+
+export default { InventoryError, sendInventoryError, INVENTORY_ERROR_STATUS };

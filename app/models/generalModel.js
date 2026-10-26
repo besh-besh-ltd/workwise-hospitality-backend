@@ -173,6 +173,7 @@ import { logError } from '../helper/common.js';
 import { NoApprovalPolicyError } from '../services/authorizationService.js';
 import { applyDelegations } from './approvalDelegationModel.js';
 import { notifyApprovalChanged } from '../services/approvalEvents.js';
+import { refusesForeignTarget } from '../services/approvalTargetOwner.js';
 
 const generalModel = {
   // 25-05-2025 Mukul jatav
@@ -4043,11 +4044,18 @@ export async function cancelApprovalInstance(instance_id, cancelled_by, reason =
   const outcome = await db.tx(async t => {
     // A PO's approval: lock the PO row before the instance, the order every
     // PO decision and hold uses, so a hold cannot open or close under us.
+    //
+    // Only a PO of the instance's own company (SEC1): an instance forged on
+    // another company's PO is cancelled like any other, but neither locks
+    // that PO nor closes its hold, which belongs to that company's approval.
     const peek = await t.oneOrNone(
-      `SELECT entity_type, entity_id FROM tbl_approval_instances WHERE id = $1`,
+      `SELECT id, entity_type, entity_id, metadata, hospitality_company_id
+         FROM tbl_approval_instances WHERE id = $1`,
       [instance_id]
     );
-    if (peek?.entity_type === 'PO') {
+    const ownPo = peek?.entity_type === 'PO'
+      && !(await refusesForeignTarget(t, peek, 'cancelApprovalInstance'));
+    if (ownPo) {
       await t.oneOrNone(`SELECT id FROM tbl_rfq_purchase_order WHERE id = $1 FOR UPDATE`, [peek.entity_id]);
     }
 
@@ -4091,7 +4099,7 @@ export async function cancelApprovalInstance(instance_id, cancelled_by, reason =
     `, [instance_id, cancelled_by, reason ? `[CANCELLED] ${reason}` : '[CANCELLED]']);
 
     // A hold on this PO's approval ends with it (the PO row is locked above).
-    if (instance.entity_type === 'PO' && peek?.entity_type === 'PO') {
+    if (instance.entity_type === 'PO' && ownPo) {
       await closeOpenHoldTx(t, {
         poId: Number(instance.entity_id),
         status: 'SUPERSEDED',

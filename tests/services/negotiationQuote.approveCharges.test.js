@@ -466,7 +466,7 @@ describe("POST /rfq/finalize — wrong-vendor re-finalize guard", () => {
       params: {},
       body: {
         rfq_id: rfq.id, rfq_no: rfq.rfq_no, product_variant_id: 1, variant: 0,
-        vendor_id: IDS.users.vendor_beta, quote_id: qiB.id, quote_item_id: qiB.id,
+        vendor_id: IDS.users.vendor_beta, quote_id: quoteB.id, quote_item_id: qiB.id,
         route_type: "PO", comment: "switch to B",
       },
     };

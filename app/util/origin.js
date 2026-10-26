@@ -27,8 +27,12 @@ const origin = (app) => {
     );
     res.setHeader(
       'Access-Control-Allow-Headers',
-      'Content-Type, Authorization, LoginType, RefererUrl, AccessToken, appVersion'
+      'Content-Type, Authorization, LoginType, RefererUrl, AccessToken, appVersion, X-Receive-Token'
     );
+    // Readable by cross-origin JS: a 429 says how long to wait (the receive
+    // link's rate limit). A route that sets its own list (excelKit's
+    // Content-Disposition) replaces this on that response only.
+    res.setHeader('Access-Control-Expose-Headers', 'Retry-After');
     next();
   });
 };

@@ -206,7 +206,10 @@ describe("call-off document with an unknown supplier state", () => {
   it("a no-GSTIN vendor's call-off renders exactly as before networks", async () => {
     const po = await releaseCallOff(legContractId, legLineId, H_MH, "LEG");
     const ctx = await loadCallOffPoContext(po.id);
-    expect(renderCallOffPoHtml(ctx)).toMatchSnapshot();
+    expect(ctx.qr_svg).toMatch(/^<svg/);
+    // The inventory QR (it encodes the PO id) and delivery plan are additions of
+    // their own (inventory §7.4); without them the document is byte for byte as before.
+    expect(renderCallOffPoHtml({ ...ctx, qr_svg: null, delivery_plan: null })).toMatchSnapshot();
   });
 });
 

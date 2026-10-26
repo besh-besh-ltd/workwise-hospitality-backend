@@ -1,0 +1,109 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8" />
+<title>Item labels</title>
+<!--
+  Item label sheet (spec §10.1), rendered by labelService.renderLabelsHtml and
+  printed through the shared Chromium renderer. Self-contained: inline CSS,
+  QR codes as inline SVG, system fonts only (the renderer waits for
+  domcontentloaded, so nothing may be fetched).
+
+  One .sheet per printed page; the layout object sets the page size, the grid
+  and the label geometry (A4 65-up, A4 24-up, 50x25 mm thermal).
+
+  Each item's QR is drawn once, as a <symbol> in the hidden defs block, and
+  every label of that item <use>s it: a 1000-label job carries one drawing
+  per item instead of one per label.
+-->
+<style>
+  @page { size: {{layout.pageSize}}; margin: 0; }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { width: {{layout.pageWidth}}; }
+  body {
+    font-family: Helvetica, Arial, sans-serif;
+    color: #000;
+    -webkit-print-color-adjust: exact;
+    print-color-adjust: exact;
+  }
+  .sheet {
+    width: {{layout.pageWidth}};
+    height: {{layout.pageHeight}};
+    padding: {{layout.marginTop}} 0 0 {{layout.marginLeft}};
+    display: grid;
+    grid-template-columns: repeat({{layout.cols}}, {{layout.labelWidth}});
+    grid-auto-rows: {{layout.labelHeight}};
+    column-gap: {{layout.colGap}};
+    row-gap: {{layout.rowGap}};
+    align-content: start;
+    overflow: hidden;
+    break-after: page;
+    page-break-after: always;
+  }
+  .sheet:last-child { break-after: auto; page-break-after: auto; }
+  .label {
+    width: {{layout.labelWidth}};
+    height: {{layout.labelHeight}};
+    padding: {{layout.padding}};
+    display: flex;
+    align-items: center;
+    gap: {{layout.gap}};
+    overflow: hidden;
+  }
+  .qr {
+    /* bwip-js draws no quiet zone; QR readers need ~4 modules of white. */
+    flex: 0 0 {{layout.qrSize}};
+    width: {{layout.qrSize}};
+    height: {{layout.qrSize}};
+    padding: {{layout.qrQuiet}};
+    background: #fff;
+  }
+  .qr svg { display: block; width: 100%; height: 100%; }
+  /* Not display:none: Chromium may skip painting symbols inside it. */
+  .qr-defs { position: absolute; width: 0; height: 0; overflow: hidden; }
+  .text {
+    flex: 1 1 auto;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    font-size: {{layout.fontSize}};
+    line-height: 1.15;
+  }
+  .name {
+    font-weight: 700;
+    display: -webkit-box;
+    -webkit-line-clamp: {{layout.nameLines}};
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+    word-break: break-word;
+  }
+  .meta { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .code { font-family: "Courier New", Courier, monospace; font-weight: 700; }
+</style>
+</head>
+<body>
+<svg class="qr-defs" xmlns="http://www.w3.org/2000/svg" aria-hidden="true" focusable="false">
+  <defs>
+    {{#each symbols}}<symbol id="{{id}}" viewBox="{{viewBox}}">{{{body}}}</symbol>
+    {{/each}}
+  </defs>
+</svg>
+{{#each sheets}}
+<div class="sheet">
+  {{#each labels}}
+  <div class="label">
+    <div class="qr"><svg viewBox="{{qr.viewBox}}" xmlns="http://www.w3.org/2000/svg"><use href="#{{qr.id}}"/></svg></div>
+    <div class="text">
+      <div class="name">{{name}}</div>
+      {{#if itemCode}}<div class="meta code">{{itemCode}}</div>{{/if}}
+      <div class="meta">{{stockUom}}{{#if binLabel}} · Bin {{binLabel}}{{/if}}</div>
+      {{#if batchNo}}<div class="meta">Batch {{batchNo}}</div>{{/if}}
+      {{#if expiry}}<div class="meta">Exp {{expiry}}</div>{{/if}}
+    </div>
+  </div>
+  {{/each}}
+</div>
+{{/each}}
+</body>
+</html>

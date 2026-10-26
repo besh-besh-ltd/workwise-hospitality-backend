@@ -184,8 +184,9 @@ async function makeAwardableRfq() {
 }
 
 // Seed a vendor's quote for the product. Returns BOTH ids: submit-for-approval
-// with quote_source 'regular' keys on tbl_quotes.id, while the approval
-// metadata and PO drafting key on the quote item.
+// with quote_source 'regular' keys on tbl_quotes.id, and so does the
+// selected_quotes metadata it parks (quote_id = tbl_quotes.id, which approval
+// binds to this RFQ product); PO drafting keys on the quote item.
 async function plantQuote(rfq_id, rfq_no, vendorId, unitPrice) {
   await db.none(
     `INSERT INTO tbl_rfq_product_vendors (rfq_id, product_variant_id, user_id, variant)
@@ -250,7 +251,7 @@ async function stagePendingApproval(rfq_id, rfq_no, rfq_product_id, selected) {
       rfq_product_id,
       is_tender: 0,
       selected_quotes: selected.map((s) => ({
-        quote_id: s.quoteItemId,
+        quote_id: s.quoteId,
         vendor_id: s.vendorId,
         quoted_price: s.price,
       })),
@@ -442,10 +443,10 @@ describe("POST /negotiation/quotes/:rfq_product_id/approve — technical-evaluat
   it("REFUSES a technically failed vendor, writes no award row, and leaves the approval PENDING", async () => {
     const { rfq_id, rfq_no, rfq_product_id } = await makeAwardableRfq();
     const failed = IDS.users.vendor_alpha;
-    const { quoteItemId } = await plantQuote(rfq_id, rfq_no, failed, 500);
+    const { quoteId } = await plantQuote(rfq_id, rfq_no, failed, 500);
     await seedProductTech(rfq_id, rfq_product_id, [{ vendorId: failed, status: 0, score: 20 }], 50);
     const instanceId = await stagePendingApproval(rfq_id, rfq_no, rfq_product_id, [
-      { vendorId: failed, quoteItemId, price: 500 },
+      { vendorId: failed, quoteId, price: 500 },
     ]);
 
     const client = await httpClient(APPROVER);
@@ -470,10 +471,10 @@ describe("POST /negotiation/quotes/:rfq_product_id/approve — technical-evaluat
   it("AWARDS a technically passed vendor", async () => {
     const { rfq_id, rfq_no, rfq_product_id } = await makeAwardableRfq();
     const passed = IDS.users.vendor_alpha;
-    const { quoteItemId } = await plantQuote(rfq_id, rfq_no, passed, 500);
+    const { quoteId } = await plantQuote(rfq_id, rfq_no, passed, 500);
     await seedProductTech(rfq_id, rfq_product_id, [{ vendorId: passed, status: 1, score: 80 }], 50);
     const instanceId = await stagePendingApproval(rfq_id, rfq_no, rfq_product_id, [
-      { vendorId: passed, quoteItemId, price: 500 },
+      { vendorId: passed, quoteId, price: 500 },
     ]);
 
     const client = await httpClient(APPROVER);
@@ -502,7 +503,7 @@ describe("POST /negotiation/quotes/:rfq_product_id/approve — technical-evaluat
   it("AWARDS on an RFQ with NO technical evaluation configured at all", async () => {
     const { rfq_id, rfq_no, rfq_product_id } = await makeAwardableRfq();
     const vendor = IDS.users.vendor_alpha;
-    const { quoteItemId } = await plantQuote(rfq_id, rfq_no, vendor, 500);
+    const { quoteId } = await plantQuote(rfq_id, rfq_no, vendor, 500);
     // Deliberately NO seedProductTech.
     const techRows = await db.one(
       `SELECT COUNT(*)::int AS n FROM tbl_rfq_product_tech_evaluation WHERE rfq_id = $1`,
@@ -511,7 +512,7 @@ describe("POST /negotiation/quotes/:rfq_product_id/approve — technical-evaluat
     expect(techRows.n).toBe(0); // fixture precondition, not the assertion
 
     const instanceId = await stagePendingApproval(rfq_id, rfq_no, rfq_product_id, [
-      { vendorId: vendor, quoteItemId, price: 500 },
+      { vendorId: vendor, quoteId, price: 500 },
     ]);
 
     const client = await httpClient(APPROVER);
@@ -537,8 +538,8 @@ describe("POST /negotiation/quotes/:rfq_product_id/approve — technical-evaluat
       50
     );
     const instanceId = await stagePendingApproval(rfq_id, rfq_no, rfq_product_id, [
-      { vendorId: passed, quoteItemId: a.quoteItemId, price: 500 },
-      { vendorId: failed, quoteItemId: b.quoteItemId, price: 450 },
+      { vendorId: passed, quoteId: a.quoteId, price: 500 },
+      { vendorId: failed, quoteId: b.quoteId, price: 450 },
     ]);
 
     const client = await httpClient(APPROVER);
@@ -562,10 +563,10 @@ describe("POST /negotiation/quotes/:rfq_product_id/approve — technical-evaluat
   it("REFUSES a vendor whose verdict flipped to failed AFTER the quotes were submitted for approval", async () => {
     const { rfq_id, rfq_no, rfq_product_id } = await makeAwardableRfq();
     const vendor = IDS.users.vendor_alpha;
-    const { quoteItemId } = await plantQuote(rfq_id, rfq_no, vendor, 500);
+    const { quoteId } = await plantQuote(rfq_id, rfq_no, vendor, 500);
     const teId = await seedProductTech(rfq_id, rfq_product_id, [{ vendorId: vendor, status: 1, score: 80 }], 50);
     const instanceId = await stagePendingApproval(rfq_id, rfq_no, rfq_product_id, [
-      { vendorId: vendor, quoteItemId, price: 500 },
+      { vendorId: vendor, quoteId, price: 500 },
     ]);
 
     // ...evaluation is revisited and this vendor is failed.
