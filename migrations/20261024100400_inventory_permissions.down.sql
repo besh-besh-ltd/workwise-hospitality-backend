@@ -31,22 +31,28 @@ BEGIN
   END IF;
 END $$;
 
--- Step 1: the two system roles, their assignments and grants.
-DELETE FROM public.tbl_user_role_scopes urs
- USING public.tbl_roles r
- WHERE urs.role_id = r.id
-   AND r.created_by IS NULL
-   AND r.title IN ('Storekeeper', 'Inventory Controller');
-
-DELETE FROM public.tbl_role_permissions rp
- USING public.tbl_roles r
- WHERE rp.role_id = r.id
-   AND r.created_by IS NULL
-   AND r.title IN ('Storekeeper', 'Inventory Controller');
-
-DELETE FROM public.tbl_roles r
- WHERE r.created_by IS NULL
-   AND r.title IN ('Storekeeper', 'Inventory Controller');
+-- Step 1: the two system roles, their assignments and grants. Users lose
+-- these role assignments: the notice says how many, so the operator sees it.
+DO $$
+DECLARE n_scopes INTEGER; n_users INTEGER; n_grants INTEGER; n_roles INTEGER;
+BEGIN
+  SELECT count(*), count(DISTINCT urs.user_id) INTO n_scopes, n_users
+    FROM public.tbl_user_role_scopes urs
+    JOIN public.tbl_roles r ON r.id = urs.role_id
+   WHERE r.created_by IS NULL AND r.title IN ('Storekeeper', 'Inventory Controller');
+  DELETE FROM public.tbl_user_role_scopes urs USING public.tbl_roles r
+   WHERE urs.role_id = r.id AND r.created_by IS NULL
+     AND r.title IN ('Storekeeper', 'Inventory Controller');
+  DELETE FROM public.tbl_role_permissions rp USING public.tbl_roles r
+   WHERE rp.role_id = r.id AND r.created_by IS NULL
+     AND r.title IN ('Storekeeper', 'Inventory Controller');
+  GET DIAGNOSTICS n_grants = ROW_COUNT;
+  DELETE FROM public.tbl_roles r
+   WHERE r.created_by IS NULL AND r.title IN ('Storekeeper', 'Inventory Controller');
+  GET DIAGNOSTICS n_roles = ROW_COUNT;
+  RAISE NOTICE 'inventory roles removed: % role(s), % grant(s), % user role assignment(s) across % user(s)',
+    n_roles, n_grants, n_scopes, n_users;
+END $$;
 
 -- Step 2: every remaining grant of the new keys (Company Administrator, the
 -- awarding.create holders, any custom role an admin granted them to), then the

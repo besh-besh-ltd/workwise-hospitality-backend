@@ -11,14 +11,23 @@
 --     overdue, reorder on_order and vendor OTIF, and listed under "Older POs".
 --
 -- Re-run safety: a PO that already has a delivery plan or a GRN went through
--- the new flow and is never relabelled, so running this again after R1 is a
--- no-op for every post-R1 PO. updated_at is deliberately left alone: this is
--- a classification, not an edit anybody made.
+-- the new flow and is never relabelled. Re-run the backfill block once right
+-- after the new backend is healthy: it then also flags POs the old code moved
+-- to GRN between this migration and the deploy (else they would be received
+-- a second time). Do not re-run it later: by then a post-R1 PO with no plan
+-- (submitted under old code, or whose plan creation failed) would be wrongly
+-- flagged legacy. updated_at is deliberately left alone: this is a
+-- classification, not an edit anybody made. One audit row per PO
+-- (tbl_rfq_purchase_order's trigger): apply at a quiet hour.
 --
 -- tests/services/inventory.schema.test.js executes the statements between the
 -- `-- backfill` and `-- end backfill` marker lines below. Keep the markers.
 
+-- A lock wait longer than 5s aborts the file (rolling back whole) instead of
+-- queueing every PO page behind it; every statement is idempotent: re-run it.
 BEGIN;
+
+SET LOCAL lock_timeout = '5s';
 
 -- backfill
 UPDATE public.tbl_rfq_purchase_order po

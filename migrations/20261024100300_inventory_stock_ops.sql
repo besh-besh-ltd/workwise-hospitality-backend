@@ -20,7 +20,11 @@
 --
 -- Conventions as in 20261024100100_inventory_core.sql. Idempotent throughout.
 
+-- A lock wait longer than 5s aborts the file (rolling back whole) instead of
+-- queueing every PO page behind it; every statement is idempotent: re-run it.
 BEGIN;
+
+SET LOCAL lock_timeout = '5s';
 
 -- ---------------------------------------------------------------------------
 -- Mark out / return to stock. Posted on creation: no draft, no approval.

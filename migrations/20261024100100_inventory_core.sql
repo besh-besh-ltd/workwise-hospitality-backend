@@ -27,7 +27,11 @@
 -- Idempotent: CREATE ... IF NOT EXISTS, DROP TRIGGER IF EXISTS + CREATE,
 -- CREATE OR REPLACE FUNCTION.
 
+-- A lock wait longer than 5s aborts the file (rolling back whole) instead of
+-- queueing every PO page behind it; every statement is idempotent: re-run it.
 BEGIN;
+
+SET LOCAL lock_timeout = '5s';
 
 -- ---------------------------------------------------------------------------
 -- §5.1 Settings
@@ -267,6 +271,10 @@ CREATE INDEX IF NOT EXISTS ix_inv_movement_hotel_posted
   ON public.tbl_inv_movement (hotel_id, posted_at);
 CREATE INDEX IF NOT EXISTS ix_inv_movement_source
   ON public.tbl_inv_movement (source_type, source_id);
+-- Item-keyed reads across hotels (latest company cost on count approval, the
+-- stock-unit change check).
+CREATE INDEX IF NOT EXISTS ix_inv_movement_item_posted
+  ON public.tbl_inv_movement (inv_item_id, posted_at);
 
 -- Append-only. No bypass setting, deliberately: corrections are new rows.
 CREATE OR REPLACE FUNCTION public.tbl_inv_movement_immutable()
