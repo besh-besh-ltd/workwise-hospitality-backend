@@ -380,14 +380,21 @@ async function seedWorld() {
   // ── Batches for near-expiry ─────────────────────────────────────────────
   // The ledger keeps the batches of tracked items it posts (G1's M-1 for milk
   // is already there); the others stand in for stock seeded around it. The
-  // seed states the quantities either way.
+  // seed states the quantities either way. Rice, oil and B's rice track
+  // expiry from here on (their movements are all posted above); soap does
+  // not, so its leftover batch (an item whose tracking was switched off) must
+  // not be reported.
+  await db.none(`UPDATE tbl_inv_item SET track_expiry = true WHERE id = ANY($1::int[])`, [
+    [W.item.rice, W.item.oil, W.item.bRice],
+  ]);
   await db.none(
     `INSERT INTO tbl_inv_batch (hospitality_company_id, hotel_id, inv_item_id, batch_no, expiry_date, qty) VALUES
        ($1, $2, $3, 'M-1', $4, 12), ($1, $2, $5, 'R-OLD', $6, 5), ($1, $2, $7, 'O-LATE', $8, 5),
-       ($1, $2, $7, 'O-ZERO', $9, 0), ($1, $10, $5, 'R-A2', $11, 6), ($12, $13, $14, 'B-1', $15, 7)
+       ($1, $2, $7, 'O-ZERO', $9, 0), ($1, $10, $5, 'R-A2', $11, 6), ($12, $13, $14, 'B-1', $15, 7),
+       ($1, $2, $16, 'S-UNTRACKED', $9, 4)
      ON CONFLICT (hotel_id, inv_item_id, batch_no, expiry_date) DO UPDATE SET qty = EXCLUDED.qty`,
     [CO_A, A1, W.item.milk, addDays(T, 10), W.item.rice, addDays(T, -3), W.item.oil, addDays(T, 45),
-      addDays(T, 5), A2, addDays(T, 20), CO_B, B1, W.item.bRice, addDays(T, 1)]
+      addDays(T, 5), A2, addDays(T, 20), CO_B, B1, W.item.bRice, addDays(T, 1), W.item.soap]
   );
 
   // ── Vendor deliveries (OTIF, pending) ───────────────────────────────────
@@ -768,6 +775,8 @@ describe("stock reports", () => {
     expect(codes).not.toContain("D4-WICKS");
   });
 
+  // E1 M-1: soap's batch S-UNTRACKED expires in 5 days, but soap does not
+  // track expiry, so it is not listed.
   it("near_expiry returns expected rows for seeded movements", async () => {
     const rows = await rowsOf(WIDE, "near_expiry");
     expect(rows.map((r) => [r.hotel_name, r.item_code, r.batch_no, r.days_to_expiry, r.status, r.qty])).toEqual([

@@ -1011,7 +1011,11 @@ export const EVENTS = [
     method: 'POST', path: '/inventory/out', key: 'inventory_stock_marked_out',
     category: CATEGORIES.INVENTORY, severity: 'notable',
     entity: { type: 'INV_OUT', id: R() }, scope: SCOPE.detail(),
-    summary: (c) => `${c.actor} marked stock out${c.entityLabel ? ` ${c.entityLabel}` : ''}`,
+    // One route posts both directions; a RETURN puts stock back (E1 cf 15).
+    summary: (c) => {
+      const docType = c.detail?.metadata?.docType ?? c.body?.docType;
+      return `${c.actor} ${docType === 'RETURN' ? 'returned stock' : 'marked stock out'}${c.entityLabel ? ` ${c.entityLabel}` : ''}`;
+    },
   }),
   e({
     method: 'POST', path: '/inventory/adjustments', key: 'inventory_adjustment_created',

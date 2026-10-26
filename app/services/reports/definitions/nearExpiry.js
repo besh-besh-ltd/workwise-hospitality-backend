@@ -4,7 +4,9 @@
 // Batches still in stock (qty > 0) that expire within the next 30 days (IST,
 // from today), and any already past expiry, per hotel, soonest first. Read
 // straight from tbl_inv_batch, so it lists what the batch balances say is on
-// the shelf. Batches carry no cost, so there is no value column.
+// the shelf. Batches carry no cost, so there is no value column. Only items
+// that track expiry now: once tracking is turned off an item's old batches
+// are kept but no longer listed (E1 M-1).
 //
 // The report is "as of today", so the period filter does not apply.
 // ============================================================================
@@ -60,6 +62,7 @@ export default {
              JOIN tbl_inv_item i ON i.id = b.inv_item_id
              JOIN tbl_hospitality_company_hotels h ON h.id = b.hotel_id
             WHERE b.hotel_id = ANY($1::int[])
+              AND i.track_expiry
               AND b.qty > 0
               AND b.expiry_date <= ${IST_TODAY} + $2::int
             ORDER BY b.expiry_date, h.name, h.id, i.display_name, i.id, b.batch_no`,

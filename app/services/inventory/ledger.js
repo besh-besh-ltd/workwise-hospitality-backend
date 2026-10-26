@@ -84,6 +84,13 @@
 //     this function).
 // The negative-stock guard runs on the whole line, never per batch. Readers
 // that key on source_line_id must aggregate: one line may have several rows.
+//
+// Size (E1 I-2): every quantity, unit cost, value and average is written to a
+// numeric(18,4) column, which holds |x| < 1e14. A movement whose qty, unit
+// cost or qty x cost is out of that range, or that would take its balance
+// (qty, value, average) out of it, is refused as VALIDATION {index, field
+// 'qty', reason 'TOO_LARGE', hotelId, invItemId} naming the item, before
+// anything is written: never a database error.
 
 import { InventoryError } from './errors.js';
 import { getEffectiveSettings } from './settings.js';
@@ -145,6 +152,9 @@ function toDecimalString(n) {
 }
 
 const toNumber = (n) => Number(toDecimalString(n));
+/** numeric(18,4) holds |x| < 1e14: in ten-thousandths, |n| < 1e18. */
+const LIMIT = 10n ** 18n;
+const fits = (n) => (n < 0n ? -n : n) < LIMIT;
 const mul = (a, b) => roundDiv(a * b, ONE);
 const div = (a, b) => roundDiv(a * ONE, b);
 
@@ -493,6 +503,16 @@ function rowToMovement(r) {
   };
 }
 
+/** VALIDATION for a movement whose numbers do not fit numeric(18,4), naming its item. */
+async function tooLargeError(t, line) {
+  const item = await t.oneOrNone(`SELECT display_name FROM tbl_inv_item WHERE id = $1`, [line.invItemId]);
+  return new InventoryError(
+    'VALIDATION',
+    `${item?.display_name ?? 'This item'}: the quantity or value is too large to record`,
+    { index: line.index, field: 'qty', reason: 'TOO_LARGE', hotelId: line.hotelId, invItemId: line.invItemId }
+  );
+}
+
 async function negativeStockError(t, shortfalls) {
   const names = new Map(
     (
@@ -536,7 +556,9 @@ async function negativeStockError(t, shortfalls) {
  *   batches comes back as several adjacent rows (one per batch, same
  *   sourceLineId); readers keyed on sourceLineId must sum them.
  * @throws {InventoryError} VALIDATION (details {index, field}, plus hotelId /
- *   invItemId when a defaulted unit cost has no average to fall back on) or
+ *   invItemId when a defaulted unit cost has no average to fall back on, or
+ *   reason 'TOO_LARGE' with hotelId / invItemId when a number would not fit
+ *   numeric(18,4)) or
  *   NEGATIVE_STOCK (details {hotelId, invItemId, itemName, available,
  *   requested, lines:[{index, hotelId, invItemId, sourceLineId, itemName,
  *   available, requested}]}: the first short movement at the top level, every
@@ -556,6 +578,11 @@ export async function postMovements(t, movements) {
     if (line) lines.push(line);
   });
   if (!lines.length) return [];
+  for (const l of lines) {
+    if (!fits(l.qty) || (l.unitCost !== null && (!fits(l.unitCost) || !fits(mul(l.qty, l.unitCost))))) {
+      throw await tooLargeError(t, l);
+    }
+  }
 
   // Distinct (hotel, item) keys in lock order.
   const keys = new Map();
@@ -688,6 +715,7 @@ export async function postMovements(t, movements) {
     }
     for (const part of parts) {
       const { unitCost, value, next } = apply(state.get(k), part);
+      if (![value, next.qty, next.value, next.avg].every(fits)) throw await tooLargeError(t, line);
       state.set(k, next);
       posted.push({ ...part, unitCost, value, qtyAfter: next.qty, avgCostAfter: next.avg });
     }

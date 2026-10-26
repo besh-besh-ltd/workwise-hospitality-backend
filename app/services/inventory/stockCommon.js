@@ -18,6 +18,13 @@ export const MAX_LINES = 500;
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 /** numeric(18,4) holds up to 14 integer digits. */
 const MAX_QTY = 1e12;
+/**
+ * What numeric(18,4) can store: |x| < 1e14. Quantities, values and averages
+ * of stock (movements, balances, variances) are checked against it before
+ * they are written, so an outsized entry is a VALIDATION naming its line,
+ * never a database error.
+ */
+export const MAX_AMOUNT = 1e14;
 
 /** IST calendar day, as a date (production Postgres runs in UTC). */
 export const IST_TODAY = `(CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Kolkata')::date`;
@@ -249,10 +256,32 @@ export async function approverIds(conn, hotelId) {
  */
 export function explainMissingCost(err, lineOf) {
   if (!(err instanceof InventoryError) || err.code !== 'VALIDATION' || err.details?.field !== 'unitCost') return err;
+  if (err.details?.reason === 'TOO_LARGE') return err;
   const line = lineOf(err.details.index);
   if (!line) return err;
   return invalid(
     `${line.displayName ?? 'This item'} has no cost at this hotel yet: post it through a receipt or an opening import first`,
     { field: 'lines', index: line.index, invItemId: line.invItemId }
   );
+}
+
+/**
+ * Stock lines valued at the hotel's average (adjustments): refuse, before
+ * anything is written, a line whose value, or the balance it leaves (qty and
+ * value), would not fit numeric(18,4). `balances` are the rows read under
+ * lockBalances; a line without one starts from nothing. VALIDATION
+ * {field:'lines', index, invItemId, reason:'TOO_LARGE'} names the item.
+ */
+export function assertLinesFit(lines, balances, items) {
+  for (const l of lines) {
+    const b = balances.get(l.invItemId) ?? { qty: 0, avgCost: 0 };
+    const cost = l.unitCost ?? b.avgCost;
+    const after = b.qty + l.qty;
+    if ([l.qty * cost, after, after * cost].some((x) => !(Math.abs(x) < MAX_AMOUNT))) {
+      throw invalid(
+        `${items.get(l.invItemId)?.displayName ?? 'This item'}: the quantity or value is too large to record`,
+        { field: 'lines', index: l.index, invItemId: l.invItemId, reason: 'TOO_LARGE' }
+      );
+    }
+  }
 }

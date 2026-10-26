@@ -3,8 +3,10 @@
 //
 // Tenancy: nothing here reads a company or hotel id from the request body.
 //   - Item routes load the item first and derive the company from its row.
-//     A company the caller has no footing in is NOT_FOUND; one they belong to
-//     but lack the permission in is FORBIDDEN.
+//     Rule C3 (E1 M-4): the item is visible to a caller holding inventory.read
+//     or the route's action on some hotel of its company. Not visible is
+//     NOT_FOUND, the same answer as a missing id (company membership alone
+//     does not make it visible); visible without the action is FORBIDDEN.
 //   - Hotel routes go through assertVisibleHotelPermission (company comes from
 //     the hotel; rule C3: a hotel the caller can't see is NOT_FOUND, one they
 //     see without the permission FORBIDDEN).
@@ -21,15 +23,19 @@ import { assertVisibleHotelPermission, hotelIdsWithPermission } from './scope.js
 import { getEffectiveSettings } from './settings.js';
 import { resolveItemForVariant, mapVariantToItem as mapVariant, suggestItems as suggest } from './items.js';
 import { setUomFactor, normalizeUomLabel, uomKey } from './uom.js';
+import { gtinForms, normaliseBarcode, SAME_BARCODE } from './barcode.js';
+import { MAX_AMOUNT } from './stockCommon.js';
 
 export const PAGE_SIZE = 50;
+/** Largest stock level or pack size accepted (E1 I-2; the columns hold < 1e14). */
+export const MAX_SETUP_QTY = 1e12;
+/** Longest minimum shelf life accepted, in days (the column is an INT). */
+export const MAX_SHELF_LIFE_DAYS = 36500;
 
 const positiveInt = (v) => {
   const n = Number(v);
   return Number.isInteger(n) && n > 0 ? n : null;
 };
-
-const isSuperAdmin = (user) => Number(user?.user_type) === 8;
 
 function bad(message, field, extra = {}) {
   return new InventoryError('VALIDATION', message, { field, ...extra });
@@ -52,20 +58,6 @@ async function companiesWith(t, user, action) {
     [hotels]
   );
   return rows.map((r) => Number(r.hospitality_company_id));
-}
-
-async function isMemberOfCompany(t, user, companyId) {
-  if (isSuperAdmin(user)) return true;
-  const userId = positiveInt(user?.id);
-  if (!userId) return false;
-  const row = await t.one(
-    `SELECT (EXISTS (SELECT 1 FROM tbl_hospitality_user_mappings m
-                      WHERE m.user_id = $1 AND m.hospitality_company_id = $2)
-          OR EXISTS (SELECT 1 FROM tbl_user_role_scopes s
-                      WHERE s.user_id = $1 AND s.company_id = $2)) AS member`,
-    [userId, companyId]
-  );
-  return row.member === true;
 }
 
 /**
@@ -92,24 +84,33 @@ async function resolveCompany(t, user, action, hint = null) {
   throw bad('Choose which company this is for', 'companyId');
 }
 
-/** Item by id, visible only inside a company where the caller holds `action`. */
+/**
+ * Item by id under rule C3 (E1 M-4). Visible to a caller holding
+ * inventory.read or inventory.<action> on some hotel of the item's company;
+ * otherwise NOT_FOUND with the missing-id words. Visible without the action is
+ * FORBIDDEN. The row lock (forUpdate) is taken only after the gate, so a
+ * refused caller never waits on an item someone else is editing.
+ */
 async function loadItem(t, user, itemId, action, { forUpdate = false } = {}) {
+  const missing = () => new InventoryError('NOT_FOUND', 'Item not found');
   const id = positiveInt(itemId);
-  if (!id) throw new InventoryError('NOT_FOUND', 'Item not found');
-  const item = await t.oneOrNone(
-    `SELECT * FROM tbl_inv_item WHERE id = $1 ${forUpdate ? 'FOR UPDATE' : ''}`,
-    [id]
-  );
-  if (!item) throw new InventoryError('NOT_FOUND', 'Item not found');
+  if (!id) throw missing();
+  const item = await t.oneOrNone(`SELECT * FROM tbl_inv_item WHERE id = $1`, [id]);
+  if (!item) throw missing();
   const companyId = Number(item.hospitality_company_id);
-  if ((await companiesWith(t, user, action)).includes(companyId)) return item;
-  if (action !== 'read' && (await isMemberOfCompany(t, user, companyId))) {
-    throw new InventoryError('FORBIDDEN', "You don't have permission to do this", {
-      resource: 'inventory',
-      action,
-    });
+  if (!(await companiesWith(t, user, action)).includes(companyId)) {
+    if (action !== 'read' && (await companiesWith(t, user, 'read')).includes(companyId)) {
+      throw new InventoryError('FORBIDDEN', "You don't have permission to do this", {
+        resource: 'inventory',
+        action,
+      });
+    }
+    throw missing();
   }
-  throw new InventoryError('NOT_FOUND', 'Item not found');
+  if (!forUpdate) return item;
+  const locked = await t.oneOrNone(`SELECT * FROM tbl_inv_item WHERE id = $1 FOR UPDATE`, [id]);
+  if (!locked) throw missing();
+  return locked;
 }
 
 // ───────────────────────── item DTO ─────────────────────────
@@ -268,6 +269,9 @@ function parseMinShelf(v) {
   if (v == null || v === '') return null;
   const n = Number(v);
   if (!Number.isInteger(n) || n < 0) throw bad('Minimum shelf life must be a whole number of days', 'minShelfLifeDays');
+  if (n > MAX_SHELF_LIFE_DAYS) {
+    throw bad(`Minimum shelf life can be at most ${MAX_SHELF_LIFE_DAYS} days`, 'minShelfLifeDays');
+  }
   return n;
 }
 
@@ -422,32 +426,52 @@ export async function saveItemUoms(t, user, itemId, body = {}) {
 
 // ───────────────────────── barcodes ─────────────────────────
 
+/**
+ * Adds a barcode alias. The code is stored trimmed, case kept (E1 M-5), and is
+ * refused with CONFLICT {field:'code', invItemId, displayName} when the scan
+ * would read it as an alias already on file in the company: the same code in
+ * any case, or the same numeric EAN/UPC/GTIN product (barcode.js). Barcode
+ * writes of one company are serialised, so two such codes cannot slip in side
+ * by side; the case rule is also a unique index.
+ */
 export async function addItemBarcode(t, user, itemId, body = {}) {
   const item = await loadItem(t, user, itemId, 'update');
-  const code = String(body.code ?? '').trim();
+  const code = normaliseBarcode(body.code);
   if (!code) throw bad('A barcode is required', 'code');
   if (code.length > 128) throw bad('The barcode is too long', 'code');
   const packFactor = body.packFactor == null || body.packFactor === '' ? 1 : Number(body.packFactor);
   if (!Number.isFinite(packFactor) || packFactor <= 0) throw bad('Pack size must be greater than 0', 'packFactor');
+  if (packFactor >= MAX_SETUP_QTY) throw bad('Pack size is too large', 'packFactor');
   const source = body.source == null ? 'MANUFACTURER' : String(body.source);
   if (!['MANUFACTURER', 'INTERNAL'].includes(source)) throw bad('Source must be MANUFACTURER or INTERNAL', 'source');
 
   const companyId = Number(item.hospitality_company_id);
-  const clashError = async () => {
-    const clash = await t.oneOrNone(
-      `SELECT i.id, i.display_name FROM tbl_inv_item_barcode b JOIN tbl_inv_item i ON i.id = b.inv_item_id
-        WHERE b.hospitality_company_id = $1 AND b.code = $2`,
-      [companyId, code]
+  const { keys, forms } = gtinForms(code);
+  const findClash = () =>
+    t.oneOrNone(
+      `SELECT i.id, i.display_name, b.code
+         FROM tbl_inv_item_barcode b JOIN tbl_inv_item i ON i.id = b.inv_item_id
+        WHERE b.hospitality_company_id = $1 AND ${SAME_BARCODE('b', { code: 2, keys: 3, forms: 4 })}
+        ORDER BY (lower(b.code) = lower($2)) DESC, b.id
+        LIMIT 1`,
+      [companyId, code, keys, forms]
     );
-    return new InventoryError('CONFLICT', `The barcode ${code} already belongs to "${clash?.display_name ?? 'another item'}"`, {
+  const clashError = (clash) => {
+    const owner = `"${clash?.display_name ?? 'another item'}"`;
+    const message =
+      clash && clash.code.toLowerCase() !== code.toLowerCase()
+        ? `The barcode ${code} scans as ${clash.code}, which already belongs to ${owner}`
+        : `The barcode ${code} already belongs to ${owner}`;
+    return new InventoryError('CONFLICT', message, {
       field: 'code',
       invItemId: clash ? Number(clash.id) : null,
       displayName: clash?.display_name ?? null,
     });
   };
-  if (await t.oneOrNone(`SELECT 1 FROM tbl_inv_item_barcode WHERE hospitality_company_id = $1 AND code = $2`, [companyId, code])) {
-    throw await clashError();
-  }
+
+  await t.one(`SELECT pg_advisory_xact_lock(hashtext('inv:barcode'), $1)`, [companyId]);
+  const clash = await findClash();
+  if (clash) throw clashError(clash);
   let row;
   try {
     // savepoint, so a concurrent duplicate does not abort the caller's transaction
@@ -460,7 +484,7 @@ export async function addItemBarcode(t, user, itemId, body = {}) {
       )
     );
   } catch (err) {
-    if (err?.code === '23505') throw await clashError();
+    if (err?.code === '23505') throw clashError(await findClash());
     throw err;
   }
   return {
@@ -526,6 +550,7 @@ const levelValue = (v, field) => {
   if (v == null || v === '') return null;
   const n = Number(v);
   if (!Number.isFinite(n) || n < 0) throw bad('Levels must be zero or more', field);
+  if (n >= MAX_SETUP_QTY) throw bad('That level is too large', field);
   return round4(n);
 };
 
@@ -603,6 +628,8 @@ export async function saveCompanySettings(t, user, body = {}, { companyHint = nu
   if (body.adjustmentAutoApproveLimit !== undefined) {
     const n = Number(body.adjustmentAutoApproveLimit);
     if (!Number.isFinite(n) || n < 0) throw bad('The limit must be zero or more', 'adjustmentAutoApproveLimit');
+    // No adjustment can be worth MAX_AMOUNT, so a larger limit means nothing.
+    if (n >= MAX_AMOUNT) throw bad('The limit is too large', 'adjustmentAutoApproveLimit');
     next.adjustmentAutoApproveLimit = round4(n);
   }
   await t.none(
@@ -651,11 +678,24 @@ export async function getHotelSettings(t, user, hotelId) {
   return readHotelSettings(t, companyId, Number(hotelId));
 }
 
+/**
+ * Saves a hotel's document code and GST-in-cost override.
+ *
+ * Document codes (E1 I-1), so that document numbers never change meaning:
+ *   - a hotel's code is frozen once the hotel has numbered a document
+ *     (tbl_inv_doc_sequence has a row for it): changing it, its case, or
+ *     clearing it is CONFLICT {field:'docCode'}. A hotel that numbered under
+ *     the default code (its id) may still set its first code.
+ *   - a code belongs to the first hotel of the company that sets it, for good
+ *     (tbl_inv_doc_code_history): another hotel taking a code a hotel holds or
+ *     has held is CONFLICT {field:'docCode'}. A hotel may return to its own.
+ */
 export async function saveHotelSettings(t, user, hotelId, body = {}) {
   const { companyId } = await assertVisibleHotelPermission(t, user, { resource: 'inventory', action: 'admin', hotelId });
   const hotel = Number(hotelId);
   const cur = await t.oneOrNone(`SELECT doc_code, include_gst_in_cost FROM tbl_inv_hotel_settings WHERE hotel_id = $1`, [hotel]);
-  let docCode = cur?.doc_code ?? null;
+  const stored = cur?.doc_code ?? null;
+  let docCode = stored;
   let gst = cur?.include_gst_in_cost ?? null;
 
   if (body.docCode !== undefined) {
@@ -681,22 +721,57 @@ export async function saveHotelSettings(t, user, hotelId, body = {}) {
     }
     gst = body.includeGstInCost;
   }
+  if (stored != null && docCode !== stored) {
+    const numbered = await t.oneOrNone(`SELECT 1 FROM tbl_inv_doc_sequence WHERE hotel_id = $1 LIMIT 1`, [hotel]);
+    if (numbered) {
+      throw new InventoryError(
+        'CONFLICT',
+        `The document code ${stored} can't change once documents are numbered with it`,
+        { field: 'docCode', docCode: stored }
+      );
+    }
+  }
+  const takenError = () =>
+    new InventoryError('CONFLICT', `The document code ${docCode} is used by another hotel`, { field: 'docCode' });
   if (docCode) {
     const clash = await t.oneOrNone(
       `SELECT hotel_id FROM tbl_inv_hotel_settings
         WHERE hospitality_company_id = $1 AND lower(doc_code) = lower($2) AND hotel_id <> $3`,
       [companyId, docCode, hotel]
     );
-    if (clash) throw new InventoryError('CONFLICT', `The document code ${docCode} is used by another hotel`, { field: 'docCode' });
+    if (clash) throw takenError();
+    // Claim the code for this hotel (a no-op when it already holds it), then
+    // check who holds it: a concurrent claim waits here for the first.
+    await t.none(
+      `INSERT INTO tbl_inv_doc_code_history (hospitality_company_id, hotel_id, doc_code, created_by)
+       VALUES ($1, $2, $3, $4)
+       ON CONFLICT (hospitality_company_id, lower(doc_code)) DO NOTHING`,
+      [companyId, hotel, docCode, user.id]
+    );
+    const holder = await t.one(
+      `SELECT hotel_id FROM tbl_inv_doc_code_history WHERE hospitality_company_id = $1 AND lower(doc_code) = lower($2)`,
+      [companyId, docCode]
+    );
+    if (Number(holder.hotel_id) !== hotel) {
+      throw new InventoryError('CONFLICT', `The document code ${docCode} was used by another hotel`, { field: 'docCode' });
+    }
   }
-  await t.none(
-    `INSERT INTO tbl_inv_hotel_settings (hotel_id, hospitality_company_id, doc_code, include_gst_in_cost, created_by, updated_by)
-     VALUES ($1, $2, $3, $4, $5, $5)
-     ON CONFLICT (hotel_id) DO UPDATE
-       SET doc_code = EXCLUDED.doc_code, include_gst_in_cost = EXCLUDED.include_gst_in_cost,
-           updated_by = EXCLUDED.updated_by, updated_at = now()`,
-    [hotel, companyId, docCode, gst, user.id]
-  );
+  try {
+    // savepoint, so a concurrent duplicate does not abort the caller's transaction
+    await t.tx((sp) =>
+      sp.none(
+        `INSERT INTO tbl_inv_hotel_settings (hotel_id, hospitality_company_id, doc_code, include_gst_in_cost, created_by, updated_by)
+         VALUES ($1, $2, $3, $4, $5, $5)
+         ON CONFLICT (hotel_id) DO UPDATE
+           SET doc_code = EXCLUDED.doc_code, include_gst_in_cost = EXCLUDED.include_gst_in_cost,
+               updated_by = EXCLUDED.updated_by, updated_at = now()`,
+        [hotel, companyId, docCode, gst, user.id]
+      )
+    );
+  } catch (err) {
+    if (err?.code === '23505') throw takenError();
+    throw err;
+  }
   return { result: await readHotelSettings(t, companyId, hotel), audit: { companyId, hotelId: hotel, label: '' } };
 }
 

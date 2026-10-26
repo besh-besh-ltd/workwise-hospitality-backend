@@ -175,6 +175,13 @@ CREATE TABLE IF NOT EXISTS public.tbl_inv_hotel_item (
   PRIMARY KEY (hotel_id, inv_item_id)
 );
 
+-- E1 M-5: a barcode is one code ignoring case, as the scan matches it. Codes
+-- are stored trimmed (case kept for display); uniqueness is per company on
+-- lower(code), replacing the case-sensitive constraint above.
+ALTER TABLE public.tbl_inv_item_barcode DROP CONSTRAINT IF EXISTS ux_inv_item_barcode_company_code;
+CREATE UNIQUE INDEX IF NOT EXISTS ux_inv_item_barcode_company_code_ci
+  ON public.tbl_inv_item_barcode (hospitality_company_id, lower(code));
+
 -- ---------------------------------------------------------------------------
 -- §5.1 Document numbering: {DOC}/{doc_code}/{FY}/{seq5}, per hotel + type + FY.
 -- Incremented with INSERT ... ON CONFLICT (hotel_id, doc_type, fy)
@@ -193,6 +200,27 @@ CREATE TABLE IF NOT EXISTS public.tbl_inv_doc_sequence (
   updated_at             TIMESTAMPTZ NOT NULL DEFAULT now(),
   PRIMARY KEY (hotel_id, doc_type, fy)
 );
+
+-- E1 I-1: every doc_code a hotel has held. A code belongs to the first hotel
+-- that sets it, for good: no other hotel of the company may take it later,
+-- so a code that ever numbered documents can never number another hotel's.
+-- (A hotel's code is frozen once it has numbered a document; that rule lives
+-- in setupService.saveHotelSettings.)
+CREATE TABLE IF NOT EXISTS public.tbl_inv_doc_code_history (
+  id                     SERIAL PRIMARY KEY,
+  hospitality_company_id INT NOT NULL REFERENCES public.tbl_hospitality_companies(id),
+  hotel_id               INT NOT NULL REFERENCES public.tbl_hospitality_company_hotels(id),
+  doc_code               VARCHAR(20) NOT NULL,
+  created_at             TIMESTAMPTZ NOT NULL DEFAULT now(),
+  created_by             INT REFERENCES public.tbl_users(id)
+);
+CREATE UNIQUE INDEX IF NOT EXISTS ux_inv_doc_code_history_company_code
+  ON public.tbl_inv_doc_code_history (hospitality_company_id, lower(doc_code));
+INSERT INTO public.tbl_inv_doc_code_history (hospitality_company_id, hotel_id, doc_code)
+SELECT hospitality_company_id, hotel_id, doc_code
+  FROM public.tbl_inv_hotel_settings
+ WHERE doc_code IS NOT NULL
+ON CONFLICT (hospitality_company_id, lower(doc_code)) DO NOTHING;
 
 -- ---------------------------------------------------------------------------
 -- §5.2 The ledger (append-only) and balances

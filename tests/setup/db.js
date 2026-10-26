@@ -222,6 +222,7 @@ const DYNAMIC_TABLES = [
   "tbl_inv_batch",
   "tbl_inv_balance",
   "tbl_inv_doc_sequence",
+  "tbl_inv_doc_code_history",
   "tbl_inv_hotel_item",
   "tbl_inv_item_barcode",
   "tbl_inv_item_uom",
