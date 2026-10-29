@@ -35,6 +35,8 @@ const waitForEvent = async (since, instId, timeoutMs = 5000) => {
 };
 
 afterAll(async () => {
+  // A PO rejection writes a send-back row (qa) that references the PO.
+  if (created.poIds.length) await db.none(`DELETE FROM tbl_po_send_backs WHERE purchase_order_id = ANY($1)`, [created.poIds]);
   if (created.poIds.length) await db.none(`DELETE FROM tbl_rfq_purchase_order WHERE id = ANY($1)`, [created.poIds]);
   if (created.instIds.length) {
     await db.none(`DELETE FROM tbl_activity_events WHERE entity_type = 'APPROVAL_INSTANCE' AND entity_id = ANY($1)`, [created.instIds]);
