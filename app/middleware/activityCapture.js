@@ -42,12 +42,17 @@ const extractEntityId = (spec, { req, responseBody, actorUserId }) => {
       : spec.from === 'body' ? req.body
       : spec.from === 'response' ? responseBody
       : null;
-  const raw = source ? dig(source, spec.path) : null;
+  if (source) {
+    for (const path of [spec.path, ...(spec.fallbacks || [])]) {
+      const raw = dig(source, path);
+      if (raw == null || raw === '') continue;
+      const n = Number(raw);
+      return Number.isFinite(n) ? n : null;
+    }
+  }
   // `orActor`: the route acts on the caller when the field is absent — a
   // self-edit — so the subject is the caller, not "nobody".
-  if (raw == null || raw === '') return spec.orActor && actorUserId ? Number(actorUserId) : null;
-  const n = Number(raw);
-  return Number.isFinite(n) ? n : null;
+  return spec.orActor && actorUserId ? Number(actorUserId) : null;
 };
 
 /**
@@ -257,6 +262,16 @@ const captureEvent = async (req, res, responseBody) => {
   // says the thing actually happened, by handing over its detail.
   if (definition?.requireDetail && !res.locals?.activityDetail) return;
 
+  // A repeated decision that ran nothing is not a second decision, so it gets
+  // no second row. Two flags say so:
+  //   - `data.no_op`: set where a service returned early with nothing recorded
+  //     (the PO decision service, R26; inventory replays).
+  //   - `data.already_completed`: the approval engine's answer for an instance
+  //     that had already concluded (or an approver repeating their own
+  //     decision). executeApprovalAction runs no post-approval handler and
+  //     sends no notification for it, so nothing was re-triggered either.
+  if (responseBody?.data?.no_op === true || responseBody?.data?.already_completed === true) return;
+
   const scope = await resolveScope(definition, {
     req,
     res,
@@ -404,6 +419,11 @@ const activityCapture = (req, res, next) => {
     // only for the ones that actually happened.
     if (mutating && !lookupEvent(req.method, routePattern(req) || '')) noteUncatalogued(req);
     if (res.statusCode >= 400) return;
+    // A handler that answered 200 for something that did NOT happen — an
+    // idempotent no-op such as a late decision on an approval that was already
+    // concluded or withdrawn — sets res.locals.skipActivityCapture, so the trail
+    // never claims it did. The HTTP answer itself is the handler's business.
+    if (res.locals?.skipActivityCapture === true) return;
     captureEvent(req, res, responseBody).catch((err) =>
       logger.error({ err: err.message }, 'Activity capture failed')
     );

@@ -34,6 +34,8 @@ const ROLE_ID_BY_RESOURCE = {
   "awarding": 89305,
   "rfq": 89306,
   "mr": 89307,
+  // PR maps to `pr` (purchase requisitions).
+  "pr": 89308,
 };
 const ARC_RESOURCES = ["arc", "arc-tech", "arc-comm", "arc-committee"];
 

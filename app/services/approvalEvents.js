@@ -62,6 +62,31 @@ const afterFinish = (ctx) => new Promise((resolve) => {
   setTimeout(check, 0);
 });
 
+/**
+ * Run `fn` once the write on `dbContext` is durable: after the OUTERMOST
+ * transaction commits (never if it rolls back), or on the next tick when
+ * there is no transaction. Same rule as approval:changed, for other
+ * post-commit side effects scheduled from deep inside a transaction.
+ * Resolves when `fn` has finished; never rejects.
+ *
+ * @param {object|null} dbContext the pg-promise tx/task the write ran on, or db
+ * @param {() => Promise<void>|void} fn
+ * @returns {Promise<void>}
+ */
+export async function afterCommitOf(dbContext, fn) {
+  try {
+    const ctx = committingContext(dbContext);
+    if (ctx) {
+      if (!(await afterFinish(ctx))) return;
+    } else {
+      await new Promise((r) => setImmediate(r));
+    }
+    await fn();
+  } catch (err) {
+    logger.warn({ err: err?.message }, 'post-commit side effect failed');
+  }
+}
+
 const toIds = (v) => [...new Set((Array.isArray(v) ? v : [v])
   .map(Number)
   .filter((n) => Number.isInteger(n) && n > 0))];
@@ -146,4 +171,4 @@ export function notifyApprovalChanged(target, dbContext = null) {
   return run();
 }
 
-export default { notifyApprovalChanged, APPROVAL_CHANGED_EVENT };
+export default { notifyApprovalChanged, afterCommitOf, APPROVAL_CHANGED_EVENT };

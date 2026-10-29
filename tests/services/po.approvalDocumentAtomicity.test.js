@@ -238,9 +238,12 @@ describe("PO approval and document atomicity", () => {
     });
   });
 
-  it("regenerates the document when an approver retries an already-recorded approval", async () => {
-    // Self-heal: the approver who clicks Approve again on a PO whose document
-    // went stale gets the document rewritten, without a second approval.
+  it("runs nothing when an approver retries an already-recorded approval (R25)", async () => {
+    // This used to rewrite the document as a "self-heal". The same branch is
+    // what let an APPROVE on a REJECTED instance rewrite a dead PO's document
+    // and re-ran the post-action on an APPROVED one (resetting an accepted PO
+    // and emailing the vendor again), so a retry now records and runs nothing:
+    // no document, no post-action, no post-commit work.
     await withTx(async (t) => {
       const { poId, instanceId } = await makePoAwaitingApproval(t);
       const args = { po_id: poId, approval_instance_id: instanceId, approver_user_id: IDS.users.a1_proc_poApp, action: "APPROVE" };
@@ -248,9 +251,17 @@ describe("PO approval and document atomicity", () => {
       await executePoApprovalAtomically(args, { conn: t, writeDocument: workingWriter() });
       await t.none(`UPDATE tbl_rfq_purchase_order SET po_pdf_url = $1 WHERE id = $2`, [STALE_URL, poId]);
 
-      await executePoApprovalAtomically(args, { conn: t, writeDocument: workingWriter() });
+      const ran = [];
+      const retry = await executePoApprovalAtomically(args, {
+        conn: t,
+        writeDocument: async () => { ran.push("document"); },
+        postAction: async () => { ran.push("postAction"); },
+        afterCommit: async () => { ran.push("afterCommit"); },
+      });
 
-      expect((await poUrl(t, poId)).po_pdf_url).toBe(FRESH_URL);
+      expect(retry).toMatchObject({ instance_status: "APPROVED", already_completed: true });
+      expect(ran).toEqual([]);
+      expect((await poUrl(t, poId)).po_pdf_url).toBe(STALE_URL);
       expect((await approvalState(t, instanceId)).approved_count).toBe(1);
     });
   });

@@ -232,6 +232,7 @@ const ENTITY_SCOPE_SQL = {
         WHERE po.id = $1`,
   ARC: 'SELECT hospitality_company_id, hotel_id, COALESCE(arc_number::text, title) AS label FROM tbl_arc WHERE id = $1',
   MR: 'SELECT hospitality_company_id, hotel_id, COALESCE(mr_number::text, title) AS label FROM tbl_material_requisition WHERE id = $1',
+  PR: 'SELECT hospitality_company_id, hotel_id, pr_number AS label FROM tbl_purchase_requisition WHERE id = $1',
   COMPANY: 'SELECT id AS hospitality_company_id, NULL::integer AS hotel_id, name AS label FROM tbl_hospitality_companies WHERE id = $1',
   HOTEL: 'SELECT hospitality_company_id, id AS hotel_id, name AS label FROM tbl_hospitality_company_hotels WHERE id = $1',
   // The label has to name the thing being approved, not its type. Reading
@@ -245,6 +246,7 @@ const ENTITY_SCOPE_SQL = {
                WHEN 'RFQ'    THEN (SELECT 'RFQ ' || r.rfq_no FROM tbl_rfq r WHERE r.id = ai.entity_id)
                WHEN 'TENDER' THEN (SELECT 'tender ' || r.rfq_no FROM tbl_rfq r WHERE r.id = ai.entity_id)
                WHEN 'PO'     THEN (SELECT 'PO ' || po.po_number FROM tbl_rfq_purchase_order po WHERE po.id = ai.entity_id)
+               WHEN 'PR'     THEN (SELECT 'requisition ' || pr.pr_number FROM tbl_purchase_requisition pr WHERE pr.id = ai.entity_id)
                WHEN 'ARC'    THEN (SELECT 'rate contract ' || COALESCE(a.arc_number::text, a.title)
                                      FROM tbl_arc a WHERE a.id = ai.entity_id)
              END,

@@ -162,6 +162,7 @@ export async function listStuckApprovals(
              WHEN 'TENDER' THEN (SELECT r.rfq_no::text FROM tbl_rfq r WHERE r.id = ai.entity_id)
              WHEN 'PO'     THEN (SELECT po.po_number::text FROM tbl_rfq_purchase_order po WHERE po.id = ai.entity_id)
              WHEN 'ARC'    THEN (SELECT COALESCE(a.arc_number::text, a.title) FROM tbl_arc a WHERE a.id = ai.entity_id)
+             WHEN 'PR'     THEN (SELECT pr.pr_number::text FROM tbl_purchase_requisition pr WHERE pr.id = ai.entity_id)
            END AS entity_ref,
            (now()::date - ai.created_at::date)::int AS age_days,
            COALESCE(pol.entity_type LIKE 'ARC\\_GROUP%', false) AS is_group
@@ -213,7 +214,7 @@ export async function listStuckApprovals(
 /** The instance a reassignment targets, with everything the guard needs. */
 export async function getStuckInstance(instanceId) {
   return db.oneOrNone(
-    `SELECT ai.id, ai.status, ai.entity_type, ai.entity_id,
+    `SELECT ai.id, ai.status, ai.entity_type, ai.entity_id, ai.initiated_by,
             ai.hospitality_company_id, ai.hotel_id, ai.department_id, ai.process_id,
             s.id AS step_id, s.step_order, s.status AS step_status
        FROM tbl_approval_instances ai

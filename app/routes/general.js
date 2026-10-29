@@ -241,9 +241,14 @@ GeneralRoutes.get(
   acl([7, 2]),
   hospitalityApprovalController.getEntityApprovals
 );
+// Vendors (user_type 3) never act on internal approvals (R25). No vendor
+// screen calls this; the engine's approver check is the real control, but it
+// runs after an early "already decided" return, so a vendor could reach that
+// answer for any instance id. Same gate as the sibling /cancel below.
 GeneralRoutes.post(
   '/hospitality/approval/action',
   passportSignIn,
+  noAcl([3]),
   hospitalityApprovalController.submitApprovalAction
 );
 // SECURITY: this route had no role gate at all, so vendors (user_type 3) could

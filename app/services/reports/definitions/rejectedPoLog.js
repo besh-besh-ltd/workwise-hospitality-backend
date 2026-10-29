@@ -19,16 +19,25 @@
 //                         RFQ was closed. Until the fix shipped alongside this
 //                         report, the platform logged these as REJECT actions
 //                         and left the PO showing "pending approval" forever.
+//                         Also an approver rejecting a PO as not needed (the
+//                         CANCEL route): "Cancelled By" is that approver.
 //   Rejected by vendor    the supplier refused an approved order.
 //
 // Counting the first two together is the mistake to avoid: on prod it turns
 // 47 rejections into 69.
 //
+// ── Reason, Route, Comment ──────────────────────────────────────────────────
+// Since PO rejections carry a reason and a route (client ticket T3), each
+// rejection shows the reason the approver picked ("Reason", the same labels
+// the app shows), where it went ("Route": Re-award back to commercial
+// evaluation, or Cancelled as not needed) and the approver's own words
+// ("Comment"). Rejections recorded before that show "—" for Reason and Route;
+// their comment is all there is.
+//
 // ── What is not here, and why ───────────────────────────────────────────────
-// The sample groups by reason code (CAN-01…12). There are no reason codes:
-// the reason is the approver's free-text comment, and on prod its median
-// length is ten characters. The summary sheets group by approver and business
-// unit instead, which are recorded.
+// The sample groups by reason code (CAN-01…12). Most of the history has no
+// reason code (see above), so the summary sheets group by approver and
+// business unit instead, which are recorded for every rejection.
 //
 // ACCESS: this report names individuals and quotes their decisions, so it is
 // granted to Company Administrator only, like the Approval Audit Trail.
@@ -36,6 +45,7 @@
 
 import { FMT, istDate, istDateLabel, reportSheet, writeReportSheet } from "../excelKit.js";
 import { rejectedPoLog } from "../../../models/reportsModel.js";
+import { REASON_LABELS } from "../../po/poSendBackReasons.js";
 
 const KIND_LABEL = {
   REJECTED: "Rejected by approver",
@@ -45,6 +55,9 @@ const KIND_LABEL = {
 const KINDS = ["REJECTED", "CANCELLED", "VENDOR_REJECTED"];
 
 const NOT_RECORDED = "Not recorded";
+
+/** Where a rejection sent the PO. */
+const ROUTE_LABEL = Object.freeze({ COMMERCIAL: "Re-award", CANCEL: "Cancelled" });
 
 const col = (header, key, width, extra = {}) => ({ header, key, width, type: "text", ...extra });
 const money = (header, key, extra = {}) =>
@@ -67,7 +80,9 @@ const APPROVER_COLUMNS = [
   col("Step", "step_label", 7, { align: "center" }),
   col("Rejected By", "actor_name", 24),
   col("Role", "actor_designation", 24),
-  col("Reason", "reason", 40),
+  col("Reason", "reason_label", 34),
+  col("Route", "route_label", 11),
+  col("Comment", "comment", 40),
   col("Re-raised As", "reraised_po_number", 18),
   col("Re-raised Status", "reraised_status", 16),
 ];
@@ -82,7 +97,9 @@ const CANCELLED_COLUMNS = [
   col("Property", "hotel_name", 26),
   col("RFQ #", "rfq_no", 11, { align: "right" }),
   col("Cancelled By", "actor_name", 24),
-  col("Reason", "reason", 44),
+  col("Reason", "reason_label", 30),
+  col("Route", "route_label", 11),
+  col("Comment", "comment", 44),
 ];
 
 const VENDOR_COLUMNS = [
@@ -94,7 +111,7 @@ const VENDOR_COLUMNS = [
   col("Vendor", "vendor_name", 28),
   col("Property", "hotel_name", 26),
   col("RFQ #", "rfq_no", 11, { align: "right" }),
-  col("Vendor's Reason", "reason", 44),
+  col("Vendor's Reason", "comment", 44),
   col("Re-raised As", "reraised_po_number", 18),
   col("Re-raised Status", "reraised_status", 16),
 ];
@@ -138,7 +155,9 @@ const PREVIEW_COLUMNS = [
   col("Vendor", "vendor_name", 28),
   col("Property", "hotel_name", 26),
   col("By", "actor_name", 24),
-  col("Reason", "reason", 40),
+  col("Reason", "reason_label", 30),
+  col("Route", "route_label", 11),
+  col("Comment", "comment", 40),
   col("Re-raised As", "reraised_po_number", 18),
 ];
 
@@ -159,7 +178,11 @@ function decorate(raw) {
     // A missing trail is shown as missing, never back-filled with a guess.
     actor_name: r.trail_missing ? NOT_RECORDED : r.actor_name || NOT_RECORDED,
     actor_designation: r.trail_missing ? "—" : r.actor_designation || "—",
-    reason: r.reason && String(r.reason).trim() ? String(r.reason).trim() : r.trail_missing ? NOT_RECORDED : "—",
+    // The reason code and route exist only on rejections recorded since they
+    // were introduced; "—" on everything older.
+    reason_label: (r.reason_category && REASON_LABELS[r.reason_category]) || "—",
+    route_label: (r.route && ROUTE_LABEL[r.route]) || "—",
+    comment: r.reason && String(r.reason).trim() ? String(r.reason).trim() : r.trail_missing ? NOT_RECORDED : "—",
     reraised_po_number: r.reraised_po_number || "Not re-raised",
     reraised_status: r.reraised_status || "—",
     reraised: !!r.reraised_po_number,
@@ -265,9 +288,10 @@ export default {
             `${missingTrail} PO(s) are marked rejected with no decision on record. They are listed, with the actor shown as not recorded, rather than left out.`,
           ]
         : null;
-    const reasonNote = [
-      "Reason",
-      "The approver's own comment, as typed. There are no reason codes to group by.",
+    const reasonNotes = [
+      ["Reason", "The reason the approver picked when rejecting. \"—\" on rejections recorded before reasons existed."],
+      ["Route", "Re-award: sent back to commercial evaluation to be awarded again. Cancelled: rejected as not needed. \"—\" on older rejections."],
+      ["Comment", "The approver's own words, as typed."],
     ];
 
     const sheet = (name, footerTitle, spec) =>
@@ -293,7 +317,7 @@ export default {
     sheet("Rejected by Approver", "Rejected PO Log — by approver", {
       title: "Rejected by Approver",
       subtitle: `${approverRejections.length} PO(s) · FY ${period.label} · Newest first`,
-      params: [periodParam, dated, reasonNote, ["Step", "The approval level that rejected it (L1 is the first approver)"],
+      params: [periodParam, dated, ...reasonNotes, ["Step", "The approval level that rejected it (L1 is the first approver)"],
         ...(trailNote ? [trailNote] : [])],
       columns: APPROVER_COLUMNS,
       rows: approverRejections,
@@ -307,8 +331,9 @@ export default {
       params: [
         periodParam,
         dated,
-        ["Cause", "The approval was cancelled, in practice because the RFQ was closed. The reason is the one given when it was closed."],
-        ["Cancelled By", "The person who closed the RFQ"],
+        ["Cause", "The approval was cancelled because the RFQ was closed (the comment is the one given when it was closed), or an approver rejected the PO as not needed."],
+        ["Cancelled By", "The person who closed the RFQ, or the approver who rejected it as not needed"],
+        ...reasonNotes,
       ],
       columns: CANCELLED_COLUMNS,
       rows: cancellations,

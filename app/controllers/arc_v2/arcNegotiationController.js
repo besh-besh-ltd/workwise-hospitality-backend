@@ -18,6 +18,10 @@ import {
 import { deferBad, isDeferred, sendDeferred } from '../../helper/deferredResponse.js';
 import { parseAsUTC } from '../../helper/dbTime.js';
 import { resolveArcPolicyFor, noArcPolicyError } from '../../helper/arc_v2/arcPolicy.js';
+import { normalizeCreatorRemarks, stripInternalRoundFields } from '../../helper/negotiation/roundRemarks.js';
+import { roundWindowError } from '../../helper/negotiation/roundWindow.js';
+import { heldArcPermissions } from '../../middleware/arcPermission.js';
+import { resolveApprovalCompanyScope, inCompanyScope } from '../../services/approvalTenantScope.js';
 
 /**
  * ARC Negotiation Controller
@@ -85,9 +89,16 @@ export async function createRound(req, res) {
     const targetPrice = body.target_price || null;
     const remarks     = body.remarks     || null;
 
+    // Internal note for approvers; validated before any DB work.
+    const creatorRemarksCheck = normalizeCreatorRemarks(body.creator_remarks);
+    if (!creatorRemarksCheck.ok) return bad(res, 400, creatorRemarksCheck.message);
+    const creatorRemarks = creatorRemarksCheck.value;
+
     if (!endDate || new Date(endDate) <= new Date()) {
       return bad(res, 400, 'end_date must be a future date');
     }
+    const windowError = roundWindowError(endDate);
+    if (windowError) return bad(res, 400, windowError);
 
     // Validate: at most one arc-level entry
     const arcLevelEntries = entries.filter((e) => e.is_arc_level);
@@ -259,6 +270,7 @@ export async function createRound(req, res) {
         endDate,
         targetPrice,
         remarks,
+        creatorRemarks,
         createdBy:   userId,
         vendorIds:   vendorIdsArr,
         vendorApprovals,
@@ -280,6 +292,7 @@ export async function createRound(req, res) {
           arc_id:       arcId,
           round_number: roundNumber,
           end_date:     endDate,
+          creator_remarks: creatorRemarks,
         },
         txContext: t,
       });
@@ -294,13 +307,13 @@ export async function createRound(req, res) {
         txContext: t,
       });
 
-      // Auto-approve: flip round ACTIVE inside the tx so the committed row is ACTIVE
+      // Auto-approve: activate the round in THIS transaction, so the committed
+      // round is ACTIVE whatever happens after commit. activateArcRoundTx is
+      // the same claim the post-approval handler makes (its PENDING_APPROVAL
+      // status), so the two can never both activate it. The vendors are told
+      // after commit (notifyArcRoundStarted below).
       if (engineResult.autoApproved === true) {
-        await arcNegotiationModel.updateRoundStatus(round.id, 'ACTIVE', {
-          approved_at:  new Date(),
-          published_at: new Date(),
-        }, t);
-        await arcNegotiationModel.updateAllVendorsStatus(round.id, 'APPROVED', t);
+        await activateArcRoundTx(t, { roundId: round.id, arcId, actorUserId: userId });
       }
 
       return {
@@ -318,11 +331,13 @@ export async function createRound(req, res) {
       scheduleArcNegotiationRoundExpiration(result.__round);
 
       if (result.__autoApproved) {
-        // Fire post-approval effects (vendor notifications) post-commit
-        await dispatchPostApprovalAction(result.__instanceId, userId, {
-          status: 'APPROVED',
-          comment: 'Auto-approved — creator is the configured ARC_NEGOTIATION approver',
-        });
+        // The round committed ACTIVE above; tell its vendors. A failure here
+        // must not turn a created, active round into an error response.
+        try {
+          await notifyArcRoundStarted({ arcId, roundId: result.__round.id, actorUserId: userId });
+        } catch (notifyErr) {
+          logger.error({ err: notifyErr, roundId: result.__round.id }, '[arcNeg] createRound: round-started notification failed');
+        }
       } else {
         await notifyArcEvent({
           arcId,
@@ -340,6 +355,52 @@ export async function createRound(req, res) {
 }
 
 // ============================================================
+// Round tenant + recovery gate (approve / reject)
+// ============================================================
+
+/**
+ * Is the round's owner (its ARC, or its RFQ for an RFQ round reached through
+ * this route) a company the caller may act for? Same scope as the approval
+ * engine's own routes (resolveApprovalCompanyScope), so a foreign round is
+ * answered like a missing one.
+ */
+async function roundInCallerTenant(req, round) {
+  const owner = await db.oneOrNone(
+    round.source_type === 'ARC'
+      ? `SELECT hospitality_company_id FROM tbl_arc WHERE id = $1`
+      : `SELECT hospitality_company_id FROM tbl_rfq WHERE id = $1`,
+    [round.source_type === 'ARC' ? Number(round.source_id) : Number(round.rfq_id ?? round.source_id)]
+  );
+  if (!owner) return false;
+  return inCompanyScope(await resolveApprovalCompanyScope(req), owner.hospitality_company_id);
+}
+
+/**
+ * Who may finish a round left PENDING_APPROVAL under an APPROVED instance:
+ * someone who could have approved it. An approver on the instance (any step,
+ * not removed), a holder of arc-comm.approve on the ARC, or the super admin.
+ */
+async function mayRecoverRound(req, instance, arcId) {
+  const userId = req.user?.id;
+  if (!userId) return false;
+  if (Number(req.user?.user_type) === 8) return true;
+  const seat = await db.oneOrNone(
+    `SELECT 1
+       FROM tbl_approval_instance_steps s
+       JOIN tbl_approval_step_approvers sa ON sa.approval_instance_step_id = s.id
+      WHERE s.approval_instance_id = $1 AND sa.approver_user_id = $2 AND sa.removed_at IS NULL
+      LIMIT 1`,
+    [instance.id, userId]
+  );
+  if (seat) return true;
+  const arc = await db.oneOrNone(
+    `SELECT id, hotel_id, department_id, process_id FROM tbl_arc WHERE id = $1`, [arcId]
+  );
+  if (!arc) return false;
+  return (await heldArcPermissions(userId, arc)).has('arc-comm.approve');
+}
+
+// ============================================================
 // BUYER — approve round
 // ============================================================
 
@@ -351,17 +412,43 @@ export async function approveRound(req, res) {
     const remarks = req.body?.remarks || req.body?.comment || null;
 
     const round = await arcNegotiationModel.getRoundById(roundId);
-    if (!round) return bad(res, 404, 'Round not found', 2);
+    // Another company's round answers exactly like a missing one.
+    if (!round || !(await roundInCallerTenant(req, round))) return bad(res, 404, 'Round not found', 2);
     if (Number(round.source_id) !== arcId || round.source_type !== 'ARC') {
       return bad(res, 403, 'Round does not belong to this ARC');
     }
     if (round.status !== 'PENDING_APPROVAL') {
       return bad(res, 400, `Cannot approve round in status '${round.status}'`);
     }
+    // Same rule as the RFQ approve path: approving a lapsed round would publish
+    // a window that has already closed. end_date is naive UTC (parseAsUTC).
+    if (parseAsUTC(round.end_date) <= new Date()) {
+      return bad(res, 400, "This round's deadline has passed, so it can no longer be approved. Ask the buyer to open a new round.");
+    }
 
     const instances = await getApprovalInstancesByEntity('ARC_NEGOTIATION', roundId);
-    const instance  = instances?.find?.((i) => i.status === 'PENDING') || instances?.[0];
-    if (!instance) return bad(res, 404, 'No PENDING approval instance found for this round', 2);
+    const instance  = instances?.find?.((i) => i.status === 'PENDING');
+    if (!instance) {
+      // No vote is waiting. A round still PENDING_APPROVAL under an APPROVED
+      // instance is one whose activation never ran (completed by a policy or
+      // membership change before propagation dispatched this handler, or a
+      // handler that failed): finish it, for someone who could approve it.
+      // The handler claims the round by its PENDING_APPROVAL status, so this
+      // activates it once. Anything else is a conflict, never a success.
+      // Through the one dispatcher, so the instance's target is checked like
+      // every other handler run.
+      const approved = instances?.find?.((i) => i.status === 'APPROVED');
+      if (approved && await mayRecoverRound(req, approved, arcId)) {
+        const out = await dispatchPostApprovalAction(approved.id, userId, {
+          status: 'APPROVED',
+          comment: 'Recovered: the approval had completed without activating the round',
+        });
+        if (out.result?.activated) {
+          return ok(res, { allApproved: true, recovered: true }, 'Round approved');
+        }
+      }
+      return bad(res, 409, 'This round has no approval waiting for a decision.');
+    }
 
     const result = await executeApprovalAction({
       approval_instance_id: instance.id,
@@ -369,6 +456,10 @@ export async function approveRound(req, res) {
       action:               'APPROVE',
       comment:              remarks,
     });
+    // Concluded between the read above and the vote: nothing was decided.
+    if (result.already_completed) {
+      return bad(res, 409, 'This round has no approval waiting for a decision.');
+    }
 
     return ok(res, { allApproved: result.instance_status === 'APPROVED' }, 'Vote recorded');
   } catch (err) {
@@ -394,7 +485,8 @@ export async function rejectRound(req, res) {
     if (!comment) return bad(res, 400, 'A rejection comment is required');
 
     const round = await arcNegotiationModel.getRoundById(roundId);
-    if (!round) return bad(res, 404, 'Round not found', 2);
+    // Another company's round answers exactly like a missing one.
+    if (!round || !(await roundInCallerTenant(req, round))) return bad(res, 404, 'Round not found', 2);
     if (Number(round.source_id) !== arcId || round.source_type !== 'ARC') {
       return bad(res, 403, 'Round does not belong to this ARC');
     }
@@ -403,8 +495,9 @@ export async function rejectRound(req, res) {
     }
 
     const instances = await getApprovalInstancesByEntity('ARC_NEGOTIATION', roundId);
-    const instance  = instances?.find?.((i) => i.status === 'PENDING') || instances?.[0];
-    if (!instance) return bad(res, 404, 'No PENDING approval instance found for this round', 2);
+    const instance  = instances?.find?.((i) => i.status === 'PENDING');
+    // No vote is waiting (the instance concluded): a conflict, never a success.
+    if (!instance) return bad(res, 409, 'This round has no approval waiting for a decision.');
 
     const result = await executeApprovalAction({
       approval_instance_id: instance.id,
@@ -412,6 +505,9 @@ export async function rejectRound(req, res) {
       action:               'REJECT',
       comment,
     });
+    if (result.already_completed) {
+      return bad(res, 409, 'This round has no approval waiting for a decision.');
+    }
 
     return ok(res, { allRejected: result.instance_status === 'REJECTED' }, 'Vote recorded');
   } catch (err) {
@@ -453,6 +549,44 @@ export async function listRounds(req, res) {
     return ok(res, enriched);
   } catch (err) {
     return fail(res, err, '[arcNegotiationController.listRounds]');
+  }
+}
+
+// ============================================================
+// BUYER — approval page bundle
+// ============================================================
+
+// Read grants that open the approval page. arc-comm.approve joins the
+// commercial read keys: an approver holding it was granted to approve, so it
+// reads what they approve. A live seat on any of this ARC's round approvals
+// opens it too — policy approvers may hold no module role, which is also why
+// approve/reject below carry no requireArcPermission.
+const APPROVAL_BUNDLE_READ_KEYS = ['arc-comm.read', 'arc-comm.evaluate', 'arc-comm.approve', 'arc.admin'];
+
+export async function getApprovalBundle(req, res) {
+  try {
+    const arcId  = Number(req.params.arcId);
+    const userId = req.user?.id;
+
+    const arc = await db.oneOrNone(
+      `SELECT id, hotel_id, department_id, process_id FROM tbl_arc WHERE id = $1`, [arcId]
+    );
+    if (!arc) return bad(res, 404, 'ARC not found', 2);
+
+    if (Number(req.user?.user_type) !== 8) {
+      const held = await heldArcPermissions(userId, arc);
+      const allowed = APPROVAL_BUNDLE_READ_KEYS.some((k) => held.has(k))
+        || await arcNegotiationModel.isApproverOnArcNegotiation(arcId, userId);
+      if (!allowed) {
+        return bad(res, 403, "You don't have access to this rate contract's negotiation rounds.");
+      }
+    }
+
+    const bundle = await arcNegotiationModel.getApprovalBundleForArc(arcId, userId);
+    if (!bundle) return bad(res, 404, 'ARC not found', 2);
+    return ok(res, bundle);
+  } catch (err) {
+    return fail(res, err, '[arcNegotiationController.getApprovalBundle]');
   }
 }
 
@@ -530,7 +664,8 @@ export async function listVendorRounds(req, res) {
     const arc = await arcModel.getById(arcId);
     if (!arc) return bad(res, 404, 'ARC not found', 2);
 
-    const allRounds = await arcNegotiationModel.getRoundsForArc(arcId);
+    // Vendors never see the creator's internal remarks.
+    const allRounds = stripInternalRoundFields(await arcNegotiationModel.getRoundsForArc(arcId));
     // Filter to rounds where this vendor is in vendor_ids
     const myRounds = allRounds.filter(
       (r) => Array.isArray(r.vendor_ids) && r.vendor_ids.map(Number).includes(Number(vendorId))
@@ -795,9 +930,62 @@ export async function submitVendorQuote(req, res) {
 // ============================================================
 
 /**
- * Called by approvalActionService when an ARC_NEGOTIATION instance reaches APPROVED.
+ * Activate an ARC round awaiting approval, inside the caller's transaction:
+ * claim it by its PENDING_APPROVAL status (this ARC's round only), approve its
+ * vendor rows and log negotiation_round_started. Returns false, writing
+ * nothing, when the round is not this ARC's or not pending approval, so a
+ * second caller (createRound's auto-approve, the post-approval handler,
+ * propagation, recovery) can never activate it twice. Notifications are the
+ * caller's, after commit (notifyArcRoundStarted).
+ *
+ * @returns {Promise<boolean>} whether this call activated the round
+ */
+export async function activateArcRoundTx(t, { roundId, arcId, actorUserId }) {
+  const claimed = await t.oneOrNone(
+    `UPDATE tbl_negotiation_rounds
+        SET status = 'ACTIVE', approved_at = $3, published_at = $3, updated_at = NOW()
+      WHERE id = $1 AND source_type = 'ARC' AND source_id = $2 AND status = 'PENDING_APPROVAL'
+      RETURNING id`,
+    [Number(roundId), Number(arcId), new Date()]
+  );
+  if (!claimed) return false;
+  await arcNegotiationModel.updateAllVendorsStatus(roundId, 'APPROVED', t);
+  await logArcEvent({
+    arcId,
+    eventType: ARC_EVENT_TYPES.NEGOTIATION_ROUND_STARTED,
+    actorId: actorUserId,
+    payload:  { round_id: roundId },
+    txContext: t,
+  });
+  return true;
+}
+
+/** Tell an activated round's vendors it is open. After commit only. */
+export async function notifyArcRoundStarted({ arcId, roundId, actorUserId }) {
+  const vendorUsers = await arcNegotiationModel.getVendorsForRound(roundId);
+  await notifyArcEvent({
+    arcId,
+    eventType:         ARC_EVENT_TYPES.NEGOTIATION_ROUND_STARTED,
+    actorId:           actorUserId,
+    recipientsOverride: vendorUsers,
+    payload:            { round_id: roundId },
+  });
+}
+
+/**
+ * Called when an ARC_NEGOTIATION instance reaches APPROVED, always through
+ * approvalActionService.dispatchPostApprovalAction (which first checks the
+ * instance's target is its own company's): an approver's last vote, a policy
+ * or membership change completing it (propagation), and approveRound's
+ * recovery of a round left PENDING_APPROVAL under an APPROVED instance.
  * Sets round status = ACTIVE + notifies vendors.
+ *
+ * Idempotent: activateArcRoundTx claims the round by its PENDING_APPROVAL
+ * status, so a second call (or a round already active, closed or cancelled)
+ * changes nothing and notifies nobody.
  * Must never throw (swallow + log).
+ *
+ * @returns {Promise<{activated: boolean}>}
  */
 export async function handleArcNegotiationApproval(approvalInstanceId, actorUserId, { instance } = {}) {
   try {
@@ -805,41 +993,31 @@ export async function handleArcNegotiationApproval(approvalInstanceId, actorUser
     const arcId   = instance?.metadata?.arc_id;
     if (!roundId || !arcId) {
       logger.warn({ approvalInstanceId }, '[arcNeg] handleArcNegotiationApproval: missing round_id or arc_id in metadata');
-      return;
+      return { activated: false };
     }
 
-    await db.tx(async (t) => {
-      await arcNegotiationModel.updateRoundStatus(roundId, 'ACTIVE', {
-        approved_at:  new Date(),
-        published_at: new Date(),
-      }, t);
-      await arcNegotiationModel.updateAllVendorsStatus(roundId, 'APPROVED', t);
-      await logArcEvent({
-        arcId,
-        eventType: ARC_EVENT_TYPES.NEGOTIATION_ROUND_STARTED,
-        actorId: actorUserId,
-        payload:  { round_id: roundId },
-        txContext: t,
-      });
-    });
+    const activated = await db.tx((t) => activateArcRoundTx(t, { roundId, arcId, actorUserId }));
+    if (!activated) {
+      logger.info({ approvalInstanceId, roundId, arcId }, '[arcNeg] handleArcNegotiationApproval: round not pending approval, nothing to do');
+      return { activated: false };
+    }
 
-    // Notify targeted vendors post-commit
-    const vendorUsers = await arcNegotiationModel.getVendorsForRound(roundId);
-    await notifyArcEvent({
-      arcId,
-      eventType:         ARC_EVENT_TYPES.NEGOTIATION_ROUND_STARTED,
-      actorId:           actorUserId,
-      recipientsOverride: vendorUsers,
-      payload:            { round_id: roundId },
-    });
+    await notifyArcRoundStarted({ arcId, roundId, actorUserId });
+    return { activated: true };
   } catch (err) {
     logger.error({ err, approvalInstanceId }, '[arcNeg] handleArcNegotiationApproval failed');
+    return { activated: false };
   }
 }
 
 /**
- * Called by approvalActionService when an ARC_NEGOTIATION instance reaches REJECTED.
- * Sets round status = CANCELLED + notifies initiator.
+ * Called when an ARC_NEGOTIATION instance reaches REJECTED (through the
+ * dispatcher, see above). Cancels the round + notifies the initiator.
+ *
+ * Claims the round the same way approval does: only THIS ARC's round, and only
+ * while it is PENDING_APPROVAL. A round already active, closed or cancelled is
+ * left alone (an approval can only refuse a round that was waiting for it), and
+ * a second call changes nothing and notifies nobody.
  * Must never throw.
  */
 export async function handleArcNegotiationRejection(approvalInstanceId, actorUserId, { comment, instance } = {}) {
@@ -851,10 +1029,15 @@ export async function handleArcNegotiationRejection(approvalInstanceId, actorUse
       return;
     }
 
-    await db.tx(async (t) => {
-      await arcNegotiationModel.updateRoundStatus(roundId, 'CANCELLED', {
-        closed_at: new Date(),
-      }, t);
+    const cancelled = await db.tx(async (t) => {
+      const claimed = await t.oneOrNone(
+        `UPDATE tbl_negotiation_rounds
+            SET status = 'CANCELLED', closed_at = $3, updated_at = NOW()
+          WHERE id = $1 AND status = 'PENDING_APPROVAL' AND source_type = 'ARC' AND source_id = $2
+          RETURNING id`,
+        [Number(roundId), Number(arcId), new Date()]
+      );
+      if (!claimed) return false;
       await arcNegotiationModel.updateAllVendorsStatus(roundId, 'REJECTED', t);
       await logArcEvent({
         arcId,
@@ -863,7 +1046,12 @@ export async function handleArcNegotiationRejection(approvalInstanceId, actorUse
         payload:  { round_id: roundId, comment },
         txContext: t,
       });
+      return true;
     });
+    if (!cancelled) {
+      logger.info({ approvalInstanceId, roundId, arcId }, '[arcNeg] handleArcNegotiationRejection: round not pending approval, nothing to do');
+      return;
+    }
 
     removeArcNegotiationRoundExpiration(roundId);
 

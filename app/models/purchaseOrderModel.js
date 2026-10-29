@@ -1,8 +1,10 @@
 import db from "../config/dbConn.js";
 import { sendApprovalNotification } from "../controllers/po/purchaseOrderEmails.js";
-import { consoleLogData, generateSignature, logError } from "../helper/common.js";
-import { scheduleGRNReminders } from "../helper/cronManager.js";
-import { sendDispatchedEmail, sendGRNRepresentativeEmail, sendGRNUpdationEmail, sendInvoiceEmail } from "../helper/sendEmailFunctions/generalReminderEmails.js";
+import { consoleLogData, logError } from "../helper/common.js";
+import { sendInvoiceEmail } from "../helper/sendEmailFunctions/generalReminderEmails.js";
+import { normalizeOwnS3Url } from "../helper/s3Urls.js";
+import { LIVE_TOKEN_SQL } from "../helper/receiveToken.js";
+import { InventoryError } from "../services/inventory/errors.js";
 import { AVAILABLE_HIERARCHY_TYPES, INVALID_PO_STATUSES_FOR_VENDOR, PO_STATUSES } from "../util/constants.js";
 import { logger } from "../util/logger.js";
 import generalModel, { markPOStatusChange, createApprovalInstance, getApprovalWorkflowUsers } from "./generalModel.js";
@@ -10,14 +12,16 @@ import pricingEngine from "../services/pricingEngine.js";
 import { dispatch as dispatchNotification } from "../services/notificationService.js";
 import { buyerPoList } from "../services/notificationLinks.js";
 import {
-  assertUserHasScope,
-  AuthorizationError,
   buildScopeExistsClause,
   listUsersWithAnyScope,
+  userHasAnyScope,
 } from "../services/authorizationService.js";
 import fs from 'fs';
 import { writePoDocument } from "../services/poDocumentService.js";
 import { notifyApprovalChanged } from '../services/approvalEvents.js';
+import { stripBuyerOnlyPoFields } from '../services/po/buyerOnlyPoFields.js';
+import { closeOpenHoldTx, findOpenHold, heldPoReawardError } from '../services/po/poHold.js';
+import { PoDecisionError } from '../services/po/poDecisionError.js';
 
 // ===========================================================================
 // SECURITY — legacy Purchase Order authorization gate
@@ -92,17 +96,8 @@ export function buildPoScopeExists(userId, alias, values, startIndex) {
 // True when the user's grant on ANY of `permissions` covers the tuple. One
 // helper for every PO predicate so the scope evaluation (and its NULL
 // semantics) is written once — only the permission list varies.
-const hasAnyScopeOf = async (userId, permissions, tuple, dbCtx = db) => {
-  for (const perm of permissions) {
-    try {
-      await assertUserHasScope(userId, perm, tuple, dbCtx);
-      return true;
-    } catch (err) {
-      if (!(err instanceof AuthorizationError)) throw err;
-    }
-  }
-  return false;
-};
+const hasAnyScopeOf = (userId, permissions, tuple, dbCtx = db) =>
+  userHasAnyScope(userId, permissions, tuple, dbCtx);
 
 // True when the user's grant on ANY of PO_SCOPE_PERMISSIONS covers the tuple.
 const hasAnyPoScope = (userId, tuple, dbCtx = db) =>
@@ -244,6 +239,50 @@ export class PoWritePermissionError extends Error {
 }
 
 /**
+ * The PO's own company x hotel x department x process tuple, the thing every
+ * scope predicate below is evaluated against. Throws PoAccessError (404) when
+ * the PO does not exist.
+ */
+export async function resolvePoScopeTuple(poId, dbCtx = db) {
+  const po = await resolvePoTenancy(poId, dbCtx);
+  if (!po) throw new PoAccessError();
+  return {
+    hospitality_company_id: po.hospitality_company_id,
+    hotel_id: po.hotel_id,
+    department_id: po.department_id,
+    process_id: po.process_id,
+  };
+}
+
+/**
+ * THE one "may this user initiate a PO at this scope tuple?" predicate. The
+ * initiate gate (assertPoInitiateAccess), the initiator list's `can_initiate`
+ * flag and the draft-edit path all call this, so they cannot disagree.
+ *
+ * Vendors and GRN token users never; super admins always; everyone else needs
+ * BOTH a read grant (PO_SCOPE_PERMISSIONS) AND a write grant
+ * (PO_INITIATE_PERMISSIONS) covering the tuple. Fail-closed on a tuple with no
+ * hospitality company, like assertPoAccess.
+ */
+export async function canInitiateOnTuple(user, tuple, dbCtx = db) {
+  if (user?.is_token_user || Number(user?.user_type) === 3) return false;
+  if (Number(user?.user_type) === 8) return true;
+
+  const userId = Number(user?.id);
+  if (!Number.isFinite(userId) || userId <= 0) return false;
+  if (!tuple?.hospitality_company_id) return false;
+
+  const scope = {
+    hospitality_company_id: tuple.hospitality_company_id,
+    hotel_id: tuple.hotel_id,
+    department_id: tuple.department_id,
+    process_id: tuple.process_id,
+  };
+  if (!(await hasAnyScopeOf(userId, PO_SCOPE_PERMISSIONS, scope, dbCtx))) return false;
+  return hasAnyScopeOf(userId, PO_INITIATE_PERMISSIONS, scope, dbCtx);
+}
+
+/**
  * THE gate for initiating a purchase order. Additive on top of assertPoAccess:
  * the caller must still be able to SEE the PO (404 when not), and must then
  * ALSO hold a write grant on the PO's own scope tuple (403 when not).
@@ -255,19 +294,9 @@ export const assertPoInitiateAccess = async (user, po_id, dbCtx = db) => {
   // resolves the tuple we are about to evaluate the write grant against.
   const po = await assertPoAccess(user, po_id, dbCtx);
 
-  // Vendors and GRN site-representative token users never initiate. noAcl([3])
-  // already blocks vendors at the route and the GRN token never reaches this
-  // route at all; both are re-asserted here so the model is safe standalone.
-  if (user?.is_token_user || Number(user?.user_type) === 3) {
-    throw new PoWritePermissionError();
-  }
-
-  // Super admin — parity with assertPoAccess, where a null hospitality scope
-  // means "every company". Super admins hold no tbl_user_role_scopes rows, so
-  // any scope-based predicate would refuse them outright.
-  if (Number(user?.user_type) === 8) return po;
-
-  const allowed = await hasAnyScopeOf(Number(user?.id), PO_INITIATE_PERMISSIONS, {
+  // Vendors, token users, super admins and the scope grants are all decided
+  // by the one shared predicate. (noAcl([3]) also blocks vendors at the route.)
+  const allowed = await canInitiateOnTuple(user, {
     hospitality_company_id: po.hospitality_company_id,
     hotel_id: po.hotel_id,
     department_id: po.department_id,
@@ -330,29 +359,18 @@ export const PO_INITIATORS_LIMIT = 25;
 const TOP_MANAGEMENT_ROLE_TITLE = "Top Management";
 
 /**
- * @param {object} po      a tenancy row from assertPoAccess/resolvePoTenancy
- * @param {object} caller  req.user — excluded from the list, and the subject of
- *                         `can_initiate`
- * @returns {Promise<{can_initiate:boolean, initiators:Array, total:number}>}
+ * Every active, non-vendor user who may initiate a PO at `tuple`: UNCAPPED,
+ * ordered narrowest scope first then by name. This is the single place that
+ * intersects the read grant with the write grant (plus the buyer company's
+ * super admins), so the initiators panel and the "draft PO ready" notifier
+ * (services/po/poInitiateNotifier.js) cannot disagree about who can initiate.
+ *
+ * @param {object} tuple  {hospitality_company_id, hotel_id, department_id, process_id}
+ * @param {{excludeUserId?: number}} [opts]  omit for the notifier: a cron or the
+ *   approver who caused the draft is still a legitimate recipient
+ * @returns {Promise<Array<{user_id:number,name,employee_code,email,mobile,role_title,scope_breadth:number}>>}
  */
-export const listPoInitiators = async (po, caller, dbCtx = db) => {
-  // can_initiate reuses the REAL predicate rather than re-deriving it, so the
-  // flag and the button and the write route can never disagree.
-  let can_initiate = false;
-  try {
-    await assertPoInitiateAccess(caller, po.id, dbCtx);
-    can_initiate = true;
-  } catch (err) {
-    if (!(err instanceof PoAccessError) && !(err instanceof PoWritePermissionError)) throw err;
-  }
-
-  const tuple = {
-    hospitality_company_id: po.hospitality_company_id,
-    hotel_id: po.hotel_id,
-    department_id: po.department_id,
-    process_id: po.process_id,
-  };
-
+export const listPoInitiatorRecipients = async (tuple, { excludeUserId = null } = {}, dbCtx = db) => {
   // The two halves of the gate, then their intersection.
   const [readers, writers] = await Promise.all([
     listUsersWithAnyScope(PO_SCOPE_PERMISSIONS, tuple, dbCtx),
@@ -364,12 +382,26 @@ export const listPoInitiators = async (po, caller, dbCtx = db) => {
   // the power to initiate, which is the one worth naming. listUsersWithAnyScope
   // already picked the lowest qualifying role_id per user.
   const roleTitleById = new Map();
+  // scope_breadth: how widely the person's INITIATING grant reaches.
+  // 0 = department-scoped, 1 = hotel-scoped, 2 = company-wide.
+  // It is the breadth of the WRITE grant (awarding.create/update) alone: read
+  // grants are incidental (a company-wide initiator may also hold a narrow
+  // department read role) and must not make them look "local". Where a person
+  // has several qualifying write grants, the narrowest wins. The list is
+  // ordered by it ascending: the person at this hotel/department comes before
+  // a group-wide approver the client would have to chase.
+  const SCOPE_COMPANY_WIDE = 2;
+  const breadthById = new Map();
   for (const w of writers) {
-    if (readerIds.has(Number(w.user_id))) roleTitleById.set(Number(w.user_id), w.role_title || null);
+    const wid = Number(w.user_id);
+    if (readerIds.has(wid)) {
+      roleTitleById.set(wid, w.role_title || null);
+      breadthById.set(wid, Number(w.scope_breadth ?? SCOPE_COMPANY_WIDE));
+    }
   }
 
   // Super admins of this PO's own buyer company.
-  if (po.hospitality_company_id) {
+  if (tuple.hospitality_company_id) {
     const admins = await dbCtx.any(
       `SELECT u.id AS user_id
          FROM tbl_users u
@@ -377,21 +409,23 @@ export const listPoInitiators = async (po, caller, dbCtx = db) => {
         WHERE hc.id = $1
           AND hc.is_deleted = 0
           AND u.user_type = 8`,
-      [po.hospitality_company_id]
+      [tuple.hospitality_company_id]
     );
     for (const a of admins) {
       if (!roleTitleById.has(Number(a.user_id))) {
         roleTitleById.set(Number(a.user_id), TOP_MANAGEMENT_ROLE_TITLE);
+        breadthById.set(Number(a.user_id), SCOPE_COMPANY_WIDE);
       }
     }
   }
 
-  const callerId = Number(caller?.id);
-  const candidateIds = [...roleTitleById.keys()].filter((id) => id !== callerId);
-  if (!candidateIds.length) return { can_initiate, initiators: [], total: 0 };
+  const excludedId = Number(excludeUserId);
+  const candidateIds = [...roleTitleById.keys()].filter((id) => id !== excludedId);
+  if (!candidateIds.length) return [];
 
-  // Hydrate + apply the active-user filter in SQL, ordered by name so the cap
-  // below always takes the same 25 people.
+  // Hydrate + apply the active-user filter in SQL. Ordered by name here; the
+  // breadth ordering is applied below, BEFORE the cap, so the cap keeps the
+  // nearest people rather than the alphabetically first.
   const rows = await dbCtx.any(
     `SELECT u.id AS user_id, u.name, u.employee_code, u.email, u.mobile
        FROM tbl_users u
@@ -403,13 +437,47 @@ export const listPoInitiators = async (po, caller, dbCtx = db) => {
     [candidateIds]
   );
 
+  const breadthOf = (r) => breadthById.get(Number(r.user_id)) ?? SCOPE_COMPANY_WIDE;
+  // rows are already name-ordered and Array#sort is stable, so ties on breadth
+  // keep name order.
+  rows.sort((a, b) => breadthOf(a) - breadthOf(b));
+
+  return rows.map((r) => ({
+    ...r,
+    role_title: roleTitleById.get(Number(r.user_id)) || null,
+    scope_breadth: breadthOf(r),
+  }));
+};
+
+
+/**
+ * @param {object} po      a tenancy row from assertPoAccess/resolvePoTenancy
+ * @param {object} caller  req.user — excluded from the list, and the subject of
+ *                         `can_initiate`
+ * @returns {Promise<{can_initiate:boolean, initiators:Array, total:number}>}
+ */
+export const listPoInitiators = async (po, caller, dbCtx = db) => {
+  const tuple = {
+    hospitality_company_id: po.hospitality_company_id,
+    hotel_id: po.hotel_id,
+    department_id: po.department_id,
+    process_id: po.process_id,
+  };
+
+  // can_initiate is the SAME predicate the gate uses, so the flag, the button
+  // and the write route can never disagree.
+  const can_initiate = await canInitiateOnTuple(caller, tuple, dbCtx);
+
+  const rows = await listPoInitiatorRecipients(tuple, { excludeUserId: caller?.id }, dbCtx);
+
   const initiators = rows.slice(0, PO_INITIATORS_LIMIT).map((r) => ({
     user_id: Number(r.user_id),
     name: r.name || null,
     employee_code: r.employee_code || null,
     email: r.email || null,
     mobile: r.mobile || null,
-    role_title: roleTitleById.get(Number(r.user_id)) || null,
+    role_title: r.role_title || null,
+    scope_breadth: r.scope_breadth,
   }));
 
   // `total` is the TRUE uncapped count, so the UI can say "and N others".
@@ -702,7 +770,74 @@ function calculatePricing(items) {
 const LINE_VARIANT_FROM_RFQ_PRODUCT =
   `(SELECT rp_v.product_variant_id FROM tbl_rfq_products rp_v WHERE rp_v.id = $2)`;
 
-export const draftPurchaseOrder = async (rfq_id, project_id, quote_item_id, total_value, product_info, initiated_by, company_id, user, existing_po_id, selected_hierarchy, t, global_charges = [], line_total = null) => {
+// ── A merge target the caller chose (existing_po_id) ─────────────────────────
+//
+// finalize and approveQuotes take existing_po_id from the request body. It
+// must name a DRAFT PO of the SAME RFQ for the SAME vendor: the auto-merge
+// criteria below, minus the project/hierarchy match. A same-RFQ match scopes
+// the PO to the RFQ's tenant only because every path that reaches here has
+// already gated the RFQ itself:
+//   - rfqController.finalize: assertCanReadParentRfq on rfq_id, first thing;
+//   - negotiationController.approveQuotes: the caller must be an approver on
+//     the current step of the instance that carries the RFQ (and the approval
+//     engine resolved those approvers inside the RFQ's company scope);
+//   - negotiationQuotePostApproval: only runs for an instance the approval
+//     engine has APPROVED, with the target parked by a gated finalize.
+// A new caller must gate the RFQ the same way first. Unknown, foreign,
+// other-vendor, past-draft and malformed ids get the same answer, so the
+// refusal never confirms that a PO exists.
+
+export const MERGE_TARGET_INVALID_MESSAGE =
+  "The selected PO can't take this line. Choose a draft purchase order of this RFQ for the same vendor.";
+
+const PG_INT_MAX = 2147483647;
+const isPgId = (n) => Number.isSafeInteger(n) && n > 0 && n <= PG_INT_MAX;
+
+/**
+ * A client-supplied PO id as an int: a JS integer, or a string of digits.
+ * Anything else ("5.0", "5e0", " 5", [5], {}, true) is null, never coerced.
+ */
+export function parsePoId(value) {
+  if (typeof value === 'number') return isPgId(value) ? value : null;
+  if (typeof value === 'string' && /^\d+$/.test(value)) {
+    const n = Number(value);
+    return isPgId(n) ? n : null;
+  }
+  return null;
+}
+
+/**
+ * Check a caller-chosen merge target. With `lock`, the PO row is taken FOR
+ * UPDATE (inside the award's transaction). Use the returned int for every
+ * write, never the raw input.
+ * @returns {Promise<number>} the PO id
+ * @throws PoDecisionError 400 PO_MERGE_TARGET_INVALID
+ */
+export async function assertDraftMergeTarget(dbCtx, { poId, rfqId, vendorId, lock = false }) {
+  const refused = () => new PoDecisionError(MERGE_TARGET_INVALID_MESSAGE, { code: 'PO_MERGE_TARGET_INVALID', httpStatus: 400 });
+  const id = parsePoId(poId);
+  const [rfq, vendor] = [rfqId, vendorId].map(Number);
+  if (id === null || !isPgId(rfq) || !isPgId(vendor)) throw refused();
+  const row = await dbCtx.oneOrNone(
+    `SELECT id FROM tbl_rfq_purchase_order
+      WHERE id = $1 AND rfq_id = $2 AND finalized_vendor_id = $3 AND status = $4
+      ${lock ? 'FOR UPDATE' : ''}`,
+    [id, rfq, vendor, PO_STATUSES.DRAFT]
+  );
+  if (!row) throw refused();
+  return Number(row.id);
+}
+
+/**
+ * @param {object} [opts]
+ * @param {boolean} [opts.staleTargetFallback] For an award whose approval has
+ *   already committed: a requested merge target that is refused under the lock
+ *   (it left draft, or never qualified) is logged and set aside, and the line is
+ *   drafted as if none had been chosen (auto-merge or a new draft). Refusing
+ *   there would leave the approval with no PO. Off by default: before approval,
+ *   a refused target is a 400 and nothing is written.
+ */
+export const draftPurchaseOrder = async (rfq_id, project_id, quote_item_id, total_value, product_info, initiated_by, company_id, user, existing_po_id, selected_hierarchy, t, global_charges = [], line_total = null, { staleTargetFallback = false } = {}) => {
     try {
       const { rfq_product_id, quantity, unit, unit_price, charges_meta, finalized_vendor_id } =
         product_info;
@@ -712,13 +847,22 @@ export const draftPurchaseOrder = async (rfq_id, project_id, quote_item_id, tota
       // the two, fall back to total_value to preserve legacy behaviour.
       const linePrice = line_total ?? total_value;
 
-      // 1. Check if a pending PO already exists for this RFQ Product
+      // 1. Check if a pending PO already exists for this RFQ Product. Locked:
+      // it is about to be cancelled, and a PO on hold (an approver waiting on
+      // an answer) must not be: the re-award is refused instead. The award
+      // paths check this up front; this is the backstop under the lock.
       const existing = await t.oneOrNone(
-        `SELECT TRPO.id FROM tbl_rfq_purchase_order TRPO
+        `SELECT TRPO.id, TRPO.po_number
+           FROM tbl_rfq_purchase_order TRPO
         LEFT JOIN tbl_purchase_order_product TPOP ON TPOP.purchase_order_id = TRPO.id AND TPOP.rfq_product_id = $2
-      WHERE rfq_id = $1 AND TPOP.id IS NOT NULL AND status = $3`,
+      WHERE rfq_id = $1 AND TPOP.id IS NOT NULL AND status = $3
+      FOR UPDATE OF TRPO`,
         [rfq_id, rfq_product_id, PO_STATUSES.PENDING_APPROVAL]
       );
+
+      // Read after the lock, on a fresh snapshot: a hold opened by whoever
+      // held the lock before us is seen.
+      if (existing && (await findOpenHold(t, existing.id))) throw heldPoReawardError(existing.po_number);
 
       if (existing) {
         await t.none(
@@ -730,6 +874,26 @@ export const draftPurchaseOrder = async (rfq_id, project_id, quote_item_id, tota
       }
 
       let po = null;
+
+      // A target the caller chose must be this RFQ's draft for this vendor.
+      // Checked and locked here, after the pending PO above, the same order the
+      // auto-merge below takes its locks in; from here on existing_po_id is the
+      // checked int, never the raw input.
+      if (existing_po_id) {
+        const requested = existing_po_id;
+        try {
+          existing_po_id = await assertDraftMergeTarget(t, {
+            poId: requested, rfqId: rfq_id, vendorId: finalized_vendor_id, lock: true,
+          });
+        } catch (err) {
+          if (!(staleTargetFallback && err instanceof PoDecisionError && err.code === 'PO_MERGE_TARGET_INVALID')) throw err;
+          logger.warn(
+            { rfqId: rfq_id, rfqProductId: rfq_product_id, existingPoId: requested },
+            '[draftPO] merge target is no longer a draft of this RFQ for the vendor; the approved line is drafted without it'
+          );
+          existing_po_id = null;
+        }
+      }
 
       // Auto-merge: if the caller did not nominate a merge target, look for an
       // existing draft PO on this RFQ for the same vendor that shares the same
@@ -760,10 +924,13 @@ export const draftPurchaseOrder = async (rfq_id, project_id, quote_item_id, tota
         }
       }
 
-      if(existing_po_id) {
-        if(!(await t.oneOrNone(`SELECT id FROM tbl_rfq_purchase_order WHERE id = $1`, [existing_po_id])))
-          throw new Error("No Purchase Order found from id:", existing_po_id);
+      // `created` is the signal the "draft PO ready" notifier keys on: true only
+      // when this call INSERTed a new PO header. A merge (explicit existing_po_id
+      // or the auto-merge above) appends a line to a draft that already existed,
+      // and its initiators were told when it was first created.
+      const created = !existing_po_id;
 
+      if(existing_po_id) {
         po = await t.one(
           `UPDATE tbl_rfq_purchase_order
             SET
@@ -783,6 +950,12 @@ export const draftPurchaseOrder = async (rfq_id, project_id, quote_item_id, tota
           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, ${LINE_VARIANT_FROM_RFQ_PRODUCT})`,
           [existing_po_id, rfq_product_id, quote_item_id, quantity, unit, unit_price, charges_meta, linePrice]
         )
+
+        // Delivery plan (inventory): a plan made before this line existed
+        // cannot carry it. Dropped in the same transaction (the target is a
+        // draft, so nothing has been dispatched or received against it); the
+        // next read, or the submit for approval, plans every line again.
+        await t.none(`DELETE FROM tbl_po_delivery WHERE po_id = $1`, [existing_po_id]);
 
         // Re-aggregate the header grand total over ALL lines now on this PO
         // plus the existing snapshot of document-level global_charges. Without
@@ -870,6 +1043,28 @@ export const draftPurchaseOrder = async (rfq_id, project_id, quote_item_id, tota
         )
       }
 
+      // Re-award trace: a draft that awards a product again after an approver
+      // rejected its PO points at that rejected PO, so the next approver can
+      // see why the first one was turned down. Latest rejected PO on this RFQ
+      // sharing the product. Set when first linked (create or merge): a line
+      // merged into an existing draft links that draft if it traces nothing
+      // yet; a draft that already traces a rejected PO keeps it.
+      await t.none(
+        `UPDATE tbl_rfq_purchase_order
+            SET replaces_po_id = (
+              SELECT prev.id
+                FROM tbl_rfq_purchase_order prev
+                JOIN tbl_purchase_order_product pp ON pp.purchase_order_id = prev.id
+               WHERE prev.rfq_id = $2
+                 AND pp.rfq_product_id = $3
+                 AND prev.status = 'rejected'
+                 AND prev.id <> $1
+               ORDER BY prev.id DESC
+               LIMIT 1)
+          WHERE id = $1 AND replaces_po_id IS NULL`,
+        [po.id, rfq_id, rfq_product_id]
+      );
+
       // Auto-initiate eligibility probe — runs inside the same tx so the
       // just-inserted line is visible. The result is returned to the
       // caller (rfqController.finalize / negotiationQuotePostApproval),
@@ -881,6 +1076,7 @@ export const draftPurchaseOrder = async (rfq_id, project_id, quote_item_id, tota
 
       return {
         po_id: po.id,
+        created,
         status: true,
         message: "PO has been drafted successfully!",
         should_auto_initiate,
@@ -924,6 +1120,8 @@ export const draftPurchaseOrder = async (rfq_id, project_id, quote_item_id, tota
  *     visibility gate keeps it hidden until approval anyway, but a stale URL
  *     would still surface in some places — null is the safe state)
  *   - rfq_product_id / quote_id / quantity rebuilt from the new line set
+ *   - send-back history (tbl_po_send_backs) moves to the kept PO; it keeps its
+ *     replaces_po_id, else takes a source's
  */
 export const mergeDraftPOs = async ({ keep_po_id, po_ids, user, txContext = null } = {}) => {
   const executor = async (t) => {
@@ -946,7 +1144,7 @@ export const mergeDraftPOs = async ({ keep_po_id, po_ids, user, txContext = null
     // concurrent initiate/approve/edit on any of these drafts can't race
     // past us mid-merge.
     const rows = await t.any(
-      `SELECT id, status, finalized_vendor_id, rfq_id, company_id
+      `SELECT id, status, finalized_vendor_id, rfq_id, company_id, replaces_po_id
          FROM tbl_rfq_purchase_order
         WHERE id = ANY($1::int[])
         FOR UPDATE`,
@@ -980,6 +1178,40 @@ export const mergeDraftPOs = async ({ keep_po_id, po_ids, user, txContext = null
     if (user && user.company_id && Number(user.company_id) !== Number(keepRow.company_id)) {
       throw new Error('You do not have access to these purchase orders');
     }
+
+    // Send-back history (holds and rejections, and their files by FK) is the
+    // order's record: it moves to the kept PO. Its FK has no ON DELETE, so a
+    // source draft carrying any (a held PO returned to draft by an edit) made
+    // the delete below fail. A draft has no OPEN hold: the hold closes with the
+    // approval that returned it to draft. Guarded anyway, since the kept PO
+    // may hold at most one.
+    const openHold = await t.oneOrNone(
+      `SELECT purchase_order_id FROM tbl_po_send_backs
+        WHERE purchase_order_id = ANY($1::int[]) AND status = 'OPEN'
+        LIMIT 1`,
+      [allIds]
+    );
+    if (openHold) {
+      throw new Error(`PO ${openHold.purchase_order_id} is on hold for information; it cannot be merged`);
+    }
+    await t.none(
+      `UPDATE tbl_po_send_backs
+          SET purchase_order_id = $1
+        WHERE purchase_order_id = ANY($2::int[])`,
+      [keepIdNum, sourceIds]
+    );
+    // The re-award trace: the kept PO keeps its own, else takes a source's
+    // (lowest id first). Read from the rows locked above, before the delete.
+    const inheritedReplacesPoId = keepRow.replaces_po_id ?? (rows
+      .filter((r) => r.id !== keepIdNum && r.replaces_po_id != null)
+      .sort((a, b) => a.id - b.id)[0]?.replaces_po_id ?? null);
+
+    // Delivery plans (inventory): the kept PO's plan does not carry the lines
+    // about to join it, and a source's plan would follow its lines onto the
+    // kept PO's ids. Every plan of the set is dropped (drafts: nothing has been
+    // dispatched or received against them); the next read, or the submit for
+    // approval, plans the merged PO afresh.
+    await t.none(`DELETE FROM tbl_po_delivery WHERE po_id = ANY($1::int[])`, [allIds]);
 
     // Re-parent ALL child rows from source POs to the kept PO. Order doesn't
     // matter since they're sibling tables, but we keep it deterministic for
@@ -1088,6 +1320,7 @@ export const mergeDraftPOs = async ({ keep_po_id, po_ids, user, txContext = null
               rfq_product_id = $2::int[],
               quote_id       = $3::int[],
               quantity       = $4,
+              replaces_po_id = $6::int,
               po_pdf_url     = NULL,
               updated_at     = NOW()
         WHERE id = $5`,
@@ -1097,6 +1330,7 @@ export const mergeDraftPOs = async ({ keep_po_id, po_ids, user, txContext = null
         linesAgg?.quotes || [],
         Number(linesAgg?.qty) || 0,
         keepIdNum,
+        inheritedReplacesPoId,
       ]
     );
 
@@ -1176,7 +1410,8 @@ export const initiatePurchaseOrder = async (po_id, initiator, t) => {
         JOIN tbl_company TCSUP ON TCSUP.id = SUP.company_id
         JOIN tbl_company TC ON TC.id = PO.company_id 
 
-      WHERE PO.id = $1`,
+      WHERE PO.id = $1
+      FOR UPDATE OF PO`,
       [po_id]
     );
 
@@ -1314,6 +1549,17 @@ export const initiatePurchaseOrder = async (po_id, initiator, t) => {
           [po_id]
         );
       }
+    }
+
+    // Delivery plan (inventory, spec §5.3): the default plan exists from
+    // pending_approval on, so the document below prints it. A plan made on a
+    // draft and since outgrown is rebuilt. In a savepoint: a plan problem
+    // (say, a PO whose company cannot be resolved) must not stop the submit.
+    try {
+      const { ensureCurrentPlan } = await import("../services/inventory/planService.js");
+      await t.tx((sp) => ensureCurrentPlan(sp, purchaseOrder.id, { userId: initiator?.id ?? null }));
+    } catch (planErr) {
+      logError(`[po ${purchaseOrder.id}] default delivery plan at submit failed`, planErr);
     }
 
     // Generate and store the PO document on THIS transaction.
@@ -1799,11 +2045,13 @@ export const getPOByRFQId = async (rfq_id, user_id, user_type, page = 1, limit =
 
       data = data.map(d => {
         const sealedPdfUrl = resolvePoPdfVisibility(d.status, d.po_pdf_url);
-        return {
+        const row = {
           ...d,
           po_pdf_url: sealedPdfUrl,
           poPdfUrl: sealedPdfUrl,
         };
+        // The re-award trace points at a rejected PO, often another vendor's.
+        return user_type == 3 ? stripBuyerOnlyPoFields(row) : row;
       })
 
       // The scope predicate correlates against the joined RFQ alias, so the
@@ -1957,20 +2205,45 @@ export const getPODetailsById = async (po_id, user_id) => {
                 ),
                 '[]'::json
               ) AS documents,
+              -- Site-rep links that still work: site_rep is the newest,
+              -- site_reps all of them (one per hotel at most). "Live" is
+              -- LIVE_TOKEN_SQL, the predicate the token auth itself uses, so the
+              -- page never shows a link as working when auth would refuse it.
               (
                 SELECT JSON_BUILD_OBJECT(
-                  'id', TTLD.id,
-                  'name', TTLD.name,
-                  'email', TTLD.email,
-                  'phone', TTLD.phone,
-                  'created_at', TTLD.created_at
+                  'id', tl.id,
+                  'name', tl.name,
+                  'email', tl.email,
+                  'phone', tl.phone,
+                  'hotel_id', tl.hotel_id,
+                  'expires_at', COALESCE(tl.expires_at, tl.created_at + interval '14 days'),
+                  'last_used_at', tl.last_used_at,
+                  'created_at', tl.created_at
                 )
-                FROM tbl_token_login_data TTLD
-                WHERE TTLD.token_type = 'GRN'
-                AND entity_id = po.id
-
+                FROM tbl_token_login_data tl
+                WHERE tl.entity_id = po.id
+                AND ${LIVE_TOKEN_SQL}
+                ORDER BY tl.id DESC
                 LIMIT 1
               ) AS site_rep,
+              COALESCE(
+                (
+                  SELECT JSON_AGG(JSON_BUILD_OBJECT(
+                    'id', tl.id,
+                    'name', tl.name,
+                    'email', tl.email,
+                    'phone', tl.phone,
+                    'hotel_id', tl.hotel_id,
+                    'expires_at', COALESCE(tl.expires_at, tl.created_at + interval '14 days'),
+                    'last_used_at', tl.last_used_at,
+                    'created_at', tl.created_at
+                  ) ORDER BY tl.id DESC)
+                  FROM tbl_token_login_data tl
+                  WHERE tl.entity_id = po.id
+                  AND ${LIVE_TOKEN_SQL}
+                ),
+                '[]'::json
+              ) AS site_reps,
               COALESCE(
               (
                 SELECT JSON_AGG(
@@ -2276,12 +2549,65 @@ export const getPODetailsById = async (po_id, user_id) => {
   }
 };
 
+// ===========================================================================
+// SECURITY — what PUT /po/:po_id may write.
+// ---------------------------------------------------------------------------
+// handleUpdatePO used to treat every `path` as a column name, so any editor
+// could write `status`, `finalized_vendor_id`, `approval_instance_id`... on the
+// PO row. The allow-lists below are exactly the fields the buyer edit screen
+// (PurchaseOrderEditView.js) emits; anything else is refused 400 BEFORE a
+// transaction is opened. Totals are never client-writable: total_price and
+// total_value are recomputed server-side from the lines.
+//   root  : po_number, gstin, terms_and_conditions
+//   line  : quantity, unit, unit_price, `removed`, charges_meta.<key>
+//   hsn   : hsn_codes[<rfq_item_id>].code
+// ===========================================================================
+export const PO_EDITABLE_ROOT_COLUMNS = Object.freeze(["po_number", "gstin", "terms_and_conditions"]);
+export const PO_EDITABLE_LINE_FIELDS = Object.freeze(["quantity", "unit", "unit_price"]);
+export const PO_EDITABLE_CHARGE_KEYS = Object.freeze([
+  "freight_price", "freight_mode", "package_price", "package_mode", "tax", "tax_mode",
+]);
+
+export class PoFieldNotEditableError extends Error {
+  constructor(field) {
+    super(`The field "${field}" cannot be edited on a purchase order.`);
+    this.name = "PoFieldNotEditableError";
+    this.status = 400;
+    this.code = "PO_FIELD_NOT_EDITABLE";
+    this.field = field;
+  }
+}
+
+/** Throws PoFieldNotEditableError for the first change path outside the allow-lists. */
+const assertPoChangesEditable = (changes) => {
+  for (const change of changes) {
+    const path = change?.path;
+    if (!path) continue; // the apply loop has always skipped path-less entries
+    if (typeof path !== "string") throw new PoFieldNotEditableError(String(path));
+
+    const product = path.match(/^product\[(\d+)\]\.(.+)$/);
+    if (product) {
+      const rest = product[2];
+      if (rest === "removed" || PO_EDITABLE_LINE_FIELDS.includes(rest)) continue;
+      const charge = rest.match(/^charges_meta\.([A-Za-z0-9_]+)$/);
+      if (charge && PO_EDITABLE_CHARGE_KEYS.includes(charge[1])) continue;
+      throw new PoFieldNotEditableError(path);
+    }
+    if (/^hsn_codes\[\d+\]\.code$/.test(path)) continue;
+    if (PO_EDITABLE_ROOT_COLUMNS.includes(path)) continue;
+    throw new PoFieldNotEditableError(path);
+  }
+};
+
 export const handleUpdatePO = async (po_id, changes, current_user) => {
   if (!po_id || !Array.isArray(changes) || changes.length <= 0) {
     throw new Error("PO Id and Changes are required to update the PO!");
   }
 
   const poId = Number(po_id);
+
+  // Refuse any write outside the allow-lists before touching the database.
+  assertPoChangesEditable(changes);
 
   const po = await db.one(
     `SELECT * FROM tbl_rfq_purchase_order
@@ -2331,7 +2657,21 @@ export const handleUpdatePO = async (po_id, changes, current_user) => {
     }
   }
 
-  return db.tx(async (t) => {
+  const outcome = await db.tx(async (t) => {
+    // Lock order: PO row first, then the approval instance. Everything below
+    // (status, edits, cancel, re-initiate) is decided against THIS row, so a
+    // concurrent POST /po/initiate (which locks the same row) cannot slip a
+    // second approval instance in between.
+    const lockedPo = await t.one(
+      `SELECT * FROM tbl_rfq_purchase_order WHERE id = $1 FOR UPDATE`,
+      [poId]
+    );
+    if (PO_LOCKED_STATUSES.includes(String(lockedPo.status))) {
+      throw new Error(
+        `Edit failed! This purchase order is ${lockedPo.status} and can no longer be edited.`
+      );
+    }
+
     // --- Buckets for updates ---
     const poUpdates = {}; // root-level PO column => latest value
     const productUpdates = {}; // rfq_item_id => { remove: bool, fields: {}, charges: {} }
@@ -2475,6 +2815,18 @@ export const handleUpdatePO = async (po_id, changes, current_user) => {
       await t.none(productUpdateQuery, values);
     }
 
+    // A delivery plan made against the old lines or quantities cannot stand:
+    // drop it here, in this transaction, and the next read of the PO's
+    // deliveries builds the default plan from the edited lines (inventory
+    // planCore.ensureDefaultPlan). Only reachable before vendor acceptance
+    // (PO_LOCKED_STATUSES), so nothing has been dispatched or received yet.
+    const linesChanged = Object.values(productUpdates).some(
+      (info) => info.remove || Object.prototype.hasOwnProperty.call(info.fields, "quantity")
+    );
+    if (linesChanged) {
+      await t.none(`DELETE FROM tbl_po_delivery WHERE po_id = $1`, [poId]);
+    }
+
     // --- 2b) Server-authoritative recompute of total_price per touched
     // product, then re-aggregate the PO's total_value. The engine consumes
     // the row state AFTER the patches above were applied, so any client-
@@ -2614,12 +2966,14 @@ export const handleUpdatePO = async (po_id, changes, current_user) => {
 
     // Cancel existing approval instance before re-initiating (PO was edited, needs fresh approval)
     const existingInstance = await t.oneOrNone(
-      `SELECT id, status FROM tbl_approval_instances
+      `SELECT id, status, initiated_by FROM tbl_approval_instances
       WHERE entity_type = 'PO' AND entity_id = $1 AND status = 'PENDING'
-      ORDER BY created_at DESC LIMIT 1`,
+      ORDER BY created_at DESC LIMIT 1
+      FOR UPDATE`,
       [po_id]
     );
 
+    const cancelledPendingInstance = !!existingInstance;
     if (existingInstance) {
       await t.none(
         `UPDATE tbl_approval_instances SET status = 'CANCELLED', completed_at = NOW() WHERE id = $1`,
@@ -2634,8 +2988,18 @@ export const handleUpdatePO = async (po_id, changes, current_user) => {
       await t.none(
         `INSERT INTO tbl_approval_actions (approval_instance_id, approver_user_id, action, comment)
         VALUES ($1, $2, 'CANCELLED', $3)`,
-        [existingInstance.id, current_user.id, '[CANCELLED] PO edited, re-initiating approval']
+        [existingInstance.id, current_user.id, `[CANCELLED] PO edited by ${current_user.name || `user ${current_user.id}`}, re-initiating approval`]
       );
+      // A hold on the cancelled approval goes with it, in this transaction
+      // (PO locked above, then the instance): the restarted approval begins
+      // at step 1 with nothing pending on anyone. The person asked is told
+      // after commit.
+      await closeOpenHoldTx(t, {
+        poId: Number(po_id),
+        status: 'SUPERSEDED',
+        resolution: 'PO_AMENDED_RESTARTED',
+        actorId: current_user.id,
+      });
       // Clear the old instance reference from PO
       await t.none(
         `UPDATE tbl_rfq_purchase_order SET approval_instance_id = NULL, status = 'draft' WHERE id = $1`,
@@ -2643,21 +3007,79 @@ export const handleUpdatePO = async (po_id, changes, current_user) => {
       );
     }
 
-    const result = await initiatePurchaseOrder(po_id, current_user, t);
-    if(result.approval_required) {
-      const purchaseOrder = await t.oneOrNone(
-        `SELECT * FROM tbl_rfq_purchase_order
-        WHERE id = $1`,
-        [result.po_id]
-      );
+    // Re-initiate only when
+    //  (a) this edit just cancelled a PENDING approval: that is a resubmission,
+    //      so it restarts approval attributed to the ORIGINAL initiator (who was
+    //      permitted to initiate), with the editor recorded on the CANCELLED
+    //      action row. If that person is gone or inactive, only an editor who
+    //      can initiate may restart it; otherwise the PO stays a draft.
+    //  (b) the (locked) PO is a draft AND the editor holds the initiate
+    //      permission. Editing a draft is not itself a licence to initiate it.
+    let initiator = null;
+    if (existingInstance) {
+      const original = existingInstance.initiated_by
+        ? await t.oneOrNone(
+            `SELECT id, company_id, name FROM tbl_users
+              WHERE id = $1 AND status = 1 AND is_deleted = 0`,
+            [existingInstance.initiated_by]
+          )
+        : null;
+      if (original) {
+        initiator = { ...current_user, id: original.id, company_id: original.company_id ?? current_user.company_id };
+      } else {
+        const tuple = await resolvePoScopeTuple(poId, t);
+        if (await canInitiateOnTuple(current_user, tuple, t)) initiator = current_user;
+      }
+    } else if (String(lockedPo.status) === PO_STATUSES.DRAFT) {
+      const tuple = await resolvePoScopeTuple(poId, t);
+      if (await canInitiateOnTuple(current_user, tuple, t)) initiator = current_user;
+    }
 
-      if (purchaseOrder && result.current_approver_id) {
-        await sendApprovalNotification(purchaseOrder, result.current_approver_id);
+    let notify = null;
+    if (initiator) {
+      const result = await initiatePurchaseOrder(po_id, initiator, t);
+      if (result.approval_required) {
+        // Who to tell, read on this transaction, told after it commits. The
+        // hospitality workflow reports no single current_approver_id: its
+        // approvers are the PENDING ones on the new instance's current step,
+        // exactly as initiatePO tells them.
+        let approverIds = [];
+        if (result.approval_type === 'new' && result.approval_instance_id) {
+          approverIds = (await t.any(
+            `SELECT DISTINCT sa.approver_user_id AS user_id
+               FROM tbl_approval_step_approvers sa
+               JOIN tbl_approval_instance_steps st ON st.id = sa.approval_instance_step_id
+               JOIN tbl_approval_instances ai ON ai.id = st.approval_instance_id
+              WHERE ai.id = $1 AND st.step_order = ai.current_step
+                AND st.status = 'PENDING' AND sa.status = 'PENDING'
+              ORDER BY sa.approver_user_id`,
+            [result.approval_instance_id]
+          )).map((r) => r.user_id);
+        } else if (result.current_approver_id) {
+          approverIds = [result.current_approver_id];
+        }
+        const purchaseOrder = approverIds.length
+          ? await t.oneOrNone(`SELECT * FROM tbl_rfq_purchase_order WHERE id = $1`, [result.po_id])
+          : null;
+        if (purchaseOrder) notify = { purchaseOrder, approverIds };
       }
     }
 
-    return { success: true };
+    return { notify };
   });
+
+  // After commit, and never allowed to fail an edit that already succeeded.
+  if (outcome.notify) {
+    for (const approverId of outcome.notify.approverIds) {
+      try {
+        await sendApprovalNotification(outcome.notify.purchaseOrder, approverId);
+      } catch (err) {
+        logError('handleUpdatePO: approval notification failed after commit', err);
+      }
+    }
+  }
+
+  return { success: true };
 };
 
 // Tenancy for milestones is enforced by assertPoAccess(po_id) in the
@@ -2681,9 +3103,22 @@ export const getMilestonesByPOId = async (company_id, po_id, includeDeleted = fa
   );
 };
 
-export const createMilestone = async (data, user) => {
+/**
+ * rfq_id and company_id come from the PO (`po`: the tenancy row assertPoAccess
+ * returned), never from the body: a call-off PO has no RFQ (D9), and a body
+ * rfq_id could name another tenant's RFQ.
+ */
+const poOwnedIds = async (po_id, user, po) => {
+  const tenancy = po ?? (await resolvePoTenancy(po_id));
+  if (!tenancy) throw new PoAccessError();
+  return {
+    rfq_id: tenancy.rfq_id ?? null,
+    company_id: tenancy.company_id ?? user?.company_id ?? null,
+  };
+};
+
+export const createMilestone = async (data, user, po = null) => {
   const {
-    rfq_id,
     po_id,
     milestone_name,
     due_date,
@@ -2692,12 +3127,14 @@ export const createMilestone = async (data, user) => {
     attachments = [],
   } = data;
 
+  const { rfq_id, company_id } = await poOwnedIds(po_id, user, po);
+
   const milestone = await db.oneOrNone(
     `INSERT INTO tbl_payment_milestone 
       (rfq_id, po_id, company_id, milestone_name, due_date, milestone_description, created_by, reminder_users, attachments) 
      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
      RETURNING *`,
-    [rfq_id, po_id, user.company_id, milestone_name, due_date, milestone_description, user.id, reminder_users, attachments ? JSON.stringify(attachments) : []]
+    [rfq_id, po_id, company_id, milestone_name, due_date, milestone_description, user.id, reminder_users, attachments ? JSON.stringify(attachments) : []]
   );
 
   return milestone;
@@ -2772,9 +3209,8 @@ export const getTasksByPOId = async (company_id, po_id, page, limit) => {
   return [pos, total]
 };
 
-export const createTask = async (data, user) => {
+export const createTask = async (data, user, po = null) => {
   const {
-    rfq_id,
     po_id,
     task_name,
     completion_date,
@@ -2782,12 +3218,14 @@ export const createTask = async (data, user) => {
     task_description,
   } = data;
 
+  const { rfq_id, company_id } = await poOwnedIds(po_id, user, po);
+
   const task = await db.oneOrNone(
     `INSERT INTO tbl_purchase_order_tasks 
       (rfq_id, po_id, company_id, task_name, completion_date, task_description, status, created_by) 
      VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
      RETURNING *`,
-    [rfq_id, po_id, user.company_id, task_name, completion_date, task_description, status, user.id]
+    [rfq_id, po_id, company_id, task_name, completion_date, task_description, status, user.id]
   );
 
   return task;
@@ -2882,7 +3320,7 @@ export const updateHSNCode = async (po_id, hsn_codes, mapped_by) => {
 // iterated it — the TypeError rejected inside db.tx and took the recorded GRN
 // or invoice down with it. Resolve from the approval engine instead and keep
 // the legacy hierarchy only as an extra source for a PO that still carries one.
-const resolvePoNotificationRecipients = async (po, t = db) => {
+export const resolvePoNotificationRecipients = async (po, t = db) => {
   const ids = new Set();
 
   if (po?.initiated_by != null) ids.add(Number(po.initiated_by));
@@ -2909,295 +3347,203 @@ const resolvePoNotificationRecipients = async (po, t = db) => {
   return [...ids];
 };
 
-export const handleRaiseInvoice = async (po_id, invoice_url, vendor_id) => {
-  return await db.tx(async t => {
-    const po = await t.oneOrNone(
-      `SELECT * FROM tbl_rfq_purchase_order
-      WHERE id = $1`,
-      [po_id]
-    );
+/**
+ * POST /po/raiseInvoice: the vendor raises an invoice against their PO
+ * (inventory spec §5.2, task C4). The work is invoiceService.raiseInvoice:
+ * invoice number, date and amount, an optional dispatch note it bills, as
+ * many invoices per PO as there are deliveries, and po.status moved forward
+ * to invoice_raised (never back). The legacy body (po_id + invoice_url only)
+ * still raises one file-only invoice.
+ *
+ * The buyer-team email goes out after COMMIT, and its failure never undoes
+ * the invoice.
+ *
+ * @param {number} po_id
+ * @param {string} invoice_url_input must be one of our own S3 objects
+ * @param {number} vendor_id req.user.id
+ * @param {object} [details] the request body's invoice_number, invoice_date,
+ *   invoice_amount, dispatch_id
+ * @param {object|null} [user] req.user; defaults to the vendor {id: vendor_id, user_type: 3}
+ * @returns {Promise<{document:object, invoice:object, scope:object, details:object}>}
+ * @throws InventoryError (VALIDATION / NOT_FOUND / CONFLICT)
+ */
+export const handleRaiseInvoice = async (po_id, invoice_url_input, vendor_id, details = {}, user = null) => {
+  // Only our own S3 objects, stored in normalized (WHATWG href) form.
+  const invoice_url = normalizeOwnS3Url(invoice_url_input);
+  if (!invoice_url) {
+    throw new InventoryError('VALIDATION', 'Please upload the invoice again: the file link is not one of ours.', { field: 'invoice_url' });
+  }
+  // Lazy: the inventory services import this model (resolvePoTenancy).
+  const { raiseInvoice } = await import('../services/inventory/invoiceService.js');
+  const actor = user ?? { id: vendor_id, user_type: 3 };
 
-    if(!po) throw new Error('PO does not exist with given id')
-    else if (po && po.finalized_vendor_id != vendor_id) throw new Error('PO does not belong to you!')
+  const raised = await db.tx((t) => raiseInvoice(t, actor, po_id, { invoiceUrl: invoice_url, body: details }));
 
-    const existing = await t.oneOrNone(
-      `SELECT id FROM tbl_purchase_order_document WHERE purchase_order_id = $1 AND document_type = 'invoice'`,
-      [po_id]
-    );
-
-    if(existing) {
-      throw new Error("Invoice is already raised for this PO!")
-    }
-
-    const result = await t.one(
-      `INSERT INTO tbl_purchase_order_document
-      (purchase_order_id, document_type, document_url, uploaded_by)
-      VALUES($1, 'invoice', $2, $3)
-      
-      RETURNING *`,
-      [po_id, invoice_url, vendor_id]
-    );
-
-    await t.none(
-      `UPDATE tbl_rfq_purchase_order
-      SET status = 'invoice_raised'
-      WHERE id = $1`,
-      [po_id]
-    );
-
-    const formattedPOData = await t.one(
+  // After COMMIT: an undeliverable mail must not undo an invoice the vendor already filed.
+  try {
+    const formattedPOData = await db.oneOrNone(
       `SELECT PO.*,
       TC.company_name AS finalized_vendor_name,
       TU.email AS finalized_vendor_email
 
       FROM tbl_rfq_purchase_order PO
       JOIN tbl_users TU ON PO.finalized_vendor_id = TU.id
-      JOIN tbl_company TC ON TU.company_id = TC.id
+      LEFT JOIN tbl_company TC ON TU.company_id = TC.id
 
       WHERE PO.id = $1`,
       [po_id]
     );
-
-    const reminderUsers = await resolvePoNotificationRecipients(po, t);
-
-    const txn = await t.oneOrNone(
-      `SELECT id FROM tbl_approval_hierarchy_transactions
-      WHERE hierarchy_type = 'po'
-      AND target_entity_id = $1`,
-      [po_id]
-    );
-
-    if (txn) {
-      await t.none(
-        `INSERT INTO tbl_approval_hierarchy_history
-        (approval_transaction_id, approved_by, action)
-        VALUES ($1, $2, $3)`,
-        [txn.id, vendor_id, 'invoice']
-      );
+    if (formattedPOData) {
+      const reminderUsers = await resolvePoNotificationRecipients(formattedPOData, db);
+      const { invoiceNumber, invoiceDate, invoiceAmount } = raised.details;
+      await sendInvoiceEmail(formattedPOData, invoice_url, reminderUsers, {
+        invoiceNumber, invoiceDate, invoiceAmount, dispatchNumber: raised.invoice?.dispatchNumber ?? null,
+      });
     }
+  } catch (err) {
+    logError(`[po ${po_id}] invoice notification failed`, err);
+  }
 
-    // An undeliverable mail must not undo an invoice the vendor already filed.
-    try {
-      await sendInvoiceEmail(formattedPOData, invoice_url, reminderUsers);
-    } catch (err) {
-      logError(`[po ${po_id}] invoice notification failed`, err);
-    }
-
-    return result;
-  })
+  return raised;
 };
 
-export const handleMarkGRN = async (po_id, grn_document_url, user_id, remarks) => {
-  return await db.tx(async t => {
-    const po = await t.oneOrNone(
-      `SELECT * FROM tbl_rfq_purchase_order
-      WHERE id = $1`,
-      [po_id]
-    );
+/**
+ * Legacy POST /po/markGRN, now a shim over line-level receiving (inventory
+ * spec §6.11): it posts a GRN accepting every open quantity at the PO's single
+ * receiving hotel (grnService.postLegacyFullReceipt), so stock, the delivery
+ * plan, PO counters and po.status all move exactly as a Receive would.
+ *
+ * Refused with InventoryError 409 code USE_RECEIVE when a one-click receipt is
+ * not a safe guess: open quantity at more than one hotel (an unsplit
+ * multi-hotel PO), an unknown unit conversion, an expiry-tracked item. Nothing
+ * left to receive is a 409 CONFLICT.
+ *
+ * Kept from the old handler: grn_document_url is stored as before (a
+ * tbl_purchase_order_document 'grn' row, same shape) and also as an OTHER
+ * attachment on the new GRN; the PO approval-history 'grn' row (now written by
+ * the posting, for every first receipt); the return value (that document row,
+ * or null). The old GRN email is replaced by the
+ * inventory GRN notice (notifyGrnPosted), sent after COMMIT, so the vendor is
+ * not told twice.
+ *
+ * @param {number} po_id
+ * @param {string|null} grn_document_url
+ * @param {number} user_id req.user.id (-1 for a GRN-token site rep)
+ * @param {string|null} remarks
+ * @param {object|null} [user] req.user (buyer, or the token user from
+ *   auth.authUserOrGRNToken); defaults to {id: user_id}.
+ */
+export const handleMarkGRN = async (po_id, grn_document_url, user_id, remarks, user = null) => {
+  // Dynamic: the inventory services import resolvePoTenancy from this module.
+  const { postLegacyFullReceipt, attachmentKeyFromUrl } = await import('../services/inventory/grnService.js');
+  const actor = user ?? { id: user_id };
 
-    if(!po) throw new Error('PO does not exist with given id')
+  const { grn, document } = await db.tx(async t => {
+    const { grn } = await postLegacyFullReceipt(t, actor, { poId: po_id, remarks });
 
-    const existing = await t.oneOrNone(
-      `SELECT id FROM tbl_purchase_order_document WHERE purchase_order_id = $1 AND document_type = 'grn'`,
-      [po_id]
-    );
-
-    if(existing) {
-      throw new Error("GRN is already marked for this PO!")
-    }
-
-    let result = null;
-
-    if(grn_document_url) 
-      result = await t.one(
+    let document = null;
+    if (grn_document_url) {
+      const key = attachmentKeyFromUrl(grn_document_url);
+      await t.none(
+        `INSERT INTO tbl_grn_attachment (hospitality_company_id, grn_id, s3_key, file_name, kind, uploaded_by)
+         VALUES ($1, $2, $3, $4, 'OTHER', $5)`,
+        [grn.companyId, grn.id, key, String(key).split('/').pop().slice(0, 255) || null,
+          Number(user_id) > 0 && !actor?.is_token_user ? Number(user_id) : null]
+      );
+      document = await t.one(
         `INSERT INTO tbl_purchase_order_document
         (purchase_order_id, document_type, document_url, uploaded_by)
         VALUES($1, 'grn', $2, $3)
-        
+
         RETURNING *`,
         [po_id, grn_document_url, user_id]
       );
-
-    await t.none(
-      `UPDATE tbl_rfq_purchase_order
-      SET status = 'GRN'
-      WHERE id = $1`,
-      [po_id]
-    );
-
-    const formattedPOData = await t.one(
-      `SELECT PO.*,
-      TC.company_name AS finalized_vendor_name,
-      TU.email AS finalized_vendor_email
-
-      FROM tbl_rfq_purchase_order PO
-      JOIN tbl_users TU ON PO.finalized_vendor_id = TU.id
-      JOIN tbl_company TC ON TU.company_id = TC.id
-
-      WHERE PO.id = $1`,
-      [po_id]
-    );
-
-    const reminderUsers = await resolvePoNotificationRecipients(po, t);
-
-    // The GRN is the vendor's trigger to raise their invoice, so they join the
-    // recipients here; sendGRNUpdationEmail points them at the vendor PO page.
-    const grnRecipients = [...new Set(
-      [...reminderUsers, po.finalized_vendor_id].filter((id) => id != null).map(Number)
-    )];
-
-    const txn = await t.oneOrNone(
-      `SELECT id FROM tbl_approval_hierarchy_transactions
-      WHERE hierarchy_type = 'po'
-      AND target_entity_id = $1`,
-      [po_id]
-    );
-
-    if (txn) {
-      await t.none(
-        `INSERT INTO tbl_approval_hierarchy_history
-        (approval_transaction_id, approved_by, action, remarks)
-        VALUES ($1, $2, $3, $4)`,
-        [txn.id, user_id, 'grn', remarks]
-      );
     }
 
-    // A notification failure must never roll back a GRN that was recorded.
-    try {
-      await sendGRNUpdationEmail(formattedPOData, grn_document_url, grnRecipients);
-    } catch (err) {
-      logError(`[po ${po_id}] GRN notification failed`, err);
-    }
-
-    return result;
+    // The PO timeline 'grn' history row is written by the posting itself
+    // (grnService recordLegacyGrnTimeline), for this shim and Receive alike.
+    return { grn, document };
   });
+
+  // After COMMIT: a notification failure must never undo a recorded receipt.
+  // (A full receipt rejects nothing, so there is no rejection notice.)
+  const { notifyGrnPosted } = await import('../services/inventory/notifier.js');
+  try {
+    await notifyGrnPosted(db, { grnId: grn.id });
+  } catch (err) {
+    logError(`[po ${po_id}] GRN notification failed`, err);
+  }
+
+  return document;
 };
 
 
+// The legacy "Mark dispatched" button. It is now a dispatch note with no lines
+// (inventory dispatchService), which moves po.status forward to 'dispatched'
+// (never back from GRN / invoice_raised), locks the delivery plan, and sends
+// the same dispatch email as before (GRN reminders now come from task B6's
+// DB-driven sweeper; no site-rep lookup happens here). It used to read the
+// PO's lines joined to their quote items with t.one, which threw on every PO
+// with more than one line and on every call-off PO (D1).
+//
+// Pressing it again while that note is still in transit (a double click, a
+// retry) finds the same note: no second note, no second email.
+//
+// Throws Error('PO does not exist…' / '…does not belong to you!') as before,
+// and InventoryError CONFLICT when the PO is not accepted, is closed, or has
+// been received in full.
 export const handleMarkDispatched = async (po_id, vendor_id) => {
-  return await db.tx(async t => {
+  // Lazy: the inventory services import this model.
+  const [{ createDispatch }, { notifyDispatchCreated }] = await Promise.all([
+    import("../services/inventory/dispatchService.js"),
+    import("../services/inventory/notices/planNotices.js"),
+  ]);
+
+  const dispatch = await db.tx(async (t) => {
+    // Locked: two presses at once queue here, and the second sees the first's note.
     const po = await t.oneOrNone(
-      `SELECT * FROM tbl_rfq_purchase_order
-      WHERE id = $1`,
+      `SELECT id, finalized_vendor_id FROM tbl_rfq_purchase_order
+      WHERE id = $1
+      FOR UPDATE`,
       [po_id]
     );
 
     if(!po) throw new Error('PO does not exist with given id')
     else if (po && po.finalized_vendor_id != vendor_id) throw new Error('PO does not belong to you!')
 
-    await t.none(
-      `UPDATE tbl_rfq_purchase_order
-      SET status = 'dispatched'
-      WHERE id = $1`,
-      [po_id]
+    const open = await t.oneOrNone(
+      `SELECT d.id FROM tbl_po_dispatch d
+        WHERE d.po_id = $1 AND d.status = 'in_transit'
+          AND d.hotel_id IS NULL AND d.delivery_id IS NULL
+          AND NOT EXISTS (SELECT 1 FROM tbl_po_dispatch_line l WHERE l.dispatch_id = d.id)
+        ORDER BY d.id DESC
+        LIMIT 1`,
+      [po.id]
     );
+    if (open) return { id: Number(open.id), reused: true };
 
-    const formattedPOData = await t.one(
-      `SELECT PO.*,
-      TU.name AS finalized_vendor_name,
-      TU.email AS finalized_vendor_email,
-      COALESCE(TAHH.created_at, TAI.completed_at) AS po_approved_on,
-      QI.delivery_period
+    return createDispatch(t, { system: true, userId: Number(vendor_id) }, po.id, { lines: [] });
+  });
 
-      FROM tbl_rfq_purchase_order PO
-      JOIN tbl_purchase_order_product TPOP ON TPOP.purchase_order_id = PO.id
-      JOIN tbl_quote_items QI ON QI.id = TPOP.quote_id
-      LEFT JOIN tbl_approval_hierarchy_transactions TAHT ON TAHT.hierarchy_type = 'po' AND TAHT.target_entity_id = PO.id
-      LEFT JOIN tbl_approval_hierarchy_history TAHH ON TAHT.id = TAHH.approval_transaction_id AND TAHH.action = 'approved'
-      LEFT JOIN tbl_approval_instances TAI ON TAI.id = PO.approval_instance_id AND TAI.status = 'APPROVED'
-      JOIN tbl_users TU ON PO.finalized_vendor_id = TU.id
-      JOIN tbl_company TC ON TU.company_id = TC.id
-
-      WHERE PO.id = $1`,
-      [po_id]
-    );
-
-    const reminderUsers = await resolvePoNotificationRecipients(po, t);
-
-    const grnRepData = await t.oneOrNone(
-      `SELECT id, name, email, phone
-      FROM tbl_token_login_data
-      WHERE token_type = 'GRN'
-      AND entity_id = $1`,
-      [po_id]
-    );
-
-    // The dispatch itself is already recorded; reminders and mail are advisory.
-    try {
-      await scheduleGRNReminders(formattedPOData, reminderUsers, grnRepData);
-      await sendDispatchedEmail(formattedPOData, reminderUsers);
-    } catch (err) {
-      logError(`[po ${po_id}] dispatch notification failed`, err);
-    }
-
-    return true;
-  })
+  // After commit: advisory, never throws. Only a new note is announced.
+  if (!dispatch.reused) await notifyDispatchCreated(db, { dispatchId: dispatch.id });
+  return true;
 };
 
-export const handleAddSiteRepresentative = async (po_id, added_by, name, email, phone) => {
-  return await db.tx(async t => {
-    const existing = await t.oneOrNone(
-      `SELECT id FROM tbl_token_login_data
-      WHERE token_type = 'GRN'
-      AND entity_id = $1`,
-      [po_id]
-    );
-    let result = null;
-
-    const secret = process.env.WEBHOOK_SECRET;
-    const expires = Math.floor(Date.now() / 1000) + 12 * 60 * 60;
-    const message = `${name}_${email}_${phone}_${expires}`;
-
-    const token = generateSignature(message, secret);
-
-    if(existing) {
-      result = await t.one(
-        `UPDATE tbl_token_login_data
-        SET name = $1,
-        email = $2,
-        phone = $3,
-        added_by = $4
-        token = $5
-        
-        WHERE id = $6
-        RETURNING *`,
-        [name, email, phone, added_by, token, existing.id]
-      );
-    } else {
-      result = await t.one(
-        `INSERT INTO tbl_token_login_data
-        (token_type, entity_id, name, email, phone, added_by, token)
-        VALUES ('GRN', $1, $2, $3, $4, $5, $6)
-        
-        RETURNING *`,
-        [po_id, name, email, phone, added_by, token]
-      );
-    }
-
-    const formattedPOData = await t.one(
-      `SELECT PO.*,
-      TU.name AS finalized_vendor_name,
-      TU.email AS finalized_vendor_email,
-      COALESCE(TAHH.created_at, TAI.completed_at) AS po_approved_on,
-      QI.delivery_period
-
-      FROM tbl_rfq_purchase_order PO
-      JOIN tbl_purchase_order_product TPOP ON TPOP.purchase_order_id = PO.id
-      JOIN tbl_quote_items QI ON QI.id = TPOP.quote_id
-      LEFT JOIN tbl_approval_hierarchy_transactions TAHT ON TAHT.hierarchy_type = 'po' AND TAHT.target_entity_id = PO.id
-      LEFT JOIN tbl_approval_hierarchy_history TAHH ON TAHT.id = TAHH.approval_transaction_id AND TAHH.action = 'approved'
-      LEFT JOIN tbl_approval_instances TAI ON TAI.id = PO.approval_instance_id AND TAI.status = 'APPROVED'
-      JOIN tbl_users TU ON PO.finalized_vendor_id = TU.id
-      JOIN tbl_company TC ON TU.company_id = TC.id
-
-      WHERE PO.id = $1`,
-      [po_id]
-    );
-
-    await sendGRNRepresentativeEmail(formattedPOData, email, token);
-
-    return result;
-  })
+/**
+ * Add (or replace) the GRN site representative for a PO and email them the
+ * receiving link. Delegates to services/inventory/siteRepService.js (hashed
+ * 14-day token, one live link per PO hotel, grn.create at that hotel); see
+ * there for the rules. `hotel_id` is required for a PO delivered to several
+ * hotels. Returns the row without the token.
+ *
+ * (D2: this used to UPDATE with a missing comma and read the PO through a
+ * `t.one` over its quote lines, which threw for multi-line and call-off POs.)
+ */
+export const handleAddSiteRepresentative = async (user, { po_id, hotel_id = null, name, email, phone } = {}) => {
+  // Lazy: siteRepService imports this module (assertPoAccess).
+  const { issueSiteRepToken } = await import('../services/inventory/siteRepService.js');
+  return issueSiteRepToken(user, { poId: po_id, hotelId: hotel_id, name, email, phone });
 };
 
 /**

@@ -17,6 +17,7 @@ import { resolveArcPolicyFor, noArcPolicyError } from '../../helper/arc_v2/arcPo
 import arcHotelModel from '../../models/arc_v2/arcHotelModel.js';
 import { deferBad, deferJson, isDeferred, sendDeferred } from '../../helper/deferredResponse.js';
 import { notifyApprovalChanged } from '../../services/approvalEvents.js';
+import { redactDisqualifiedQuotes } from '../../helper/arc_v2/quoteRedaction.js';
 
 /**
  * ARC v2 — Tech + Commercial evaluation controller.
@@ -1103,25 +1104,7 @@ export async function getCommEval(req, res) {
     // unfit — their commercial terms must never reach the commercial
     // evaluator's browser. Strip pricing server-side, keep the line as a
     // marker so the matrix can show a locked cell.
-    const redacted = quotes.map((q) => {
-      const allowed = qualified_by_item[Number(q.arc_item_id)];
-      const itemDisq = allowed && !allowed.includes(Number(q.vendor_id));
-      const univDisq = universallyFailed.has(Number(q.vendor_id));
-      if (itemDisq || univDisq) {
-        return {
-          quote_id: q.quote_id, vendor_id: q.vendor_id, vendor_name: q.vendor_name,
-          submitted_at: q.submitted_at, quote_line_id: q.quote_line_id, arc_item_id: q.arc_item_id,
-          rate: null, gst_pct: null, charges: null, lead_time_days: null, moq: null,
-          // Phase 2 — null out engine output for technically-disqualified vendors
-          // so the commercial evaluator never sees their pricing.
-          line_pricing: null,
-          technically_disqualified: true,
-          // Distinct marker so the FE can label the ARC-wide reason.
-          ...(univDisq ? { universally_disqualified: true } : {}),
-        };
-      }
-      return q;
-    });
+    const redacted = redactDisqualifiedQuotes(quotes, qualified_by_item, universallyFailed);
     // All clarifications on the ARC (open + resolved). Open ones drive the
     // "needs your decision" panel; resolved 'revised' ones let the matrix
     // overlay the new value on the awarded cell with who/why provenance.

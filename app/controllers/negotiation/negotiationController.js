@@ -16,6 +16,8 @@ import {
   findBestMatchingPolicy
 } from '../../models/generalModel.js';
 import db, { pgp } from '../../config/dbConn.js';
+import { normalizeCreatorRemarks, stripInternalRoundFields } from '../../helper/negotiation/roundRemarks.js';
+import { assertCanReadParentRfq, assertUserHasScope, isAuthorizationError } from '../../services/authorizationService.js';
 import { executeApprovalAction } from '../../services/approvalActionService.js';
 import { resolveHospitalityCompanyId, resolveHospitalityCompanyScope } from '../../helper/arc_v2/resolveHospitalityCompany.js';
 
@@ -43,7 +45,13 @@ const formatRoundDeadlineIst = (endDate) => {
   })} IST`;
 };
 import { draftPO, buildAuthoritativePOPayload } from '../po/purchaseOrderController.js';
-import { initiatePurchaseOrder } from '../../models/purchaseOrderModel.js';
+import { notifyDraftCreated } from '../../services/po/poInitiateNotifier.js';
+import { PoDecisionError } from '../../services/po/poDecisionError.js';
+import { bindParkedAward, bindSelectedQuotes, selectedQuoteLine, instanceOwnsRound } from '../../services/po/awardQuoteBinding.js';
+import { recordApprovedWithoutPo } from '../general/negotiationQuotePostApproval.js';
+import { isApproverOnCurrentStep, NOT_AN_APPROVER_MESSAGE } from '../../services/approvalMembership.js';
+import { buildDraftedPos } from '../../models/po/poInitiateGuide.js';
+import { initiatePurchaseOrder, assertDraftMergeTarget } from '../../models/purchaseOrderModel.js';
 import {
   buildQuoteVisibilityMeta,
   createQuoteVisibilityError,
@@ -57,12 +65,65 @@ import {
   assertVendorsTechnicallyQualified,
   screenVendorsForTechnicalQualification,
 } from '../../services/technicalQualificationService.js';
+import { roundWindowError } from '../../helper/negotiation/roundWindow.js';
 
 // Server-derived id for the RBAC read matrix. NEVER read from the body/query/
 // headers. Returns null for super admins (user_type 8), which the model treats
 // as "no matrix filter".
 const readScopeUserId = (req) =>
   Number(req.user?.user_type) === 8 ? null : (req.user?.id ?? null);
+
+// rfq_id arrives in request bodies; it must be a plain positive integer before
+// it is used anywhere. Returns the number, or null for anything else.
+const parseRfqId = (value) => {
+  if (typeof value === 'number') {
+    return Number.isSafeInteger(value) && value > 0 ? value : null;
+  }
+  if (typeof value === 'string' && /^[1-9]\d{0,15}$/.test(value.trim())) {
+    const n = Number(value.trim());
+    return Number.isSafeInteger(n) ? n : null;
+  }
+  return null;
+};
+
+// True when the caller supplied an rfq_id but it is not a positive integer.
+// A missing rfq_id keeps each handler's existing "required" message.
+const isMalformedRfqId = (raw, parsed) =>
+  parsed === null && raw !== undefined && raw !== null && raw !== '';
+
+// Scope check against the RFQ row the handler already loaded. Buyers reach
+// negotiation through RFQ read access; negotiator roles carry the negotiation
+// permission but not rfq.read. Either one, within the RFQ's own tenant, hotel,
+// department and process, is enough; if neither holds, the read error is
+// returned.
+// Refusal for the RFQ-action scope checks. Same status/code/message as
+// sendScopeError, but without err.data, which carries the target RFQ's tenant
+// scope (company, hotel, department, process) that an out-of-scope caller must not see.
+const sendScopeRefusal = (res, err) =>
+  res.status(err.status).json({ status: 3, code: err.code, message: err.message });
+
+const assertRfqActionScope = async (userId, permission, rfqRow) => {
+  try {
+    await assertCanReadParentRfq(userId, rfqRow.id, db, { rfqRow });
+  } catch (readErr) {
+    if (!isAuthorizationError(readErr)) throw readErr;
+    try {
+      // Callers must reject a NULL hospitality_company_id before calling this;
+      // unlike assertCanReadParentRfq, the fallback does not derive it from the hotel.
+      await assertUserHasScope(userId, permission, {
+        hospitality_company_id: rfqRow.hospitality_company_id,
+        hotel_id: rfqRow.hotel_id,
+        department_id: rfqRow.department_id,
+        process_id: rfqRow.process_id
+      });
+    } catch (permErr) {
+      if (!isAuthorizationError(permErr)) throw permErr;
+      throw readErr;
+    }
+  }
+};
+
+const RFQ_ID_INVALID_MESSAGE = 'rfq_id must be a positive integer';
 
 const formatErrorResponse = (res, error) => {
   const statusCode = error.statusCode || 400;
@@ -73,6 +134,7 @@ const formatErrorResponse = (res, error) => {
     meta: error.quoteVisibility ? { quoteVisibility: error.quoteVisibility } : undefined,
   });
 };
+
 
 const ensureNegotiationQuoteVisibilityUnlocked = async (rfqId, message) => {
   const rfqData = await rfqModel.getRfqDetailsById(rfqId);
@@ -447,6 +509,18 @@ const handleNegotiationPostApproval = async (approval_instance_id, approver_user
     const round_id = metadata.round_id || instance.entity_id;
     const remarks = options?.comment ?? null;
 
+    // The round this instance activates must be on an RFQ of the instance's
+    // own company. An instance whose metadata names another company's round
+    // (one opened through the generic submit route before it was closed to
+    // this type) activates nothing and awards nothing.
+    if (round_id && !(await instanceOwnsRound(t, instance, round_id))) {
+      logger.warn(
+        { approval_instance_id, hospitality_company_id: instance.hospitality_company_id, round_id, rfq_id },
+        '[negotiation] NEGOTIATION approval names a round that is not its company\'s: nothing activated'
+      );
+      return { activated: false };
+    }
+
     // Legacy shape: a handful of historical NEGOTIATION instances carry
     // selected_quotes and expect the award to be written here. Rounds created
     // by createRound never do (their metadata has no selected_quotes), so for
@@ -490,8 +564,25 @@ const handleNegotiationPostApproval = async (approval_instance_id, approver_user
           `rfq_product_id=${rfq_product_id}): ${legacyScreen.message}`
         );
       }
+      // The legacy selection must bind like any other (bindSelectedQuotes):
+      // each entry a quote of this RFQ product by its vendor, on an RFQ of the
+      // instance's own company. Fail closed, like the screen above.
+      let legacyBound = legacyScreen.ok;
+      if (legacyBound) {
+        try {
+          await bindSelectedQuotes(t, { ...instance, entity_id: rfq_product_id, metadata });
+        } catch (bindError) {
+          if (!(bindError instanceof PoDecisionError)) throw bindError;
+          legacyBound = false;
+          logError(
+            `Legacy NEGOTIATION post-approval award BLOCKED: selected_quotes do not bind ` +
+            `(approval_instance_id=${approval_instance_id}, rfq_id=${rfq_id}, ` +
+            `rfq_product_id=${rfq_product_id}): ${bindError.code}`
+          );
+        }
+      }
       // Get RFQ data
-      const rfq = legacyScreen.ok
+      const rfq = legacyBound
         ? await t.oneOrNone(`SELECT * FROM tbl_rfq WHERE id = $1`, [rfq_id])
         : null;
 
@@ -591,6 +682,16 @@ const handleNegotiationRejection = async (approval_instance_id, approver_user_id
     const round_id = metadata.round_id || instance.entity_id;
     const comment = options?.comment || null;
 
+    // Only the instance's own company's round is cancelled (see
+    // handleNegotiationPostApproval).
+    if (round_id && !(await instanceOwnsRound(t, instance, round_id))) {
+      logger.warn(
+        { approval_instance_id, hospitality_company_id: instance.hospitality_company_id, round_id },
+        '[negotiation] NEGOTIATION rejection names a round that is not its company\'s: nothing cancelled'
+      );
+      return;
+    }
+
     if (round_id) {
       try {
         await negotiationModel.updateAllVendorsStatus(round_id, 'REJECTED', comment, approver_user_id, t);
@@ -621,7 +722,7 @@ const handleNegotiationRejection = async (approval_instance_id, approver_user_id
  * Creates an approval instance for a negotiation round using the centralized approval engine.
  * Uses entity_type: 'NEGOTIATION' and entity_id: roundId (the negotiation round's own ID).
  */
-const startApprovalForNegotiation = async (scope, roundId, roundNumber, rfqId, rfqData, userId, txContext, endDate = null) => {
+const startApprovalForNegotiation = async (scope, roundId, roundNumber, rfqId, rfqData, userId, txContext, endDate = null, creatorRemarks = null) => {
   try {
     // `scope` is either a legacy single product id (number) or
     // { coveredProductIds: [], hasRfqLevel, isMultiProduct } for multi rounds.
@@ -671,6 +772,7 @@ const startApprovalForNegotiation = async (scope, roundId, roundNumber, rfqId, r
         is_multi_product: isMultiProduct,
         has_rfq_level: hasRfqLevel,
         end_date: endDate || null,
+        creator_remarks: creatorRemarks || null,
         company_name: names?.company_name || '',
         hotel_name: names?.hotel_name || ''
       },
@@ -853,7 +955,18 @@ const NegotiationController = {
    */
   createRound: async (req, res) => {
     try {
-      const { rfq_id, rfq_product_id, target_price, end_date, vendor_targets } = req.body;
+      const { rfq_id: rawRfqId, rfq_product_id, target_price, end_date, vendor_targets } = req.body;
+      const rfq_id = parseRfqId(rawRfqId);
+      if (isMalformedRfqId(rawRfqId, rfq_id)) {
+        return res.status(400).json({ status: 2, message: RFQ_ID_INVALID_MESSAGE });
+      }
+      // Validate the creator's note before any DB work. Optional, trimmed,
+      // max 1000 chars; empty becomes NULL. Internal only, never sent to vendors.
+      const remarksCheck = normalizeCreatorRemarks(req.body.creator_remarks);
+      if (!remarksCheck.ok) {
+        return res.status(400).json({ status: 2, message: remarksCheck.message });
+      }
+      const creatorRemarks = remarksCheck.value;
       const user_id = req.user.id;
 
       // ── Normalize the request into a products[] array ──────────────────
@@ -935,6 +1048,10 @@ const NegotiationController = {
           message: 'End date must be in the future'
         });
       }
+      const windowError = roundWindowError(endDate.toDate(), now.toDate());
+      if (windowError) {
+        return res.status(400).json({ status: 2, message: windowError });
+      }
       // Normalise to a naive UTC string before it is persisted. `end_date` is
       // `timestamp without time zone`, and Postgres casts an incoming string by
       // DISCARDING any offset and keeping the literal digits — so a client
@@ -947,7 +1064,7 @@ const NegotiationController = {
       const endDateUtc = endDate.format('YYYY-MM-DD HH:mm:ss');
 
       // Check if RFQ exists and get hospitality context
-      const rfq = await rfqModel.checkIfExists('tbl_rfq', `id = ${rfq_id}`);
+      const rfq = await rfqModel.checkIfExists('tbl_rfq', { where: 'id = $1', values: [rfq_id] });
       if (!rfq || rfq.length === 0) {
         return res.status(404).json({
           status: 2,
@@ -961,6 +1078,15 @@ const NegotiationController = {
           status: 2,
           message: 'Negotiation rounds are only available for hospitality RFQs/Tenders'
         });
+      }
+
+      // The caller needs rfq.read/boq.read OR negotiation.create on this RFQ's
+      // tenant/hotel/department/process scope.
+      try {
+        await assertRfqActionScope(user_id, 'negotiation.create', rfqData);
+      } catch (err) {
+        if (isAuthorizationError(err)) return sendScopeRefusal(res, err);
+        throw err;
       }
 
       const quoteVisibility = buildQuoteVisibilityMeta(rfqData);
@@ -1165,6 +1291,7 @@ const NegotiationController = {
           end_date: endDateUtc,
           status: 'PENDING_APPROVAL',
           created_by: user_id,
+          creator_remarks: creatorRemarks,
           vendor_ids: parsedVendorIds,
           vendor_approvals,
           products: roundProducts
@@ -1205,7 +1332,8 @@ const NegotiationController = {
           rfqData,
           user_id,
           t,
-          round.end_date
+          round.end_date,
+          creatorRemarks
         );
 
         // If auto-approved (initiator is the only approver), activate immediately
@@ -1244,6 +1372,8 @@ const NegotiationController = {
             status: (updatedRound || round).status,
             vendor_ids: parsedVendorIds
           },
+          // Creator's internal note (audit trail only); must never be returned to vendors.
+          remarks: creatorRemarks,
           txContext: t
         });
 
@@ -1447,9 +1577,11 @@ const NegotiationController = {
         vendorsByProduct[pid] = vendorsByProductId.get(Number(pid)) || [];
       }
 
+      // Vendors never see the creator's internal note (the model also strips
+      // it; this keeps the guarantee local to the response).
       return res.status(200).json({
         status: 1,
-        data: enrichedRounds,
+        data: vendorId ? stripInternalRoundFields(enrichedRounds) : enrichedRounds,
         vendors: vendorsByProduct
       });
     } catch (error) {
@@ -1484,6 +1616,23 @@ const NegotiationController = {
 
       // Vendors (user_type 3) see only rounds they are selected for
       const vendorId = req.user.user_type == 3 ? (req.user.vendor_id || req.user.id) : null;
+
+      // SECURITY (IDOR): buyers had no tenant check here, unlike the sibling
+      // getRounds / getActiveRounds. Same gate, same refusal. The vendor path
+      // is unchanged (narrowed to its own rounds by vendorId).
+      if (!vendorId) {
+        const allowed = await negotiationModel.userCanReadRfqNegotiation(
+          readScopeUserId(req),
+          rfq_id
+        );
+        if (!allowed) {
+          return res.status(403).json({
+            status: 0,
+            message: 'You do not have access to this RFQ'
+          });
+        }
+      }
+
       const round = await negotiationModel.getActiveRound(rfq_id, rfq_product_id, true, vendorId);
 
       // Vendors (user_type 3) should only see fully approved (ACTIVE) rounds with end_date not yet passed
@@ -1498,7 +1647,7 @@ const NegotiationController = {
 
       return res.status(200).json({
         status: 1,
-        data: round
+        data: req.user.user_type == 3 ? stripInternalRoundFields(round) : round
       });
     } catch (error) {
       logError(error);
@@ -1553,7 +1702,7 @@ const NegotiationController = {
             r.status === 'ACTIVE' && parseAsUTC(r.end_date) > new Date() && Array.isArray(r.vendor_ids) && r.vendor_ids.includes(vendorId)
           )
           .map(({ vendor_ids, ...r }) => ({
-            ...r,
+            ...stripInternalRoundFields(r),
             vendor_approvals: (r.vendor_approvals || []).filter(va => va.vendor_id === vendorId),
             // Multi rounds: never leak other vendors' targets in products[].
             products: Array.isArray(r.products)
@@ -1900,7 +2049,7 @@ const NegotiationController = {
       removeNegotiationRoundExpiration(round_id);
 
       // Record lifecycle event for round rejection
-      const rfq = await rfqModel.checkIfExists('tbl_rfq', `id = ${round.rfq_id}`);
+      const rfq = await rfqModel.checkIfExists('tbl_rfq', { where: 'id = $1', values: [round.rfq_id] });
       const rfqData = rfq?.[0];
       if (rfqData) {
         await recordLifecycleEvent({
@@ -1995,6 +2144,16 @@ const NegotiationController = {
         });
       }
 
+      // The cancel below closes a NEGOTIATION approval instance; an ARC round's
+      // is ARC_NEGOTIATION, which would be left PENDING on a cancelled round.
+      // The rate contract flow has no withdraw — an approver rejects instead.
+      if (round.source_type === 'ARC') {
+        return res.status(400).json({
+          status: 2,
+          message: 'Rounds on a rate contract cannot be withdrawn. An approver can reject it, or it lapses at its deadline.'
+        });
+      }
+
       if (round.status !== 'PENDING_APPROVAL') {
         return res.status(400).json({
           status: 2,
@@ -2037,7 +2196,7 @@ const NegotiationController = {
       // The round is terminal now; its scheduled closer has nothing to do.
       removeNegotiationRoundExpiration(round_id);
 
-      const rfq = await rfqModel.checkIfExists('tbl_rfq', `id = ${round.rfq_id}`);
+      const rfq = await rfqModel.checkIfExists('tbl_rfq', { where: 'id = $1', values: [round.rfq_id] });
       const rfqData = rfq?.[0];
       if (rfqData) {
         await recordLifecycleEvent({
@@ -2278,7 +2437,7 @@ const NegotiationController = {
       removeNegotiationRoundExpiration(round_id);
 
       // Record lifecycle event
-      const rfq = await rfqModel.checkIfExists('tbl_rfq', `id = ${round.rfq_id}`);
+      const rfq = await rfqModel.checkIfExists('tbl_rfq', { where: 'id = $1', values: [round.rfq_id] });
       const rfqData = rfq[0];
       await recordLifecycleEvent({
         entity_type: rfqData.is_tender === 1 ? 'TENDER' : 'RFQ',
@@ -2546,7 +2705,11 @@ const NegotiationController = {
    */
   submitQuotesForApproval: async (req, res) => {
     try {
-      const { rfq_id, rfq_product_id, quote_ids, quote_source, remarks } = req.body;
+      const { rfq_id: rawRfqId, rfq_product_id, quote_ids, quote_source, remarks } = req.body;
+      const rfq_id = parseRfqId(rawRfqId);
+      if (isMalformedRfqId(rawRfqId, rfq_id)) {
+        return res.status(400).json({ status: 2, message: RFQ_ID_INVALID_MESSAGE });
+      }
       const user_id = req.user.id;
       const isRegularQuotes = quote_source === 'regular';
 
@@ -2559,7 +2722,7 @@ const NegotiationController = {
       }
 
       // 2. Validate RFQ exists and is hospitality
-      const rfq = await rfqModel.checkIfExists('tbl_rfq', `id = ${rfq_id}`);
+      const rfq = await rfqModel.checkIfExists('tbl_rfq', { where: 'id = $1', values: [rfq_id] });
       if (!rfq || rfq.length === 0) {
         return res.status(404).json({
           status: 2,
@@ -2573,6 +2736,13 @@ const NegotiationController = {
           status: 2,
           message: 'Quote approval is only available for hospitality RFQs/Tenders'
         });
+      }
+
+      try {
+        await assertRfqActionScope(user_id, 'quote-compare.create', rfqData);
+      } catch (err) {
+        if (isAuthorizationError(err)) return sendScopeRefusal(res, err);
+        throw err;
       }
 
       // 3. Validate product belongs to RFQ using model
@@ -2607,7 +2777,9 @@ const NegotiationController = {
         }
       } else {
         // 5b. For negotiation round quotes (from tbl_negotiation_round_quotes)
-        quotes = await negotiationModel.getQuotesByIds(quote_ids);
+        // Scoped to this RFQ's rounds and this product: a round quote from
+        // anywhere else is not returned and the count check below refuses it.
+        quotes = await negotiationModel.getQuotesByIds(quote_ids, rfq_id, rfq_product_id);
 
         if (quotes.length !== quote_ids.length) {
           return res.status(400).json({
@@ -2913,6 +3085,12 @@ const NegotiationController = {
       const rfq_product_id = parseInt(req.params.rfq_product_id);
       const user_id = req.user.id;
       const { remarks, existing_po_id } = req.body;
+      // Ids of the draft POs this approval created or merged into, for the
+      // `drafted_pos` guidance in the response.
+      const draftedPoIds = [];
+      // Subset of draftedPoIds this approval CREATED (not merged into an existing draft).
+      const createdPoIds = [];
+      let draftedRfqId = null;
 
       if (!rfq_product_id) {
         return res.status(400).json({
@@ -2930,6 +3108,14 @@ const NegotiationController = {
           status: 2,
           message: 'No pending quote approval found for this product'
         });
+      }
+
+      // 1a. Only an approver on the current step gets past here. 1b and 1c
+      // answer about this RFQ's vendors and POs (1c says whether a PO id is a
+      // draft of this RFQ), so a caller who is not on the instance gets the
+      // answer submitApprovalAction would give them, before either runs.
+      if (!(await isApproverOnCurrentStep(pendingInstance.id, user_id))) {
+        return formatErrorResponse(res, new Error(NOT_AN_APPROVER_MESSAGE));
       }
 
       // 1b. Technical-qualification pre-flight — BEFORE the approval action.
@@ -2980,6 +3166,39 @@ const NegotiationController = {
         }
       }
 
+      // 1b'. The award the instance carries must still bind to its RFQ, before
+      // the approval is recorded:
+      //   - a parked finalize payload: the quote line on that RFQ, by the
+      //     vendor the PO is for, for this instance's product. finalize binds
+      //     it before parking, but a payload parked before that check existed
+      //     was never bound, and Path A turns it into a PO line priced from
+      //     that quote line (draftPO binds again, but only after the commit).
+      //   - selected_quotes from submit-for-approval: each entry a quote of
+      //     this RFQ product by its vendor. Submit binds them now, but before
+      //     the round-quote ids were scoped it accepted any round quote, and
+      //     the branch below awards each entry and prices its PO line from it.
+      // The instance row itself: the binders check its company owns the RFQ
+      // the metadata awards (an instance opened before the generic submit
+      // route was closed to this type could name another company's RFQ).
+      const bindTarget = { ...pendingInstance, metadata: guardMeta };
+      await bindParkedAward(db, bindTarget);
+      await bindSelectedQuotes(db, bindTarget);
+
+      // 1c. A PO the approver chose to merge the award into must be this RFQ's
+      // draft for the awarded vendor. Checked BEFORE the approval action, for
+      // the reason 1b gives: a refusal here costs a 400 and nothing else. The
+      // checked int is what goes into the payload, never the raw body value.
+      // (draftPurchaseOrder re-checks it under the lock; if it has gone stale
+      // by then, the approval has committed, so the line is drafted without it.)
+      let mergeTargetId = null;
+      if (existing_po_id && guardMeta.po_payload) {
+        mergeTargetId = await assertDraftMergeTarget(db, {
+          poId: existing_po_id,
+          rfqId: guardMeta.po_payload.rfq_id ?? guardMeta.rfq_id,
+          vendorId: guardMeta.po_payload.product_info?.finalized_vendor_id ?? guardMeta.vendor_id,
+        });
+      }
+
       // 2. Submit approval action
       const result = await submitApprovalAction({
         approval_instance_id: pendingInstance.id,
@@ -2990,6 +3209,8 @@ const NegotiationController = {
 
       const isFullyApproved = result.instance_status === 'APPROVED';
       let arcApprovalCreated = false;
+      // Set when the approval committed but its PO was refused (Path A below).
+      let poNotDrafted = null;
 
       // 3. If fully approved, add to finalization and create ARC
       if (isFullyApproved) {
@@ -2998,33 +3219,58 @@ const NegotiationController = {
 
         // Path A: PO payload stored by rfqController.finalize (direct vendor finalization)
         if (metadata.po_payload && metadata.po_user) {
-          // Final approver can choose to merge into an existing PO
+          // Final approver can choose to merge into an existing PO (checked in 1c)
           const poPayload = { ...metadata.po_payload };
-          if (existing_po_id) {
-            poPayload.existing_po_id = existing_po_id;
+          if (mergeTargetId) {
+            poPayload.existing_po_id = mergeTargetId;
           }
 
-          await db.tx(async (t) => {
-            const authPayload = await buildAuthoritativePOPayload(poPayload, t);
-            const poResult = await draftPO(authPayload, metadata.po_user, t);
+          try {
+            await db.tx(async (t) => {
+              // The approval has committed: a target (the approver's or the one
+              // parked at finalize) that is no longer a draft of this RFQ for the
+              // vendor is set aside under the PO lock, not refused.
+              const authPayload = await buildAuthoritativePOPayload(poPayload, t);
+              const poResult = await draftPO(authPayload, metadata.po_user, t, { staleTargetFallback: true });
+              if (poResult?.po_id) { draftedPoIds.push(poResult.po_id); draftedRfqId = metadata.rfq_id; if (poResult.created) createdPoIds.push(poResult.po_id); }
 
-            await recordLifecycleEvent({
-              entity_type: metadata.is_tender === 1 ? 'TENDER' : 'RFQ',
-              entity_id: metadata.rfq_id,
-              stage: 'NEGOTIATION_QUOTES_APPROVED',
-              action: 'APPROVE',
-              performed_by: user_id,
-              metadata: {
-                approval_instance_id: pendingInstance.id,
-                rfq_product_id: metadata.rfq_product_id,
-                vendor_id: metadata.vendor_id,
-                quote_id: metadata.quote_id
-              },
-              txContext: t
+              await recordLifecycleEvent({
+                entity_type: metadata.is_tender === 1 ? 'TENDER' : 'RFQ',
+                entity_id: metadata.rfq_id,
+                stage: 'NEGOTIATION_QUOTES_APPROVED',
+                action: 'APPROVE',
+                performed_by: user_id,
+                metadata: {
+                  approval_instance_id: pendingInstance.id,
+                  rfq_product_id: metadata.rfq_product_id,
+                  vendor_id: metadata.vendor_id,
+                  quote_id: metadata.quote_id
+                },
+                txContext: t
+              });
             });
-          });
+          } catch (refusal) {
+            // The approval above HAS committed; only the PO was refused (the
+            // product's PO went on hold between the checks and now, say). The
+            // answer must not read "nothing was approved": record the approved
+            // award without a PO on the timeline, as the engine's handler
+            // does, and say so in a success body.
+            if (!(refusal instanceof PoDecisionError)) throw refusal;
+            logError(
+              `[approveQuotes] NEGOTIATION_QUOTE approval_instance_id=${pendingInstance.id} is APPROVED ` +
+              `but its PO was refused (${refusal.code}): NO purchase order was drafted.`,
+              refusal
+            );
+            await recordApprovedWithoutPo({
+              instance,
+              approverUserId: user_id,
+              metadata,
+              reason: refusal.code || 'PO_PAYLOAD_REFUSED',
+            });
+            poNotDrafted = { code: refusal.code, message: refusal.message };
+          }
         } else if (metadata.rfq_id && metadata.selected_quotes?.length > 0) {
-          const rfq = await rfqModel.checkIfExists('tbl_rfq', `id = ${metadata.rfq_id}`);
+          const rfq = await rfqModel.checkIfExists('tbl_rfq', { where: 'id = $1', values: [metadata.rfq_id] });
           const rfqData = rfq[0];
 
           // Check if this is a hospitality tender (requires ARC)
@@ -3157,76 +3403,45 @@ const NegotiationController = {
               if (product) {
                 for (const selectedQuote of metadata.selected_quotes) {
                   try {
-                    // Get vendor's original quote item for quantity/unit.
+                    // The PO line is priced from the vendor's quote line, read
+                    // here (selectedQuoteLine) and repriced by
+                    // buildAuthoritativePOPayload, never from the entry's
+                    // quoted_price. That figure is parked in the instance
+                    // metadata, and for a negotiation-round entry it is the
+                    // round's landed LINE total, which this branch used to
+                    // write as the UNIT price: a line of quantity 50 was
+                    // drafted at 50x its value (the Path B arithmetic
+                    // negotiationQuotePostApproval documents and deleted).
                     //
-                    // `qi.unit` USED TO BE SELECTED HERE AND DOES NOT EXIST.
-                    // tbl_quote_items has no unit-of-measure column (see
-                    // tests/setup/schema.sql — the pg_dump of the real
-                    // database), so this query raised 42703 "column qi.unit does
-                    // not exist" on EVERY execution. The consequences were much
-                    // worse than a missing unit, because of where the failure
-                    // landed:
-                    //
-                    //   1. submitApprovalAction has already committed the
-                    //      approval on its own connection — the instance is
-                    //      APPROVED for good.
-                    //   2. This query runs inside the surrounding db.tx, AFTER
-                    //      addQuotesToFinalization has inserted the award and
-                    //      recordLifecycleEvent has logged it.
-                    //   3. It throws. The `catch (poError)` below swallows the
-                    //      JS error — but a failed statement has already put
-                    //      POSTGRES into an aborted transaction, which no JS
-                    //      catch can undo. pg-promise's COMMIT degrades to a
-                    //      ROLLBACK, silently discarding the award and the
-                    //      lifecycle row written in steps 2.
-                    //   4. The endpoint still answers 200 "Quotes fully approved
-                    //      and finalized".
-                    //
-                    // Net effect in production: on this branch the approval was
-                    // recorded, the caller was told the award succeeded, and
-                    // tbl_quote_finalization got nothing at all. Dropping the
-                    // phantom column is the whole fix — `unit` was already
-                    // written as `vendorQuoteItem.unit || 'N/A'` below, and the
-                    // fallback is now simply always taken, which is the value
-                    // the column could ever have produced anyway.
-                    const vendorQuoteItem = await t.oneOrNone(
-                      `SELECT qi.quantity, qi.unit_price, qi.id as quote_item_id,
-                              qi.freight_price, qi.freight_mode, qi.package_price, qi.package_mode, qi.tax, qi.tax_mode,
-                              qi.other_charges
-                       FROM tbl_quote_items qi
-                       JOIN tbl_quotes q ON q.id = qi.quote_id
-                       WHERE q.rfq_id = $1 AND qi.product_variant_id = $2 AND qi.variant = $3 AND q.created_by = $4
-                       ORDER BY q.timestamp DESC LIMIT 1`,
-                      [metadata.rfq_id, product.product_variant_id, product.variant, selectedQuote.vendor_id]
-                    );
+                    // Only SELECTs run before draftPO, so a refusal here is a
+                    // JS throw, not a failed statement that would abort the
+                    // surrounding transaction. (This query once selected a
+                    // phantom `qi.unit` column: the 42703 aborted the tx and
+                    // the COMMIT silently rolled the award back.)
+                    const quoteLine = await selectedQuoteLine(t, {
+                      rfqId: metadata.rfq_id,
+                      rfqProductId: rfq_product_id,
+                      entry: selectedQuote,
+                    });
 
-                    if (vendorQuoteItem) {
-                      const negotiationPrice = parseFloat(selectedQuote.quoted_price);
-                      const quantity = parseFloat(vendorQuoteItem.quantity) || 1;
-                      const totalValue = quantity * negotiationPrice;
-
-                      const poResult = await draftPO({
+                    if (quoteLine) {
+                      const authPayload = await buildAuthoritativePOPayload({
                         rfq_id: metadata.rfq_id,
                         project_id: rfqData.project_id,
-                        total_value: totalValue,
-                        quote_item_id: vendorQuoteItem.quote_item_id,
+                        quote_item_id: quoteLine.quote_item_id,
                         product_info: {
                           rfq_product_id,
-                          quantity: vendorQuoteItem.quantity,
-                          unit: vendorQuoteItem.unit || 'N/A',
-                          unit_price: negotiationPrice,
-                          charges_meta: {
-                            freight_price: vendorQuoteItem.freight_price,
-                            freight_mode: vendorQuoteItem.freight_mode,
-                            package_price: vendorQuoteItem.package_price,
-                            package_mode: vendorQuoteItem.package_mode,
-                            tax: vendorQuoteItem.tax,
-                            tax_mode: vendorQuoteItem.tax_mode,
-                            other_charges: vendorQuoteItem.other_charges || []
-                          },
+                          quantity: quoteLine.quantity,
+                          unit: 'N/A',
                           finalized_vendor_id: selectedQuote.vendor_id
                         }
-                      }, { id: instance.initiated_by || user_id, company_id: req.user.company_id }, t);
+                      }, t);
+                      const poResult = await draftPO(
+                        authPayload,
+                        { id: instance.initiated_by || user_id, company_id: req.user.company_id },
+                        t
+                      );
+                      if (poResult?.po_id) { draftedPoIds.push(poResult.po_id); draftedRfqId = metadata.rfq_id; if (poResult.created) createdPoIds.push(poResult.po_id); }
                     }
                   } catch (poError) {
                     logError(`Error creating PO for vendor ${selectedQuote.vendor_id}`, poError);
@@ -3238,6 +3453,16 @@ const NegotiationController = {
         }
       }
 
+      // Who may initiate what was just drafted, so the approver is guided to it
+      // straight away. Read after commit; a failure here must not turn a
+      // finished approval into an error response.
+      const drafted_pos = await buildDraftedPos(req.user, draftedRfqId, draftedPoIds)
+        .catch((e) => { logError('approveQuotes drafted_pos failed', e); return []; });
+
+      // Tell the people who can initiate, after commit, for newly CREATED drafts
+      // only. Fire-and-forget: notifyDraftCreated never throws.
+      for (const poId of new Set(createdPoIds)) void notifyDraftCreated(poId);
+
       return res.status(200).json({
         status: 1,
         data: {
@@ -3246,15 +3471,28 @@ const NegotiationController = {
           finalized: isFullyApproved,
           instance_status: result.instance_status,
           next_step: result.next_step || null,
-          arc_approval_created: arcApprovalCreated
+          arc_approval_created: arcApprovalCreated,
+          drafted_pos,
+          ...(poNotDrafted ? { po_not_drafted: poNotDrafted } : {})
         },
-        message: isFullyApproved
-          ? (arcApprovalCreated
-              ? 'Quotes approved, finalized, and ARC approval submitted'
-              : 'Quotes fully approved and finalized')
-          : 'Approval recorded. Waiting for other approvers.'
+        message: poNotDrafted
+          ? `Quotes approved, but no purchase order was drafted: ${poNotDrafted.message}`
+          : isFullyApproved
+            ? (arcApprovalCreated
+                ? 'Quotes approved, finalized, and ARC approval submitted'
+                : 'Quotes fully approved and finalized')
+            : 'Approval recorded. Waiting for other approvers.'
       });
     } catch (error) {
+      // An award refused BEFORE the approval was recorded: the product's PO is
+      // on hold, its quotes do not bind to this RFQ product or to the
+      // instance's company (1b'), or the merge target is not a draft (1c). Its
+      // own status and code, the same body as every PO hold refusal. Nothing
+      // was approved. (A refusal after the approval committed is answered
+      // above, as an approval without a PO.)
+      if (error instanceof PoDecisionError) {
+        return res.status(error.httpStatus || 409).json({ status: 0, message: error.message, code: error.code });
+      }
       logError(error);
       return formatErrorResponse(res, error);
     }

@@ -53,6 +53,26 @@ async function resolveArcId(req) {
   return null;
 }
 
+/**
+ * The caller's `resource.action` grants in one ARC's own scope.
+ * @param {number} userId
+ * @param {{hotel_id, department_id, process_id}} arc  the tbl_arc row
+ * @returns {Promise<Set<string>>}
+ */
+export async function heldArcPermissions(userId, arc) {
+  if (arc?.hotel_id == null) return new Set();
+  const rows = await rbacModel.getUserPermissionsForHotels(
+    userId, [arc.hotel_id], null, arc.department_id || null
+  );
+  // getUserPermissionsForHotels enforces company × hotel × department but
+  // returns urs.process_id WITHOUT filtering on it, so the fourth axis was
+  // silently unenforced here. Apply it, with the canonical strict
+  // semantics shared with the listing predicate (see arcScope.js).
+  return new Set(
+    filterRowsByProcessAxis(rows, arc.process_id).map((r) => `${r.resource}.${r.action}`)
+  );
+}
+
 export function requireArcPermission(keys = []) {
   return async function arcPermissionGate(req, res, next) {
     try {
@@ -74,20 +94,7 @@ export function requireArcPermission(keys = []) {
       );
       if (!arc) return res.status(404).json({ status: 2, message: 'ARC not found' });
 
-      let held = new Set();
-      if (arc.hotel_id != null) {
-        const rows = await rbacModel.getUserPermissionsForHotels(
-          userId, [arc.hotel_id], null, arc.department_id || null
-        );
-        // getUserPermissionsForHotels enforces company × hotel × department but
-        // returns urs.process_id WITHOUT filtering on it, so the fourth axis was
-        // silently unenforced here. Apply it, with the canonical strict
-        // semantics shared with the listing predicate (see arcScope.js).
-        held = new Set(
-          filterRowsByProcessAxis(rows, arc.process_id).map((r) => `${r.resource}.${r.action}`)
-        );
-      }
-
+      const held = await heldArcPermissions(userId, arc);
       if (keys.some((k) => held.has(k))) return next();
 
       return res.status(403).json({

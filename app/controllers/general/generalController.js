@@ -28,10 +28,12 @@ import generalModel, {
   checkIfUserIsFinalApprover,
   getApprovalPolicyTenant,
   getApprovalInstanceTenant,
-  getApprovalProcessTenant
+  getApprovalProcessTenant,
+  ENTITY_APPROVE_RESOURCE_MAP
 } from '../../models/generalModel.js';
-import { resolveHospitalityCompanyScope } from '../../helper/arc_v2/resolveHospitalityCompany.js';
 import { executeApprovalAction } from '../../services/approvalActionService.js';
+import { ApprovalInstanceNotFoundError } from '../../services/approvalTargetOwner.js';
+import { PoDecisionError } from '../../services/poApprovalService.js';
 import { stageLabel } from '../../services/notificationLinks.js';
 import {
   snapshotPolicySteps,
@@ -47,10 +49,12 @@ import {
   dispatchPropagationEmails,
   roleStepPermissionVerdict
 } from '../../services/approvalPropagationService.js';
+import { lockPosOfInstances } from '../../services/po/poHold.js';
 import { AVAILABLE_HIERARCHY_TYPES } from '../../util/constants.js';
 import { initiatePurchaseOrder } from '../../models/purchaseOrderModel.js';
 import db from '../../config/dbConn.js';
 import { requestIsCompanyAdmin } from '../../middleware/companyAdmin.js';
+import { resolveApprovalCompanyScope, inCompanyScope } from '../../services/approvalTenantScope.js';
 import {
   listDelegations,
   findOverlappingDelegation,
@@ -67,6 +71,14 @@ import {
   listReassignmentCandidates,
   reassignApprover
 } from '../../models/approvalOversightModel.js';
+import {
+  AMOUNT_GATED,
+  excludesInitiator,
+  toPaise,
+  formatPaise,
+  MAX_MONEY_PAISE
+} from '../../services/approval/approvalEntityRules.js';
+import { canReadPrById } from '../../services/pr/prAccess.js';
 
 const generalController = {
   getStates: async (req, res, next) => {
@@ -397,72 +409,11 @@ const generalController = {
 // ===========================================================================
 // Tenant scope for the approval endpoints.
 // ---------------------------------------------------------------------------
-// Every handler below derives its company scope from req.user via these two
-// helpers. A client-supplied `hospitality_company_id` may only NARROW the
-// result; it can never widen it.
+// Every handler below derives its company scope from req.user via
+// resolveApprovalCompanyScope / inCompanyScope (services/approvalTenantScope.js,
+// shared with the RFQ and ARC approval routes). A client-supplied
+// `hospitality_company_id` may only NARROW the result; it can never widen it.
 // ===========================================================================
-
-/**
- * Companies this request may read approval config for.
- *   null      → super admin (user_type 8): every company.
- *   number[]  → exactly these companies ([] = no access).
- *
- * resolveHospitalityCompanyScope() reads tbl_hospitality_user_mappings and
- * already refuses client widening for non-admins. Two active production
- * buyers (358, 407) carry RBAC role scopes but no hospitality mapping row, so
- * we union in tbl_user_role_scopes.company_id — still derived entirely from
- * req.user, and it keeps those users from losing their own tenant's policies.
- */
-async function resolveApprovalCompanyScope(req) {
-  // Memoised per request: several handlers below need the scope more than once
-  // (guard + mutation-target resolution) and it costs two queries to build.
-  if (req.__approvalCompanyScope !== undefined) return req.__approvalCompanyScope;
-
-  const scope = await computeApprovalCompanyScope(req);
-  req.__approvalCompanyScope = scope;
-  return scope;
-}
-
-async function computeApprovalCompanyScope(req) {
-  const mapped = await resolveHospitalityCompanyScope(req);
-  if (mapped === null) return null; // super admin (user_type 8)
-
-  const scoped = (await db.any(
-    `SELECT DISTINCT company_id
-       FROM tbl_user_role_scopes
-      WHERE user_id = $1 AND company_id IS NOT NULL`,
-    [req.user?.id || null]
-  )).map((r) => Number(r.company_id));
-
-  // Company admins own every business unit under their OWN parent buyer
-  // company and may carry NEITHER a hospitality mapping NOR an RBAC role scope
-  // — verified in production: all three legacy user_type-7 users have zero rows
-  // in both tables. Without this union the scope collapses to [] for the only
-  // role that may reach the Approval Wizard, so it could neither list nor save
-  // a single policy.
-  //
-  // Keyed on the capability rather than on user_type 7, or an administrator
-  // promoted the new way — an ordinary buyer holding company.admin — would fall
-  // through to whatever scope they happened to hold as a buyer, which is
-  // precisely the estate they were promoted to see beyond.
-  //
-  // tbl_users.company_id is loaded from the DB by the jwtUsr strategy, so this
-  // is still derived entirely from req.user — never from a header or the body.
-  // It is the same tenancy edge hospitalityController.js enforces everywhere as
-  // `record.buyer_company_id !== company.id`.
-  let administered = [];
-  if ((await requestIsCompanyAdmin(req)) && req.user?.company_id) {
-    administered = (await db.any(
-      `SELECT id
-         FROM tbl_hospitality_companies
-        WHERE buyer_company_id = $1
-          AND COALESCE(is_deleted, 0) = 0`,
-      [Number(req.user.company_id)]
-    )).map((r) => Number(r.id));
-  }
-
-  return [...new Set([...(mapped || []), ...scoped, ...administered])];
-}
 
 /**
  * The companies a stuck-approvals request may read.
@@ -481,12 +432,6 @@ async function resolveStuckScope(req, scopeIds) {
   return rows.map((r) => Number(r.id));
 }
 
-/** True when `companyId` is inside the request's server-derived scope. */
-function inCompanyScope(scopeIds, companyId) {
-  if (scopeIds === null) return true; // super admin
-  if (companyId === null || companyId === undefined) return false;
-  return scopeIds.includes(Number(companyId));
-}
 
 /**
  * Resolve a policy id to its owning company and 404 when it belongs to another
@@ -502,11 +447,58 @@ async function guardPolicyTenant(req, res, policyId) {
   return tenant;
 }
 
+// Entity types POST /hospitality/approval/submit refuses: every instance type
+// the engine accepts (createApprovalInstance rejects anything else).
+//
+// Each one is opened by its own server workflow (RFQ/TENDER publish, TECHNICAL
+// and NEGOTIATION rounds, finalize and submit-for-approval for
+// NEGOTIATION_QUOTE, PO initiate, MR, the ARC v2 stages), and that workflow is
+// what checks the entity belongs to the caller's tenant and writes the metadata
+// the post-approval handler later trusts. This route did neither: an instance
+// could name ANY entity_id with ANY metadata, so a NEGOTIATION_QUOTE forged on
+// another company's product with a self-consistent po_payload, once approved
+// by the caller's own approver, drafted a PO on that company's RFQ priced from
+// its vendor; a forged RFQ instance published another company's RFQ.
+//
+// No screen calls this route (frontend, admin panel and mobile searched for
+// `approval/submit`, 2026-10-25: no caller). A type added to the engine later
+// is refused here by default; opening one through this route would first need
+// an entity-tenant check and handlers that trust no caller-written metadata.
+const SERVER_OWNED_APPROVAL_TYPES = new Set(Object.keys(ENTITY_APPROVE_RESOURCE_MAP));
+
 /** Same as guardPolicyTenant, for approval instances. */
 async function guardInstanceTenant(req, res, instanceId) {
   const scopeIds = await resolveApprovalCompanyScope(req);
   const tenant = await getApprovalInstanceTenant(instanceId);
   if (!tenant || !inCompanyScope(scopeIds, tenant.hospitality_company_id)) {
+    res.status(404).json({ status: 2, message: 'Approval instance not found' });
+    return null;
+  }
+  return tenant;
+}
+
+/**
+ * May the caller read the entity behind an approval instance? Company scope is
+ * the rule for every entity type except a purchase requisition, which has its
+ * own read rule (prAccess.canReadPr, R9): requester, pr.read / pr.convert /
+ * routed pr.evaluate, or an approver on the PR's CURRENT instance. Company
+ * scope alone would let any same-company user read a requisition's approvers,
+ * comments and send-back notes that GET /pr/:id refuses them (404).
+ */
+async function canReadInstanceEntity(req, entityType, entityId) {
+  if (String(entityType).toUpperCase() !== 'PR') return true;
+  return canReadPrById(req.user, entityId);
+}
+
+/**
+ * guardInstanceTenant for the READ endpoints: also 404 when the instance is a
+ * purchase requisition's and the caller may not read that PR (same answer as
+ * an unknown id — no existence leak).
+ */
+async function guardInstanceRead(req, res, instanceId) {
+  const tenant = await guardInstanceTenant(req, res, instanceId);
+  if (!tenant) return null;
+  if (!(await canReadInstanceEntity(req, tenant.entity_type, tenant.entity_id))) {
     res.status(404).json({ status: 2, message: 'Approval instance not found' });
     return null;
   }
@@ -787,6 +779,63 @@ function unqualifiableRoleStepsResponse(entityType, offenders) {
   };
 }
 
+/**
+ * Validate and canonicalise each step's `min_amount` ("only when the value is
+ * ≥ ₹X") for a policy of `entityType`.
+ *
+ * Thresholds are a rule of AMOUNT_GATED entity types (PR) only. For every other
+ * type the field is dropped to NULL exactly as it was ignored before this
+ * column existed, so no non-PR request changes meaning — and nothing the engine
+ * would never read is stored. For PR: absent/null/'' = no threshold; otherwise
+ * a non-negative rupee amount with at most 2 decimals, stored as '25000.00'.
+ *
+ * @returns {{ steps: Array } | { error: Object }} error is a 400 body
+ */
+function normaliseStepMinAmounts(steps, entityType) {
+  if (!Array.isArray(steps)) return { steps };
+  const gated = AMOUNT_GATED.has(String(entityType || '').toUpperCase());
+  const out = [];
+  for (let i = 0; i < steps.length; i++) {
+    const step = steps[i];
+    if (!step || typeof step !== 'object' || !Object.prototype.hasOwnProperty.call(step, 'min_amount')) {
+      out.push(step);
+      continue;
+    }
+    if (!gated) {
+      out.push({ ...step, min_amount: null });
+      continue;
+    }
+    const label = `Step ${step.step_order || i + 1}`;
+    let paise;
+    try {
+      paise = toPaise(step.min_amount);
+    } catch {
+      return {
+        error: {
+          status: 3,
+          code: 'INVALID_MIN_AMOUNT',
+          message: `${label}: the minimum value must be an amount in rupees with at most 2 decimals`
+        }
+      };
+    }
+    if (paise !== null && paise < 0n) {
+      return {
+        error: { status: 3, code: 'INVALID_MIN_AMOUNT', message: `${label}: the minimum value cannot be negative` }
+      };
+    }
+    if (paise !== null && paise > MAX_MONEY_PAISE) {
+      return {
+        error: { status: 3, code: 'INVALID_MIN_AMOUNT', message: `${label}: the minimum value cannot exceed ₹9999999999999999.99` }
+      };
+    }
+    out.push({ ...step, min_amount: formatPaise(paise) });
+  }
+  return { steps: out };
+}
+
+/** Requisition entity types whose policies never carry a process (R43). */
+const PROCESS_FREE_REQUISITIONS = new Set(['PR', 'MR']);
+
 const hospitalityApprovalController = {
   /**
    * Create or Update an approval policy with steps
@@ -802,10 +851,12 @@ const hospitalityApprovalController = {
         process_id,
         is_active,
         is_master,
-        steps,
+        steps: requestedSteps,
         id,
         confirmed_approval_impact
       } = req.body;
+      // Re-bound once min_amount is validated against the effective entity type.
+      let steps = requestedSteps;
       const created_by = req.user?.id;
 
       if (!created_by) {
@@ -818,7 +869,11 @@ const hospitalityApprovalController = {
       // publish/eval time. Force process_id = NULL for every ARC entity type
       // server-side, regardless of what the client sent.
       const isArcEntity = typeof entity_type === 'string' && (entity_type === 'ARC' || entity_type.startsWith('ARC_'));
-      const effectiveProcessId = isArcEntity ? null : process_id;
+      // PR and MR are process-free for the same reason: a requisition carries
+      // no process (the MR engine matches with process_id NULL — mrController,
+      // R43), so a PR or MR policy saved with one could never be matched.
+      const isProcessFreeEntity = isArcEntity || PROCESS_FREE_REQUISITIONS.has(entity_type);
+      const effectiveProcessId = isProcessFreeEntity ? null : process_id;
 
       let policy;
       let propagationResult = null;
@@ -834,6 +889,12 @@ const hospitalityApprovalController = {
         const scopeIds = await resolveApprovalCompanyScope(req);
         const tenant = await guardPolicyTenant(req, res, parseInt(id));
         if (!tenant) return;
+
+        // The stored row's entity type (read only after the tenant gate). An
+        // update need not resend entity_type, so every rule keyed on it —
+        // process-free PR, min_amount validation — uses the effective type.
+        const storedPolicy = await db.oneOrNone('SELECT entity_type FROM tbl_approval_policies WHERE id = $1', [id]);
+        const effectiveUpdateEntityType = entity_type !== undefined ? entity_type : storedPolicy?.entity_type;
 
         // The tenant is pinned to the row that actually exists. A body-supplied
         // company may only move the policy WITHIN the caller's own scope;
@@ -874,9 +935,15 @@ const hospitalityApprovalController = {
         // that re-points every step at a different permission resource, so every
         // step is effectively new.
         if (steps && steps.length > 0) {
-          const stored = await db.oneOrNone('SELECT entity_type FROM tbl_approval_policies WHERE id = $1', [id]);
-          const effectiveEntityType = entity_type !== undefined ? entity_type : stored?.entity_type;
+          const stored = storedPolicy;
+          const effectiveEntityType = effectiveUpdateEntityType;
           const entityTypeChanged = entity_type !== undefined && stored?.entity_type !== undefined && entity_type !== stored.entity_type;
+
+          // min_amount before anything compares or writes steps (the PHASE 2
+          // diff and PHASE 3 insert both read the normalised list).
+          const normalised = normaliseStepMinAmounts(steps, effectiveEntityType);
+          if (normalised.error) return res.status(400).json(normalised.error);
+          steps = normalised.steps;
 
           const stepsToValidate = selectRoleStepsToValidate(oldSteps, steps, { revalidateAll: entityTypeChanged });
 
@@ -955,6 +1022,15 @@ const hospitalityApprovalController = {
         // - If propagation throws, the policy mutation rolls back too, so we
         //   never leave a half-applied state ("policy saved but propagation failed").
         const txResult = await db.tx(async t => {
+          // The PO rows of this policy's pending approvals come FIRST, in PO id
+          // order, before the policy row and before deletePolicySteps (whose
+          // ON DELETE SET NULL locks the instance step rows). Every PO decision
+          // locks the PO, then its approval; taking either of those here before
+          // the PO would invert that order and can deadlock with an approver
+          // acting on one of these POs. propagatePolicyChangeToInstances takes
+          // the same locks again later; a row lock already held is free.
+          await lockPosOfInstances(t, { policyId: id });
+
           // Acquire row-level lock on the policy. Any concurrent save against
           // the same policy will block here until this tx commits/rolls back.
           await t.oneOrNone('SELECT id FROM tbl_approval_policies WHERE id = $1 FOR UPDATE', [id]);
@@ -974,9 +1050,12 @@ const hospitalityApprovalController = {
           if (department_id !== undefined) patch.department_id = department_id;
           if (is_active !== undefined) patch.is_active = is_active;
           if (is_master !== undefined) patch.is_master = is_master;
-          // ARC stays process-free by design: force NULL whenever the entity
-          // type says ARC, otherwise only touch process_id if it was sent.
-          if (isArcEntity) patch.process_id = null;
+          // ARC, PR and MR stay process-free by design: force NULL whenever the
+          // entity type says so, otherwise only touch process_id if it was sent.
+          // PR and MR are judged on the EFFECTIVE type (body, else the stored
+          // row), so an update that omits entity_type cannot attach a process
+          // to such a policy. ARC keeps its existing body-only rule.
+          if (isProcessFreeEntity || PROCESS_FREE_REQUISITIONS.has(effectiveUpdateEntityType)) patch.process_id = null;
           else if (process_id !== undefined) patch.process_id = effectiveProcessId;
 
           const updatedPolicy = await updateApprovalPolicy(id, patch, t);
@@ -1059,10 +1138,15 @@ const hospitalityApprovalController = {
         // v2 stage types so the admin wizard can create per-stage ARC policies,
         // and the GROUP rate contract workflow (ARC_GROUP*), which governs ARCs
         // covering several hotels — see helper/arc_v2/arcPolicy.js.
+        //
+        // MR and PR (material / purchase requisitions) were missing: both are
+        // in ENTITY_APPROVE_RESOURCE_MAP, so their policies could be matched
+        // but never created from the admin screen.
         const validEntityTypes = [
           'RFQ', 'TENDER', 'NEGOTIATION', 'PO', 'INDENT', 'TECHNICAL', 'ARC', 'NEGOTIATION_QUOTE',
           'ARC_TECH', 'ARC_NEGOTIATION', 'ARC_COMMITTEE', 'ARC_AMENDMENT', 'ARC_PUBLISH',
           'ARC_GROUP', 'ARC_GROUP_TECH', 'ARC_GROUP_NEGOTIATION', 'ARC_GROUP_COMMITTEE', 'ARC_GROUP_AMENDMENT',
+          'MR', 'PR',
         ];
         if (!validEntityTypes.includes(entity_type)) {
           return res.status(400).json({
@@ -1070,6 +1154,10 @@ const hospitalityApprovalController = {
             message: `Invalid entity_type. Must be one of: ${validEntityTypes.join(', ')}`
           });
         }
+
+        const normalised = normaliseStepMinAmounts(steps, entity_type);
+        if (normalised.error) return res.status(400).json(normalised.error);
+        steps = normalised.steps;
 
         // Every step of a brand-new policy is a new step, so all of them are
         // validated here (see the PHASE 1b note on the update branch for why the
@@ -1263,6 +1351,17 @@ const hospitalityApprovalController = {
         });
       }
 
+      // Server-owned approval types are opened by their own workflow only
+      // (see SERVER_OWNED_APPROVAL_TYPES). Refused before anything is read.
+      const normalizedType = String(entity_type).trim().toUpperCase();
+      if (SERVER_OWNED_APPROVAL_TYPES.has(normalizedType)) {
+        return res.status(403).json({
+          status: 3,
+          code: 'APPROVAL_TYPE_SERVER_OWNED',
+          message: `${normalizedType} approvals are opened by their own workflow, not through this route.`
+        });
+      }
+
       // SECURITY (P0, cross-tenant WRITE): hospitality_company_id was taken
       // from the request body, so a caller could open an approval instance
       // inside another tenant — binding that tenant's approvers to an entity
@@ -1304,8 +1403,9 @@ const hospitalityApprovalController = {
       // SECURITY: getApprovalInstanceDetails matches on `WHERE i.id = $1` and
       // returns approver names + emails plus company/hotel names. Guard at the
       // HTTP boundary (the model function is shared with ARC/MR/PO/negotiation
-      // flows that already scope their own entity).
-      if (!(await guardInstanceTenant(req, res, parseInt(id)))) return;
+      // flows that already scope their own entity). A purchase requisition's
+      // instance additionally needs the PR's own read rule.
+      if (!(await guardInstanceRead(req, res, parseInt(id)))) return;
       const data = await getApprovalInstanceDetails(parseInt(id), user_id);
       res.json({ status: 1, data });
     } catch (e) {
@@ -1320,7 +1420,7 @@ const hospitalityApprovalController = {
    */
   async submitApprovalAction(req, res) {
     try {
-      const { approval_instance_id, approval_instance_step_id, action, comment } = req.body;
+      const { approval_instance_id, approval_instance_step_id, action, comment, reason_category, route } = req.body;
       const approver_user_id = req.user?.id;
 
       if (!approver_user_id) {
@@ -1334,6 +1434,12 @@ const hospitalityApprovalController = {
         });
       }
 
+      // Tenant first: an instance of another company answers exactly like one
+      // that does not exist (404), before the engine says anything about it.
+      // The engine's own answers (already decided, not an approver, an award
+      // that does not bind) are only for callers inside the instance's company.
+      if (!(await guardInstanceTenant(req, res, parseInt(approval_instance_id)))) return;
+
       // executeApprovalAction wraps submitApprovalAction and centrally dispatches
       // entity-specific post-approval handlers (RFQ, TENDER, TECHNICAL, PO, ARC,
       // NEGOTIATION, NEGOTIATION_QUOTE) via the registry in approvalActionService.
@@ -1344,11 +1450,31 @@ const hospitalityApprovalController = {
         approval_instance_step_id: approval_instance_step_id ? parseInt(approval_instance_step_id) : null,
         approver_user_id,
         action,
-        comment
+        comment,
+        // PO rejections only: why, and whether to re-award or cancel. Ignored
+        // for every other entity type.
+        reason_category,
+        route,
       });
+
+      // `already_completed`: the instance was no longer PENDING (concluded,
+      // withdrawn, sent back) or this approver had already sent this decision.
+      // Nothing was decided, so the activity trail must not record "X approved
+      // …". The 200 stays — clients rely on the idempotent answer.
+      if (result?.already_completed === true) res.locals.skipActivityCapture = true;
 
       res.json({ status: 1, data: result });
     } catch (e) {
+      // An instance whose target is another company's (the engine refuses it
+      // before recording anything): the same answer as an unknown id.
+      if (e instanceof ApprovalInstanceNotFoundError) {
+        return res.status(404).json({ status: 2, message: 'Approval instance not found' });
+      }
+      // A refused PO rejection (unknown reason, a route that is not available,
+      // a stale approval) answers with its own status and code, like the PO page.
+      if (e instanceof PoDecisionError) {
+        return res.status(e.httpStatus || 400).json({ status: 3, message: e.message, code: e.code });
+      }
       logError(e);
       res.status(400).json({ status: 3, message: e.message });
     }
@@ -1376,7 +1502,20 @@ const hospitalityApprovalController = {
       // authenticated user could walk sequential ids and CANCEL another
       // tenant's pending approvals (3,846 instances / 361 pending in prod),
       // stalling their procurement without leaving an obvious trace.
-      if (!(await guardInstanceTenant(req, res, parseInt(instance_id)))) return;
+      const tenant = await guardInstanceTenant(req, res, parseInt(instance_id));
+      if (!tenant) return;
+
+      // A purchase requisition's approval is cancelled only by the PR workflow
+      // (requester withdraw, approver send-back), which moves the PR's own status
+      // in the same transaction. Cancelled through this generic door, the PR
+      // would sit in pending_approval on a dead instance.
+      if (String(tenant.entity_type).toUpperCase() === 'PR') {
+        return res.status(400).json({
+          status: 3,
+          code: 'APPROVAL_ENTITY_HAS_OWN_WORKFLOW',
+          message: 'A purchase requisition is withdrawn or sent back from the requisition itself.'
+        });
+      }
 
       const result = await cancelApprovalInstance(parseInt(instance_id), cancelled_by, reason);
       res.json({ status: 1, data: result });
@@ -1449,7 +1588,9 @@ const hospitalityApprovalController = {
       // we drop any instance outside the caller's server-derived company scope.
       const scopeIds = await resolveApprovalCompanyScope(req);
       const rows = await getApprovalInstancesByEntity(entity_type, parseInt(entity_id));
-      const data = (rows || []).filter((r) => inCompanyScope(scopeIds, r.hospitality_company_id));
+      let data = (rows || []).filter((r) => inCompanyScope(scopeIds, r.hospitality_company_id));
+      // A purchase requisition's instances follow the PR's own read rule.
+      if (data.length && !(await canReadInstanceEntity(req, entity_type, parseInt(entity_id)))) data = [];
       res.json({ status: 1, data });
     } catch (e) {
       logError(e);
@@ -1727,13 +1868,19 @@ const hospitalityApprovalController = {
 
       // Pass the instance's own scope so each candidate is judged by the rule
       // the approval engine itself uses, not merely "is in this company".
-      const data = await listReassignmentCandidates(instance.hospitality_company_id, {
+      const candidates = await listReassignmentCandidates(instance.hospitality_company_id, {
         hotelId: instance.hotel_id || null,
         search: req.query.search || null,
         entityType: instance.entity_type,
         departmentId: instance.department_id || null,
         processId: instance.process_id || null,
       });
+      // Separation of duties: the person who raised it can never be handed it.
+      const data = excludesInitiator(instance.entity_type)
+        ? candidates.map((c) => (Number(c.id) === Number(instance.initiated_by)
+          ? { ...c, eligible: false, ineligible_reason: 'initiator' }
+          : c))
+        : candidates;
       return res.json({ status: 1, data });
     } catch (e) {
       logError(e);
@@ -1793,6 +1940,16 @@ const hospitalityApprovalController = {
           status: 0,
           code: 'NOT_AN_APPROVER',
           message: 'That person is not currently an approver on this step',
+        });
+      }
+
+      // Separation of duties (PR): the engine never installs the initiator as
+      // an approver of their own request, so neither may an administrator.
+      if (excludesInitiator(instance.entity_type) && toUserId === Number(instance.initiated_by)) {
+        return res.status(400).json({
+          status: 3,
+          code: 'NOT_ELIGIBLE',
+          message: 'The person who raised this request cannot approve it',
         });
       }
 
@@ -1887,8 +2044,9 @@ const hospitalityApprovalController = {
   async getInstanceChangeHistory(req, res) {
     try {
       const instanceId = parseInt(req.params.id);
-      // SECURITY: instance id was unscoped (`WHERE i.id = $1`).
-      if (!(await guardInstanceTenant(req, res, instanceId))) return;
+      // SECURITY: instance id was unscoped (`WHERE i.id = $1`). A purchase
+      // requisition's instance additionally needs the PR's own read rule.
+      if (!(await guardInstanceRead(req, res, instanceId))) return;
       const history = await getInstanceChangeHistoryService(instanceId);
       return res.json({ status: 1, data: history });
     } catch (err) {

@@ -16,6 +16,12 @@
 // alternative — defaulting to some plausible number of hours — would report
 // most of the company as late on the day this ships, off a target nobody set.
 // SLA is configured per approval policy step (tbl_approval_policy_steps).
+//
+// ── Time on hold is not the approver's ──────────────────────────────────────
+// While a PO is on hold (an approver asked someone for information) nobody on
+// that step can decide it. Hours pending leave that time out: every hold on
+// the step, from the question to its answer (or to now, if still open),
+// clipped to the step's own window (reportsModel.holdSecondsSql).
 // ============================================================================
 
 import { FMT, istDate, istDateLabel, reportSheet, writeReportSheet } from "../excelKit.js";
@@ -146,6 +152,10 @@ export default {
         ? "Configured on every approval step in this queue"
         : `Configured on ${measured} of ${queueRows.length} pending step(s). The rest show "—": unmeasured, not compliant and not in breach.`,
     ];
+    const holdNote = [
+      "On hold",
+      "Time on hold waiting for information is excluded: while someone has been asked a question about the PO, nobody on the step can decide it.",
+    ];
     const anyNote = [
       "Rule ANY",
       "Where a step can be approved by any one of several people, every one of them is listed — until somebody acts, each is equally the reason it has not moved.",
@@ -155,7 +165,7 @@ export default {
     writeReportSheet(ws1, {
       title: "PO Approvals Pending",
       subtitle: `${queueRows.length} pending approval task(s) · Longest waiting first`,
-      params: [["As of", asOf], slaNote, anyNote, ["Sort", "Time pending, descending"]],
+      params: [["As of", asOf], slaNote, holdNote, anyNote, ["Sort", "Time pending, descending"]],
       columns: QUEUE_COLUMNS,
       rows: queueRows,
       totalLabel: undefined, // one row per approver task; a column sum would double-count PO value
@@ -175,6 +185,7 @@ export default {
         ["As of", asOf],
         slaNote,
         ["Measured", "How many of this approver's pending tasks have an SLA configured"],
+        holdNote,
         ["Sort", "Most pending first"],
       ],
       columns: BY_APPROVER_COLUMNS,
@@ -194,7 +205,7 @@ export default {
           : measured === 0
             ? "No SLA is configured on any approval step, so no breach can be reported"
             : "Nothing is past its SLA",
-      params: [["As of", asOf], slaNote, ["Sort", "Worst overrun first"]],
+      params: [["As of", asOf], slaNote, holdNote, ["Sort", "Worst overrun first"]],
       columns: BREACH_COLUMNS,
       rows: breachRows,
       freezeCols: 2,

@@ -41,6 +41,10 @@ const HOTEL_REFERENCES = [
     sql: 'SELECT count(*)::int FROM tbl_arc WHERE hotel_id = $1' },
   { key: 'material_requisitions', label: 'Material requisitions', kind: kinds.BLOCKS,
     sql: 'SELECT count(*)::int FROM tbl_material_requisition WHERE hotel_id = $1' },
+  // Any status, drafts included: hotel_id has no ON DELETE action, so a single
+  // draft makes the DELETE fail on the foreign key.
+  { key: 'purchase_requisitions', label: 'Purchase requisitions', kind: kinds.BLOCKS,
+    sql: 'SELECT count(*)::int FROM tbl_purchase_requisition WHERE hotel_id = $1' },
   { key: 'approval_instances', label: 'Approvals raised here', kind: kinds.BLOCKS,
     sql: 'SELECT count(*)::int FROM tbl_approval_instances WHERE hotel_id = $1' },
   { key: 'approval_policies', label: 'Approval workflows', kind: kinds.BLOCKS,
@@ -72,10 +76,19 @@ const COMPANY_REFERENCES = [
     sql: 'SELECT count(*)::int FROM tbl_arc WHERE hospitality_company_id = $1' },
   { key: 'material_requisitions', label: 'Material requisitions', kind: kinds.BLOCKS,
     sql: 'SELECT count(*)::int FROM tbl_material_requisition WHERE hospitality_company_id = $1' },
+  { key: 'purchase_requisitions', label: 'Purchase requisitions', kind: kinds.BLOCKS,
+    sql: 'SELECT count(*)::int FROM tbl_purchase_requisition WHERE hospitality_company_id = $1' },
+  // Platform catalog requests filed from the company's requisitions (any status).
+  { key: 'pr_catalog_requests', label: 'Catalog requests', kind: kinds.BLOCKS,
+    sql: 'SELECT count(*)::int FROM tbl_pr_catalog_request WHERE hospitality_company_id = $1' },
   { key: 'approval_instances', label: 'Approvals raised here', kind: kinds.BLOCKS,
     sql: 'SELECT count(*)::int FROM tbl_approval_instances WHERE hospitality_company_id = $1' },
   { key: 'approval_policies', label: 'Approval workflows', kind: kinds.BLOCKS,
     sql: 'SELECT count(*)::int FROM tbl_approval_policies WHERE hospitality_company_id = $1' },
+  // Configuration, like the approval workflows above — and with no ON DELETE
+  // action, so it would fail the DELETE rather than cascade.
+  { key: 'pr_review_routing', label: 'Requisition review routing rules', kind: kinds.BLOCKS,
+    sql: 'SELECT count(*)::int FROM tbl_pr_review_category_map WHERE hospitality_company_id = $1' },
 
   { key: 'user_mappings', label: 'People mapped to this company', kind: kinds.DESTROYS,
     sql: 'SELECT count(*)::int FROM tbl_hospitality_user_mappings WHERE hospitality_company_id = $1' },

@@ -116,6 +116,13 @@ export const buyerTechnicalEvaluation = (rfqId) =>
 export const buyerPoDetail = (poId) =>
   isPositiveId(poId) ? `/dashboard/buyer/purchase-orders/${enc(poId)}` : null;
 
+/**
+ * The PO page with the Initiate button scrolled to and focused
+ * (`?action=initiate`). Used by the "draft PO ready" notification.
+ */
+export const buyerPoInitiate = (poId) =>
+  isPositiveId(poId) ? `/dashboard/buyer/purchase-orders/${enc(poId)}?action=initiate` : null;
+
 export const buyerPoList = () => '/dashboard/buyer/purchase-orders';
 
 /**
@@ -198,10 +205,20 @@ export const buyerMrDetail = (mrId) =>
 export const buyerMrList = ({ tab } = {}) =>
   withQuery('/dashboard/buyer/material-requisitions/all', { tab });
 
+// ─── Purchase requisitions ───────────────────────────────────────────────────
+
+/** The PR detail page — every PR notification and the PR approval step land here. */
+export const buyerPrDetail = (prId) =>
+  isPositiveId(prId) ? `/dashboard/buyer/purchase-requisitions/${enc(prId)}` : null;
+
 // ─── Negotiation (RFQ) ───────────────────────────────────────────────────────
 
 export const buyerNegotiationRound = (rfqId) =>
   isPositiveId(rfqId) ? `/dashboard/buyer/negotiation/${enc(rfqId)}` : null;
+
+/** Create Round page for an RFQ (pages/dashboard/buyer/negotiation/[rfqId]/create). */
+export const buyerNegotiationCreateRound = (rfqId) =>
+  isPositiveId(rfqId) ? `/dashboard/buyer/negotiation/${enc(rfqId)}/create` : null;
 
 export const buyerNegotiationApprove = (rfqId) =>
   isPositiveId(rfqId) ? `/dashboard/buyer/negotiation/${enc(rfqId)}/approve` : null;
@@ -254,6 +271,7 @@ export const ENTITY_LABELS = Object.freeze({
   NEGOTIATION_QUOTE: 'Final vendor selection',
   PO:                'Purchase order',
   MR:                'Material Requisition',
+  PR:                'Purchase Requisition',
   ARC:               'ARC',
   ARC_PUBLISH:       'ARC',
   ARC_TECH:          'ARC technical evaluation',
@@ -271,6 +289,7 @@ export const STAGE_LABELS = Object.freeze({
   NEGOTIATION_QUOTE: 'Final Vendor Approval',
   PO:                'Purchase Order Approval',
   MR:                'Material Requisition Approval',
+  PR:                'Purchase Requisition Approval',
   ARC:               'ARC · Publish Approval',
   ARC_PUBLISH:       'ARC · Publish Approval',
   ARC_TECH:          'ARC · Technical Approval',
@@ -356,6 +375,11 @@ export const approvalActionUrl = (entityType, entityId, ctx = {}, opts = {}) => 
     case 'MR':
       return buyerMrDetail(ctx?.mr_id || entityId) || buyerMrList({ tab: 'for_me' });
 
+    case 'PR':
+      // The instance's entity_id IS the PR id; approve / reject / send back all
+      // live on the PR detail page.
+      return buyerPrDetail(ctx?.pr_id || entityId);
+
     // ── ARC family ──────────────────────────────────────────────────────────
     // Every one of these previously fell through to a bare `/dashboard`.
     case 'ARC':
@@ -384,6 +408,28 @@ export const approvalActionUrl = (entityType, entityId, ctx = {}, opts = {}) => 
       return null;
   }
 };
+
+// ─── Inventory ───────────────────────────────────────────────────────────────
+
+export const inventoryGrn = (id) =>
+  isPositiveId(id) ? `/dashboard/buyer/inventory/grn/${enc(id)}` : null;
+
+/** The PO page's Deliveries tab (buyer). */
+export const inventoryPoDeliveries = (poId) =>
+  isPositiveId(poId) ? `/dashboard/buyer/purchase-orders/${enc(poId)}?tab=deliveries` : null;
+
+export const inventoryAdjustment = (id) =>
+  isPositiveId(id) ? `/dashboard/buyer/inventory/adjustments?id=${enc(id)}` : null;
+
+export const inventoryCount = (id) =>
+  isPositiveId(id) ? `/dashboard/buyer/inventory/counts/${enc(id)}` : null;
+
+export const inventoryReorder = (hotelId) =>
+  isPositiveId(hotelId) ? `/dashboard/buyer/inventory/reorder?hotelId=${enc(hotelId)}` : null;
+
+/** The PO page's Deliveries tab (vendor). */
+export const vendorPoDeliveries = (poId) =>
+  isPositiveId(poId) ? `/dashboard/vendor/purchase-orders/${enc(poId)}?tab=deliveries` : null;
 
 // ─── Absolutiser (emails only) ───────────────────────────────────────────────
 
@@ -418,6 +464,12 @@ export default {
   buyerPoApproval,
   vendorPoDetail,
   vendorPoList,
+  inventoryGrn,
+  inventoryPoDeliveries,
+  inventoryAdjustment,
+  inventoryCount,
+  inventoryReorder,
+  vendorPoDeliveries,
   buyerArcDetail,
   buyerArcList,
   arcVendorContract,
@@ -427,7 +479,9 @@ export default {
   arcVendorAmendments,
   buyerMrDetail,
   buyerMrList,
+  buyerPrDetail,
   buyerNegotiationRound,
+  buyerNegotiationCreateRound,
   buyerNegotiationApprove,
   queryThread,
   buyerClarifications,

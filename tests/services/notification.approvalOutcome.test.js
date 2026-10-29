@@ -21,6 +21,7 @@
 import { describe, it, expect, afterAll, beforeEach, afterEach, jest } from "@jest/globals";
 import { db, closeDb } from "../setup/db.js";
 import { IDS } from "../fixtures/ids.js";
+import { drainPoRejectedNotifications } from "../../app/services/po/poRejectionNotifier.js";
 
 afterAll(async () => {
   await closeDb();
@@ -29,13 +30,14 @@ afterAll(async () => {
 const INITIATOR = IDS.users.a1_proc_buyer;
 const APPROVER = IDS.users.a1_proc_poApp;
 
-const created = { instanceIds: [], stepIds: [], poIds: [], rfqIds: [] };
+const created = { instanceIds: [], stepIds: [], poIds: [], rfqIds: [], mrIds: [] };
 
 beforeEach(async () => {
   created.instanceIds = [];
   created.stepIds = [];
   created.poIds = [];
   created.rfqIds = [];
+  created.mrIds = [];
   await db.none(
     `DELETE FROM tbl_notifications
       WHERE COALESCE(recipient_user_id, sender_user_id) = ANY($1::int[])`,
@@ -44,6 +46,11 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
+  await drainPoRejectedNotifications();
+  if (created.poIds.length) {
+    await db.none(`DELETE FROM tbl_po_send_backs WHERE purchase_order_id = ANY($1::int[])`, [created.poIds]);
+    await db.none(`DELETE FROM tbl_lifecycle_history WHERE entity_type = 'PO' AND entity_id = ANY($1::int[])`, [created.poIds]);
+  }
   if (created.instanceIds.length) {
     await db.none(
       `DELETE FROM tbl_notifications WHERE additional_data->>'approval_instance_id' = ANY($1)`,
@@ -57,6 +64,9 @@ afterEach(async () => {
   );
   if (created.poIds.length) {
     await db.none(`DELETE FROM tbl_rfq_purchase_order WHERE id = ANY($1::int[])`, [created.poIds]);
+  }
+  if (created.mrIds.length) {
+    await db.none(`DELETE FROM tbl_material_requisition WHERE id = ANY($1::int[])`, [created.mrIds]);
   }
   if (created.rfqIds.length) {
     await db.none(`DELETE FROM tbl_rfq_products WHERE rfq_id = ANY($1::int[])`, [created.rfqIds]);
@@ -102,6 +112,22 @@ async function makeRealPo() {
   );
   created.poIds.push(po.id);
   return po;
+}
+
+/**
+ * A real material requisition of company A, awaiting its approval. The engine
+ * runs no handler for an instance whose target is not its own company's
+ * (approvalTargetOwner), so a decision needs the MR to exist.
+ */
+async function makeRealMr() {
+  const mr = await db.one(
+    `INSERT INTO tbl_material_requisition (mr_number, title, hospitality_company_id, hotel_id, department_id,
+                                           raised_by, status)
+     VALUES ($1, 'Notif MR', $2, $3, $4, $5, 'pending_approval') RETURNING id, mr_number`,
+    [`MR-NOTIF-${++PO_SEQ}`, IDS.hospitality.A, IDS.hotels.A1, IDS.departments.proc, INITIATOR]
+  );
+  created.mrIds.push(mr.id);
+  return mr;
 }
 
 // A minimal PENDING instance with one step and one approver — enough for the
@@ -154,12 +180,26 @@ const notificationsFor = (userId, type) =>
   );
 
 describe("rejection tells the initiator", () => {
-  it("notifies the person who raised the PO", async () => {
-    const { instanceId, stepId } = await makePendingApproval({
+  // A PO rejection is told by the PO's own notice (poRejectionNotifier), not by
+  // this generic one: RFQ creator, PO creator and commercial evaluators, with
+  // the reason and where to go next. REVISED 2026-10-22 (client ticket T3);
+  // the copy and the full recipient list are pinned in po.reject.reaward.test.js.
+  // These two prove the generic path hands a PO rejection to it, once.
+
+  /** A real PO pending its approval, raised on an RFQ INITIATOR created. */
+  async function pendingRealPo() {
+    const po = await makeRealPo();
+    const approval = await makePendingApproval({
       entityType: "PO",
-      entityId: 999001,
-      metadata: { po_number: "PO-4471", po_id: 999001, rfq_id: 359 },
+      entityId: po.id,
+      metadata: { po_number: po.po_number, po_id: po.id, rfq_id: 359 },
     });
+    await db.none(`UPDATE tbl_rfq_purchase_order SET approval_instance_id = $2 WHERE id = $1`, [po.id, approval.instanceId]);
+    return { po, ...approval };
+  }
+
+  it("notifies the person who raised the PO's RFQ, through the PO's own notice", async () => {
+    const { po, instanceId, stepId } = await pendingRealPo();
 
     const { executeApprovalAction } = await import(
       "../../app/services/approvalActionService.js"
@@ -171,22 +211,21 @@ describe("rejection tells the initiator", () => {
       action: "REJECT",
       comment: "Rates exceed the sanctioned budget",
     });
+    await drainPoRejectedNotifications();
 
-    const rows = await notificationsFor(INITIATOR, "approval_rejected");
+    const rows = await notificationsFor(INITIATOR, "po_rejected");
     expect(rows).toHaveLength(1);
-    expect(rows[0].title).toContain("Rejected");
-    expect(rows[0].title).toContain("Purchase order");
-    expect(rows[0].title).toContain("PO-4471");
+    expect(rows[0].title).toContain(po.po_number);
+    expect(rows[0].title).toContain("rejected");
     // The reason is the single most useful thing to carry.
     expect(rows[0].message).toContain("Rates exceed the sanctioned budget");
+    // Told once, not twice by two notifiers.
+    expect(await notificationsFor(INITIATOR, "approval_rejected")).toHaveLength(0);
   });
 
-  it("deep-links to the rejected record rather than a dashboard", async () => {
-    const { instanceId, stepId } = await makePendingApproval({
-      entityType: "PO",
-      entityId: 999002,
-      metadata: { po_id: 61, rfq_id: 359 },
-    });
+  it("deep-links to where the PO is re-awarded rather than a dashboard", async () => {
+    const { po, instanceId, stepId } = await pendingRealPo();
+    const rfqId = (await db.one(`SELECT rfq_id FROM tbl_rfq_purchase_order WHERE id = $1`, [po.id])).rfq_id;
 
     const { executeApprovalAction } = await import(
       "../../app/services/approvalActionService.js"
@@ -198,17 +237,19 @@ describe("rejection tells the initiator", () => {
       action: "REJECT",
       comment: "no",
     });
+    await drainPoRejectedNotifications();
 
-    const rows = await notificationsFor(INITIATOR, "approval_rejected");
-    expect(rows[0].action_url).toBe("/dashboard/buyer/purchase-orders/61");
+    const rows = await notificationsFor(INITIATOR, "po_rejected");
+    expect(rows[0].action_url).toBe(`/dashboard/buyer/quote-comparison?rfq=${rfqId}`);
     expect(rows[0].action_url).not.toBe("/dashboard");
   });
 
   it("carries a readable label for a material requisition", async () => {
+    const mr = await makeRealMr();
     const { instanceId, stepId } = await makePendingApproval({
       entityType: "MR",
-      entityId: 812,
-      metadata: { mr_number: "MR-812", mr_id: 812 },
+      entityId: mr.id,
+      metadata: { mr_number: mr.mr_number, mr_id: mr.id },
     });
 
     const { executeApprovalAction } = await import(
@@ -225,11 +266,14 @@ describe("rejection tells the initiator", () => {
     const rows = await notificationsFor(INITIATOR, "approval_rejected");
     expect(rows[0].title).toContain("Material Requisition");
     expect(rows[0].title).not.toContain("MR #");
-    expect(rows[0].action_url).toBe("/dashboard/buyer/material-requisitions/812");
+    expect(rows[0].action_url).toBe(`/dashboard/buyer/material-requisitions/${mr.id}`);
   });
 
   it("does not notify the approver about their own decision", async () => {
-    const { instanceId, stepId } = await makePendingApproval({ entityId: 999003 });
+    const mr = await makeRealMr();
+    const { instanceId, stepId } = await makePendingApproval({
+      entityType: "MR", entityId: mr.id, metadata: { mr_number: mr.mr_number, mr_id: mr.id },
+    });
 
     const { executeApprovalAction } = await import(
       "../../app/services/approvalActionService.js"
@@ -254,6 +298,9 @@ describe("approval tells the initiator too", () => {
       entityId: po.id,
       metadata: { po_number: "PO-9", po_id: po.id, rfq_id: 359 },
     });
+    // The PO points at its approval, as initiation leaves it: an approval
+    // that is not the PO's current one is refused (R25, INSTANCE_NOT_CURRENT).
+    await db.none(`UPDATE tbl_rfq_purchase_order SET approval_instance_id = $2 WHERE id = $1`, [po.id, instanceId]);
 
     const { executeApprovalAction } = await import(
       "../../app/services/approvalActionService.js"

@@ -9,6 +9,7 @@ import vendorapproveRoutes from './vendorapproveRoutes.js';
 import rolesRoutes from './rolesRoutes.js';
 import rfqRoutes from './rfqRoutes.js';
 import maintenanceRoutes from './maintenanceRoutes.js';
+import prCatalogRequestRoutes from './prCatalogRequestRoutes.js';
 // import userRoutes from './userRoutes.js';
 
 // import userRoutes from './userRoutes.js';
@@ -24,6 +25,7 @@ admin.use('/product', productRoutes);
 admin.use('/roles', rolesRoutes);
 admin.use('/rfq', rfqRoutes);
 admin.use('/maintenance', maintenanceRoutes);
+admin.use('/pr-catalog-requests', prCatalogRequestRoutes);
 
 // admin.use('/user', userRoutes);
 

@@ -1,7 +1,6 @@
 import cron from 'node-cron';
 import db from '../config/dbConn.js';
 import { sendReminderMail } from './sendEmailFunctions/milestoneEmails.js';
-import { sendGRNEmail } from './sendEmailFunctions/generalReminderEmails.js';
 import { sendNegotiationExpiredNotification, sendNegotiationRoundEndedNotification } from './sendEmailFunctions/negotiationEmails.js';
 import { recordLifecycleEvent, getApprovalWorkflowUsers } from '../models/generalModel.js';
 import { createScheduleForRfqPublish, deleteRfqPublishSchedule } from './createSchedule.js';
@@ -19,9 +18,10 @@ import { CATEGORIES } from '../services/activity/eventRegistry.js';
 import { notifyApprovalChanged } from '../services/approvalEvents.js';
 import { runRoutingSweep } from '../services/vendorNetwork/routingSweep.js';
 import { SWEEP_CRON } from '../constants/vendorNetwork.js';
+import { remindStaleDrafts } from '../services/po/poInitiateNotifier.js';
+import { remindOpenHolds } from '../services/po/poSendBackService.js';
 
 const milestoneCronRegistry = new Map();
-const generalRemindersCronRegistry = new Map();
 const negotiationRoundCronRegistry = new Map();
 const arcNegotiationRoundCronRegistry = new Map();
 
@@ -69,186 +69,42 @@ export const rescheduleAllMilestoneReminders = async () => {
   }
 };
 
-// export const scheduleGRNReminders = async (purchase_order, reminder_users = []) => {
-//   const { id: poId, delivery_period, po_approved_on } = purchase_order || {};
+/**
+ * DEPRECATED no-op, kept so existing callers (handleMarkDispatched) and test
+ * mocks keep working. GRN reminders used to be three one-shot in-memory cron
+ * jobs per PO, lost on every restart and keyed off a single
+ * "approved + delivery_period" date. They are now sent by the daily,
+ * database-driven phase-due sweeper (startPhaseDueSweeper below), which reads
+ * the PO's delivery plan.
+ *
+ * @returns {Promise<false>}
+ */
+export const scheduleGRNReminders = async () => false;
 
-//   if (!poId || !delivery_period || !po_approved_on) {
-//     return false;
-//   }
+// ============= PHASE-DUE SWEEPER (D7) =============
 
-//   const deliveryDays = parseInt(delivery_period, 10);
-//   if (Number.isNaN(deliveryDays) || deliveryDays <= 0) return false;
-
-//   // Delivery date = PO approved date + delivery_period (in days)
-//   const base = new Date(po_approved_on);
-//   if (Number.isNaN(base.getTime())) return false;
-
-//   const deliveryDate = new Date(base.getTime());
-//   deliveryDate.setDate(deliveryDate.getDate() + deliveryDays);
-
-//   // Reminder offsets in days relative to delivery date
-//   const OFFSETS = [-3, 0, 3];
-
-//   const scheduleReminderAtIndex = (index) => {
-//     if (index >= OFFSETS.length) return;
-
-//     const offset = OFFSETS[index];
-
-//     // Compute reminder date for this offset
-//     const remindAt = new Date(deliveryDate.getTime());
-//     remindAt.setDate(remindAt.getDate() + offset);
-//     // Fire at 9 AM IST equivalent on server (assuming server time ~IST or you handle TZ)
-//     remindAt.setHours(9, 0, 0, 0);
-
-//     // If this reminder time is in the past, skip to next
-//     if (remindAt <= new Date()) {
-//       scheduleReminderAtIndex(index + 1);
-//       return;
-//     }
-
-//     // node-cron expression for specific date/time
-//     const cronExpression = `${remindAt.getMinutes()} ${remindAt.getHours()} ${remindAt.getDate()} ${
-//       remindAt.getMonth() + 1
-//     } *`;
-
-//     const jobKey = `grn_po_${poId}_offset_${offset}`;
-
-//     const job = cron.schedule(cronExpression, async () => {
-//       try {
-//         // Always fetch the latest PO status from DB
-//         const po = await db.one(
-//           `SELECT * FROM tbl_rfq_purchase_order
-//           WHERE id = $1`,
-//           [poId]
-//         )
-
-//         if (!po || po.status !== "dispatched") {
-//           // If it's no longer dispatched, stop the chain
-//           return;
-//         }
-
-//         // Trigger the email for this reminder
-//         // offset: -3, 0, or 3 to indicate which reminder this is
-//         await sendGRNEmail(po, reminder_users, offset);
-
-//         // Schedule the next reminder (+3 days step) if any
-//         scheduleReminderAtIndex(index + 1);
-//       } catch (err) {
-//         console.error("Error in GRN reminder job: ", err);
-//       } finally {
-//         job.stop();
-//         generalRemindersCronRegistry.delete(jobKey);
-//       }
-//     });
-
-//     generalRemindersCronRegistry.set(jobKey, job);
-//   };
-
-//   // Start from the first (T-3) and let it chain to T and T+3
-//   scheduleReminderAtIndex(0);
-
-//   return true;
-// };
-
-export const scheduleGRNReminders = async (purchase_order, reminder_users = [], grn_rep_data, testMode = false) => {
-  const { id: poId, delivery_period, po_approved_on } = purchase_order || {};
-  logger.info('Scheduling GRN reminders')
-
-  if (!poId || !delivery_period || !po_approved_on) {
-    return false;
-  }
-
-  const deliveryDays = parseInt(delivery_period, 10);
-  if (Number.isNaN(deliveryDays) || deliveryDays <= 0) return false;
-
-  // Delivery date = PO approved date + delivery_period (in days)
-  const base = new Date(po_approved_on);
-  if (Number.isNaN(base.getTime())) return false;
-
-  const deliveryDate = new Date(base.getTime());
-  deliveryDate.setDate(deliveryDate.getDate() + deliveryDays);
-
-  // Reminder offsets in days relative to delivery date
-  const OFFSETS = [-3, 0, 3];
-
-  // For test mode: map offset -> minutes from now
-  const TEST_OFFSET_MINUTES = {
-    "-3": 1, // offset -3 -> fire in 1 minutes
-    "0": 2,  // offset 0  -> fire in 2 minutes
-    "3": 3,  // offset 3  -> fire in 3 minutes
-  };
-
-  const scheduleReminderAtIndex = (index) => {
-    if (index >= OFFSETS.length) return;
-
-    const offset = OFFSETS[index];
-
-    let remindAt;
-
-    if (testMode) {
-      // 🔧 TEST MODE: schedule in a few minutes from "now"
-      const minsFromNow = TEST_OFFSET_MINUTES[String(offset)] ?? 3;
-      remindAt = new Date();
-      remindAt.setMinutes(remindAt.getMinutes() + minsFromNow);
-      // keep current hour/day/month, just adjust minutes
-    } else {
-      // 🟢 PRODUCTION MODE: schedule based on delivery date ± offset days
-      remindAt = new Date(deliveryDate.getTime());
-      remindAt.setDate(remindAt.getDate() + offset);
-      // Fire at 9 AM (server local time — adjust if needed)
-      remindAt.setHours(9, 0, 0, 0);
-
-      // If this reminder time is in the past, skip to next
-      if (remindAt <= new Date()) {
-        scheduleReminderAtIndex(index + 1);
-        return;
-      }
-    }
-
-    logger.info({ remindAt }, 'All the timers have been set');
-
-    // node-cron expression for specific date/time
-    const cronExpression = `${remindAt.getMinutes()} ${remindAt.getHours()} ${remindAt.getDate()} ${
-      remindAt.getMonth() + 1
-    } *`;
-
-    const jobKey = `grn_po_${poId}_offset_${offset}`;
-
-    const job = cron.schedule(cronExpression, async () => {
+/**
+ * Daily at 09:00 IST: deliveries due tomorrow, due today or 3 days overdue with
+ * goods still to receive → one digest per hotel to its receivers (grn.create),
+ * plus a reminder to each live site representative. Database-driven, so a
+ * restart loses nothing; one run at a time across instances (advisory lock)
+ * and at most one digest per hotel per day. See services/inventory/phaseDueSweeper.js.
+ */
+export const startPhaseDueSweeper = () => {
+  cron.schedule(
+    '0 9 * * *',
+    async () => {
       try {
-        // Always fetch the latest PO status from DB
-        const po = await db.one(
-          `SELECT * FROM tbl_rfq_purchase_order
-           WHERE id = $1`,
-          [poId]
-        );
-
-        if (!po || po.status !== "dispatched") {
-          // If it's no longer dispatched, stop the chain
-          return;
-        }
-
-        // Trigger the email for this reminder
-        // offset: -3, 0, or 3 to indicate which reminder this is
-        await sendGRNEmail(po, reminder_users, grn_rep_data, offset);
-
-        // Schedule the next reminder if any
-        scheduleReminderAtIndex(index + 1);
+        const { runPhaseDueSweep } = await import('../services/inventory/phaseDueSweeper.js');
+        const out = await runPhaseDueSweep();
+        logger.info({ ...out }, '[Phase Due Sweeper] run complete');
       } catch (err) {
-        logError('Error in GRN reminder job', err);
-      } finally {
-        job.stop();
-        generalRemindersCronRegistry.delete(jobKey);
+        logError('[Phase Due Sweeper] Cron tick failed', err);
       }
-    });
-
-    generalRemindersCronRegistry.set(jobKey, job);
-  };
-
-  // Start from the first (T-3) and let it chain to T and T+3
-  scheduleReminderAtIndex(0);
-
-  return true;
+    },
+    { timezone: 'Asia/Kolkata' }
+  );
+  logger.info('[Phase Due Sweeper] Cron scheduled: daily at 09:00 IST');
 };
 
 // ============================================
@@ -884,11 +740,12 @@ export const startPoDocumentWatchdog = () => {
  */
 export const findPosNeedingVendorReminder = async (now = new Date(), runner = db) => {
   const pendingPOs = await runner.any(`
-    SELECT po.*, r.rfq_no, r.title AS rfq_title, a.arc_number, a.title AS arc_title
+    SELECT po.*, r.rfq_no, r.title AS rfq_title, a.arc_number, a.title AS arc_title, mr.mr_number
     FROM tbl_rfq_purchase_order po
     LEFT JOIN tbl_rfq r ON r.id = po.rfq_id
     LEFT JOIN tbl_arc_contract c ON c.id = po.arc_contract_id AND po.is_call_off
     LEFT JOIN tbl_arc a ON a.id = c.arc_id
+    LEFT JOIN tbl_material_requisition mr ON mr.id = po.source_mr_id AND po.is_call_off
     WHERE po.status = 'acceptance_pending'
       AND (r.id IS NOT NULL OR po.is_call_off)
   `);
@@ -935,7 +792,7 @@ export const startVendorAcceptanceReminderCron = () => {
         try {
           await sendPOAcceptanceReminderToVendor(
             po,
-            { rfq_no: po.rfq_no, title: po.rfq_title, arc_number: po.arc_number },
+            { rfq_no: po.rfq_no, title: po.rfq_title, arc_number: po.arc_number, arc_title: po.arc_title, mr_number: po.mr_number, is_call_off: po.is_call_off },
             reminderToSend
           );
           await db.none(
@@ -1599,4 +1456,32 @@ export const rescheduleAllArcNegotiationRoundExpirations = async () => {
   } catch (err) {
     logError('[ARC Neg Expiry] Failed to reschedule ARC round expirations on startup', err);
   }
+};
+
+/**
+ * One reminder per draft PO that nobody has initiated for 48 hours.
+ * Schedule: daily at 10:00 AM IST. Drafts older than 14 days are skipped on
+ * purpose (see poInitiateNotifier), so deploying never emails about old drafts.
+ *
+ * The same job reminds, once, whoever was asked for information on a PO that
+ * has been on hold for 48 hours (poSendBackService.remindOpenHolds).
+ */
+export const startPoInitiateReminderCron = () => {
+  // 10:00 AM IST -> 4:30 AM UTC
+  cron.schedule('30 4 * * *', async () => {
+    const now = new Date();
+    try {
+      const { reminded } = await remindStaleDrafts(now);
+      logger.info(`[PO Initiate Reminder] Reminded ${reminded} draft PO(s).`);
+    } catch (error) {
+      logError('[PO Initiate Reminder] Cron job failed', error);
+    }
+    try {
+      const { reminded } = await remindOpenHolds(now);
+      logger.info(`[PO Hold Reminder] Reminded ${reminded} person(s) asked for information.`);
+    } catch (error) {
+      logError('[PO Hold Reminder] Cron job failed', error);
+    }
+  });
+  logger.info('[PO Initiate Reminder] Cron scheduled: daily at 10:00 AM IST');
 };

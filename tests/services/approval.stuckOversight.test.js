@@ -16,6 +16,7 @@
 import { db, closeDb } from "../setup/db.js";
 import { httpClient } from "../helpers/http.js";
 import { IDS } from "../fixtures/ids.js";
+import { makePrPolicy, dropPrPolicies } from "../helpers/prFixtures.js";
 
 const ADMIN = IDS.users.companyA_admin;
 const APPROVER = IDS.users.a1_proc_poApp;
@@ -38,6 +39,7 @@ let restoreBAdminType;
 let restoreApproverStatus;
 const madeInstances = [];
 const madeRfqs = [];
+const madePrs = [];
 
 /** Naive IST wall clock, which is what tbl_rfq.bid_end_date holds. */
 const istWallClock = (offsetMs) => {
@@ -82,6 +84,51 @@ const seedRfqApproval = async ({ bidOffsetMs, approverId = APPROVER, ageDays = 0
   return { instanceId: Number(inst.id), stepId: Number(step.id), rfqId: Number(rfq.id) };
 };
 
+/**
+ * A purchase requisition waiting on APPROVER at step 1 (PR + instance rows,
+ * committed), under a real entity_type 'PR' policy (one USER step = APPROVER)
+ * that dropPrPolicies removes in afterAll.
+ */
+const seedPrApproval = async () => {
+  const policyId = await makePrPolicy({
+    companyId: IDS.hospitality.A, hotelId: IDS.hotels.A1, steps: [{ source: "USER", id: APPROVER }],
+  });
+  const pr = await db.one(
+    `INSERT INTO tbl_purchase_requisition
+       (pr_number, title, pr_type, hospitality_company_id, hotel_id, department_id, urgency,
+        required_by_date, justification, status, raised_by, submitted_at)
+     VALUES ($1, 'Stuck-oversight PR probe', 'goods', $2, $3, $4, 'normal',
+             CURRENT_DATE + 7, 'probe', 'pending_approval', $5, now())
+     RETURNING id, pr_number`,
+    [`PR-T-STUCK-${Date.now()}`, IDS.hospitality.A, IDS.hotels.A1, IDS.departments.eng, IDS.users.a1_eng_buyer]
+  );
+  madePrs.push(Number(pr.id));
+  const inst = await db.one(
+    `INSERT INTO tbl_approval_instances
+       (entity_type, entity_id, approval_policy_id, status, current_step, initiated_by,
+        hospitality_company_id, hotel_id, department_id)
+     VALUES ('PR', $1, $2, 'PENDING', 1, $3, $4, $5, $6)
+     RETURNING id`,
+    [Number(pr.id), policyId, IDS.users.a1_eng_buyer,
+     IDS.hospitality.A, IDS.hotels.A1, IDS.departments.eng]
+  );
+  madeInstances.push(Number(inst.id));
+  await db.none(
+    `UPDATE tbl_purchase_requisition SET approval_instance_id = $2 WHERE id = $1`, [Number(pr.id), Number(inst.id)]
+  );
+  const step = await db.one(
+    `INSERT INTO tbl_approval_instance_steps (approval_instance_id, step_order, decision_rule, status)
+     VALUES ($1, 1, 'ANY', 'PENDING') RETURNING id`,
+    [Number(inst.id)]
+  );
+  await db.none(
+    `INSERT INTO tbl_approval_step_approvers (approval_instance_step_id, approver_user_id, status)
+     VALUES ($1, $2, 'PENDING')`,
+    [Number(step.id), APPROVER]
+  );
+  return { instanceId: Number(inst.id), prId: Number(pr.id), prNumber: pr.pr_number };
+};
+
 const rowFor = (body, instanceId) =>
   (body?.data?.items || []).find((r) => Number(r.id) === instanceId);
 
@@ -115,6 +162,8 @@ afterAll(async () => {
     await db.none("DELETE FROM tbl_approval_instances WHERE id = $1", [id]);
   }
   for (const id of madeRfqs) await db.none("DELETE FROM tbl_rfq WHERE id = $1", [id]);
+  await dropPrPolicies();
+  if (madePrs.length) await db.none("DELETE FROM tbl_purchase_requisition WHERE id = ANY($1::int[])", [madePrs]);
   await db.none(
     `DELETE FROM tbl_audit_row_changes WHERE table_name IN
        ('tbl_approval_instances','tbl_approval_instance_steps','tbl_approval_step_approvers','tbl_rfq','tbl_users')`
@@ -133,6 +182,15 @@ describe("classifying what is stuck", () => {
     const row = rowFor((await client.get(STUCK_URL)).body, instanceId);
     expect(row.entity_ref).toBe(String(rfq_no));
     expect(row.entity_ref).not.toBe(String(rfqId));
+  });
+
+  it("names a purchase requisition by its PR number, not its id", async () => {
+    const { instanceId, prId, prNumber } = await seedPrApproval();
+    const client = await httpClient(ADMIN);
+    const row = rowFor((await client.get(`${STUCK_URL}?entity_type=PR`)).body, instanceId);
+    expect(row).toBeDefined();
+    expect(row.entity_ref).toBe(prNumber);
+    expect(row.entity_ref).not.toBe(String(prId));
   });
 
   it("tells the screen whether the item belongs to a Group ARC (an RFQ never does)", async () => {

@@ -228,7 +228,7 @@ export const poDetailFull = async (req, res) => {
     if (!hasUsableScope(scope)) {
       return res.status(400).json({ status: 0, message: "Company scope is required." });
     }
-    const result = await getPODetailFull(req.params.po_id, scope);
+    const result = await getPODetailFull(req.params.po_id, scope, req.user);
     if (!result) {
       // 404 (not 403) so we never leak existence of out-of-scope POs.
       return res.status(404).json({ status: 2, message: "Purchase order not found." });

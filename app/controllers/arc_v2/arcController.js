@@ -180,8 +180,13 @@ async function resolveArcVendorPanel(arc, runner = db) {
  * the outer commit, so floatArc returns _notifyArc/_actorId and the CALLER fires
  * notifyVendorsOfFloat post-commit (RESOLVED 7).
  *
+ * The flip to 'floated' is conditional on the ARC still being
+ * 'pending_publish_approval' (inside the caller's transaction): of two
+ * completions racing on one publish approval, the second floats nothing,
+ * invites nobody and logs nothing, and returns reason 'not_pending'.
+ *
  * @returns { floated:true, arc, invitations, _notifyArc, _actorId }
- *        | { floated:false, reason:'no_vendors' }
+ *        | { floated:false, reason:'no_vendors' | 'not_pending' | 'arc_not_found' }
  */
 async function floatArc(arcId, actorId, { txContext = null } = {}) {
   const runner = txContext || db;
@@ -197,7 +202,13 @@ async function floatArc(arcId, actorId, { txContext = null } = {}) {
   const items = await arcModel.listItems(arcId, runner);
 
   const doFloat = async (t) => {
-    const updated = await arcModel.setStatus(arcId, 'floated', {}, t);
+    const updated = await t.oneOrNone(
+      `UPDATE tbl_arc SET status = 'floated', updated_at = CURRENT_TIMESTAMP
+        WHERE id = $1 AND status = 'pending_publish_approval'
+        RETURNING *`,
+      [arcId]
+    );
+    if (!updated) return null;
     // A group ARC also drops hand-picked vendors that no longer serve any hotel.
     if (arc.eligibility_type === 'open' || arc.is_group) await arcModel.setInvitations(arcId, vendorIds, t);
     if (arc.is_group) await arcHotelModel.setInvitationHotels(arcId, panel.hotelIdsByVendor, t);
@@ -212,6 +223,7 @@ async function floatArc(arcId, actorId, { txContext = null } = {}) {
   // Honour an outer tx if given (the post-approval hook supplies one); else open
   // our own. Vendor notify is ALWAYS deferred to the caller (post-commit).
   const res = txContext ? await doFloat(txContext) : await db.tx(doFloat);
+  if (!res) return { floated: false, reason: 'not_pending' };
   return { floated: true, arc: res.updated, invitations: res.invitations, _notifyArc: arc, _actorId: actorId };
 }
 
@@ -670,15 +682,25 @@ export async function handleArcPublishApproval(approvalInstanceId, approverUserI
     let floatResult;
     await db.tx(async (t) => {
       floatResult = await floatArc(arcId, approverUserId, { txContext: t });
+      // Another completion floated (or otherwise moved) it first: nothing to do.
+      if (floatResult.reason === 'not_pending') return;
       if (!floatResult.floated) {
-        // Empty panel at approval time — never float to nobody; park rejected.
-        await arcModel.setStatus(arcId, 'publish_rejected', { closed_reason: 'No eligible vendors at approval time' }, t);
+        // Empty panel at approval time — never float to nobody; park rejected
+        // (same condition as the float: only while still pending).
+        const parked = await t.oneOrNone(
+          `UPDATE tbl_arc SET status = 'publish_rejected', closed_reason = $2, updated_at = CURRENT_TIMESTAMP
+            WHERE id = $1 AND status = 'pending_publish_approval'
+            RETURNING id`,
+          [arcId, 'No eligible vendors at approval time']
+        );
+        if (!parked) { floatResult = { floated: false, reason: 'not_pending' }; return; }
         await logArcEvent({
           arcId, eventType: ARC_EVENT_TYPES.PUBLISH_REJECTED, actorId: approverUserId,
           payload: { reason: 'no_vendors_at_approval', approval_instance_id: approvalInstanceId }, txContext: t,
         });
       }
     });
+    if (floatResult?.reason === 'not_pending') return;
     // Vendor notify AFTER commit (only when we actually floated).
     if (floatResult?.floated) {
       // Sr 27 (Option C): defer the vendor "it's open for quotes" notification

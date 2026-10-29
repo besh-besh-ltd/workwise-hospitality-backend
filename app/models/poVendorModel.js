@@ -12,6 +12,10 @@
 // ============================================================================
 
 import db from "../config/dbConn.js";
+import { escapeLike } from "../helper/poReference.js";
+
+// Title as a vendor should read it: trimmed, runs of whitespace collapsed.
+const cleanTitleSql = (col) => `NULLIF(regexp_replace(btrim(${col}), '\\s+', ' ', 'g'), '')`;
 
 // ---------------------------------------------------------------------------
 // Status visibility + buckets.
@@ -69,6 +73,11 @@ export async function vendorDashboard(vendorId) {
             po.total_value::float8 AS total_value,
             po.is_call_off,
             po.created_at,
+            rfq.rfq_no,
+            ${cleanTitleSql("rfq.title")} AS rfq_title,
+            arc.arc_number,
+            ${cleanTitleSql("arc.title")} AS arc_title,
+            mr.mr_number,
             COALESCE(THC.name, ATHC.name) AS buyer_name,
             COALESCE(THCH.name, ATHCH.name) AS hotel_name
        FROM tbl_rfq_purchase_order po
@@ -135,6 +144,11 @@ export async function vendorDashboard(vendorId) {
         hotel_name: r.hotel_name || null,
         total_value: value,
         is_call_off: r.is_call_off,
+        rfq_no: r.rfq_no ?? null,
+        rfq_title: r.rfq_title ?? null,
+        arc_number: r.arc_number ?? null,
+        arc_title: r.arc_title ?? null,
+        mr_number: r.mr_number ?? null,
         next_step: step,
       });
     }
@@ -223,8 +237,24 @@ function buildVendorListQuery(vendorId, { tab = "all", search = "", filters = {}
 
   const trimmedSearch = (search || "").trim();
   if (trimmedSearch) {
-    params.push(`%${trimmedSearch}%`);
-    where.push(`po.po_number ILIKE $${params.length}`);
+    // A leading "#" is how vendors type an RFQ number ("#536894"); drop one.
+    // Wildcards in the term are escaped so "%" / "_" match literally, and the
+    // term is a bound parameter. The whole OR group sits inside parentheses
+    // so it can only ever narrow the vendor-scoped WHERE above, never widen it.
+    // The MR title is intentionally NOT searchable (never shown to vendors).
+    const term = trimmedSearch.replace(/^#/, "").trim();
+    if (term) {
+      params.push(`%${escapeLike(term)}%`);
+      const p = `$${params.length}`;
+      where.push(`(po.po_number ILIKE ${p}
+          OR rfq.rfq_no::text ILIKE ${p}
+          OR ${cleanTitleSql("rfq.title")} ILIKE ${p}
+          OR a.arc_number ILIKE ${p}
+          OR ${cleanTitleSql("a.title")} ILIKE ${p}
+          OR mr.mr_number ILIKE ${p}
+          OR hc.name ILIKE ${p}
+          OR h.name ILIKE ${p})`);
+    }
   }
 
   // Joins resolve buyer/hotel names for BOTH PO flavours (RFQ vs ARC call-off);
@@ -250,6 +280,11 @@ const VENDOR_ROW_COLUMNS = `po.id,
             po.created_at,
             po.rfq_id,
             po.arc_contract_id,
+            rfq.rfq_no,
+            ${cleanTitleSql("rfq.title")} AS rfq_title,
+            a.arc_number,
+            ${cleanTitleSql("a.title")} AS arc_title,
+            mr.mr_number,
             hc.name AS buyer_name,
             h.name  AS hotel_name`;
 

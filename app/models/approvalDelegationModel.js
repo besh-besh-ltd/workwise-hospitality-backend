@@ -58,8 +58,20 @@ export async function activeDelegationsFor(userIds, at = null) {
  *     approver stays. A step that resolves to nobody makes the whole instance
  *     throw APPROVAL_POLICY_RESOLVES_TO_NOBODY, so a bad delegation would stop
  *     a purchase order being raised at all.
+ *
+ * `sodInitiatorId` (separation of duties — see sodResolveOptions in
+ * services/approval/approvalEntityRules.js): the initiator of an instance
+ * whose initiator may never approve it. Cover is never applied across them, in
+ * either direction:
+ *   - TO them:   an approver whose delegate is the initiator keeps the step
+ *                (the delegate is "ineligible" in exactly the sense above);
+ *   - FROM them: the initiator's own outgoing cover is not applied, so they
+ *                stay in the list and the caller's SoD filter removes them.
+ *                Substituting their delegate would let someone exercise the
+ *                initiator's authority on the initiator's own request.
+ * Omitted (every non-SoD caller): unchanged behaviour.
  */
-export async function applyDelegations(userIds, hospitalityCompanyId, t = db) {
+export async function applyDelegations(userIds, hospitalityCompanyId, t = db, { sodInitiatorId = null } = {}) {
   if (!userIds?.length) return userIds;
 
   let delegations;
@@ -78,6 +90,18 @@ export async function applyDelegations(userIds, hospitalityCompanyId, t = db) {
   for (const userId of userIds) {
     const delegation = delegations.get(userId);
     if (!delegation) {
+      out.push(userId);
+      continue;
+    }
+
+    if (sodInitiatorId != null && (
+      Number(userId) === Number(sodInitiatorId) ||
+      Number(delegation.delegate_user_id) === Number(sodInitiatorId)
+    )) {
+      logger.info(
+        { delegation_id: delegation.id, delegator: userId, delegate: delegation.delegate_user_id, initiator: sodInitiatorId },
+        'Delegation not applied: it would move approval authority to or from the initiator of this approval'
+      );
       out.push(userId);
       continue;
     }

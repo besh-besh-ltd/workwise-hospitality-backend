@@ -65,6 +65,8 @@ afterEach(async () => {
     await db.none(`DELETE FROM tbl_purchase_order_product WHERE id = ANY($1::int[])`, [inserted.poProductIds]);
   }
   if (inserted.poIds.length) {
+    // An approver rejection records its reason as a closed send-back on the PO.
+    await db.none(`DELETE FROM tbl_po_send_backs WHERE purchase_order_id = ANY($1::int[])`, [inserted.poIds]);
     await db.none(`DELETE FROM tbl_lifecycle_history WHERE entity_type='PO' AND entity_id = ANY($1::int[])`, [inserted.poIds]);
     await db.none(`DELETE FROM tbl_rfq_purchase_order WHERE id = ANY($1::int[])`, [inserted.poIds]);
   }

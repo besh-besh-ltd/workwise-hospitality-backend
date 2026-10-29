@@ -65,6 +65,42 @@ function scopeMatrixPredicate(userId, alias) {
       )`;
 }
 
+/**
+ * "Which contract lines can a (hotel × department) order against right now?" —
+ * THE guided-buying predicate. It backs the MR item picker
+ * (searchContractedItems) and the PR "on contract — raise an MR instead" guard
+ * (services/pr/prCatalog.contractCoverage), so a variant is blocked on a PR
+ * exactly when the MR picker would offer it.
+ *
+ * A line qualifies when its contract is active/expiring_soon, its ARC belongs
+ * to the department, it has remaining quantity, and the hotel is either the
+ * ARC's own hotel (single ARC) or a non-suspended hotel row of a GROUP ARC's
+ * line.
+ *
+ * `hotelParam` / `departmentParam` are bind placeholders ('$1'), never values.
+ * Returns `{ from, where }` exposing aliases cl (contract line), c (contract),
+ * a (ARC), ai (ARC item → ai.product_variant_id) and clh (the hotel's line row).
+ */
+function contractedVariantPredicateSql(hotelParam, departmentParam) {
+  for (const p of [hotelParam, departmentParam]) {
+    if (!/^\$\d+$/.test(p)) throw new Error(`contractedVariantPredicateSql: expected a $n placeholder, got '${p}'`);
+  }
+  return {
+    from: `tbl_arc_contract_line cl
+         JOIN tbl_arc_contract c    ON c.id = cl.arc_contract_id AND c.status IN ('active','expiring_soon')
+         JOIN tbl_arc a             ON a.id = c.arc_id AND a.department_id = ${departmentParam}
+                                   AND (a.hotel_id = ${hotelParam} OR a.is_group)
+         JOIN tbl_arc_item ai       ON ai.id = cl.arc_item_id
+         LEFT JOIN tbl_arc_contract_line_hotel clh
+                ON clh.arc_contract_line_id = cl.id AND clh.hotel_id = ${hotelParam}`,
+    where: `(cl.committed_qty - cl.consumed_qty) > 0
+          AND (
+            (NOT a.is_group AND a.hotel_id = ${hotelParam})
+            OR (a.is_group AND clh.id IS NOT NULL AND NOT clh.is_suspended)
+          )`,
+  };
+}
+
 const mrModel = {
   /**
    * The single-row form of `scopeMatrixPredicate` — "does this user's role-scope
@@ -601,6 +637,7 @@ const mrModel = {
       p++;
     }
     args.push(limit);
+    const contracted = contractedVariantPredicateSql('$1', '$2');
     return runner.any(
       `SELECT cl.id            AS arc_contract_line_id,
               COALESCE(clh.unit_rate_override, cl.unit_rate) AS current_rate,
@@ -622,25 +659,15 @@ const mrModel = {
               pv.name          AS variant_name,
               pv.slug          AS variant_slug,
               uvend.name       AS vendor_name
-         FROM tbl_arc_contract_line cl
-         JOIN tbl_arc_contract c    ON c.id = cl.arc_contract_id AND c.status IN ('active','expiring_soon')
-         JOIN tbl_arc a             ON a.id = c.arc_id AND a.department_id = $2
-                                   AND (a.hotel_id = $1 OR a.is_group)
-         JOIN tbl_arc_item ai       ON ai.id = cl.arc_item_id
+         FROM ${contracted.from}
          JOIN tbl_product_variant pv ON pv.id = ai.product_variant_id
-         LEFT JOIN tbl_arc_contract_line_hotel clh
-                ON clh.arc_contract_line_id = cl.id AND clh.hotel_id = $1
          -- The supplier the release will pick for this hotel (vendor network
          -- fulfilment): the same rule as callOffPoService.buildCallOffBuckets.
          CROSS JOIN LATERAL (
            SELECT ${effectiveSupplierExpr('clh.fulfilling_vendor_id', 'c.vendor_id')} AS vendor_id
          ) sup
          LEFT JOIN tbl_users uvend  ON uvend.id = sup.vendor_id
-        WHERE (cl.committed_qty - cl.consumed_qty) > 0
-          AND (
-            (NOT a.is_group AND a.hotel_id = $1)
-            OR (a.is_group AND clh.id IS NOT NULL AND NOT clh.is_suspended)
-          )
+        WHERE ${contracted.where}
           ${qFilter}
         ORDER BY pv.name, c.vendor_id
         LIMIT $${p}`,
@@ -713,4 +740,4 @@ const mrModel = {
 };
 
 export default mrModel;
-export { STATUS_GROUPS_MR, scopeMatrixPredicate };
+export { STATUS_GROUPS_MR, scopeMatrixPredicate, contractedVariantPredicateSql };
