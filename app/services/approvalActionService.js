@@ -6,6 +6,10 @@ import {
 import { logError } from '../helper/common.js';
 import { dispatch as dispatchNotification } from './notificationService.js';
 import { approvalActionUrl, entityLabel, buyerHome } from './notificationLinks.js';
+import db from '../config/dbConn.js';
+import { bindParkedAward, bindSelectedQuotes } from './po/awardQuoteBinding.js';
+import { isApproverOnCurrentStep } from './approvalMembership.js';
+import { refusesForeignTarget, ApprovalInstanceNotFoundError } from './approvalTargetOwner.js';
 
 /**
  * Approval Action Service
@@ -62,9 +66,15 @@ const postActionRegistry = {
     APPROVED: () => import('../controllers/rfq/rfqController.js').then(m => m.handleTechnicalPostApproval),
     REJECTED: () => import('../controllers/rfq/rfqController.js').then(m => m.handleTechnicalRejection),
   },
+  // PO decisions never reach the post-commit dispatcher from
+  // executeApprovalAction: both run inside poApprovalService's transaction.
+  // APPROVED stays registered for executePoApproval's in-transaction lookup.
+  // REJECTED is deliberately absent — a PO rejection is decision, status,
+  // de-finalization, reason and lifecycle in ONE transaction
+  // (poApprovalService.rejectPurchaseOrder), and running half of it after
+  // somebody else's commit is exactly the split it exists to prevent.
   PO: {
     APPROVED: () => import('../controllers/po/purchaseOrderController.js').then(m => m.handlePOPostApproval),
-    REJECTED: () => import('../controllers/po/purchaseOrderController.js').then(m => m.handlePORejectionByInstance),
   },
   // ARC v2 — separate entity types per plan §5.5. The legacy single 'ARC'
   // entity type is intentionally NOT registered here; any leftover v1 ARC
@@ -119,6 +129,9 @@ const postActionRegistry = {
   },
 };
 
+/** Every engine type with a post-approval or rejection handler. */
+export const REGISTERED_APPROVAL_TYPES = Object.freeze(Object.keys(postActionRegistry));
+
 /**
  * Execute an approval action and dispatch the entity-specific post-action.
  *
@@ -128,47 +141,112 @@ const postActionRegistry = {
  * @param {number} args.approver_user_id
  * @param {'APPROVE'|'REJECT'} args.action
  * @param {string} [args.comment]
+ * @param {string} [args.reason_category] - PO REJECT only; see poApprovalService.resolveRejectionRoute
+ * @param {string} [args.route] - PO REJECT only: COMMERCIAL or CANCEL
  * @returns {Promise<Object>} Result from submitApprovalAction (instance_status, step_status, etc.)
+ * @throws PoDecisionError for a refused PO rejection (carries httpStatus + code)
  */
 export async function executeApprovalAction(args) {
   const instance = await getApprovalInstanceById(args.approval_instance_id);
 
-  // PO approvals are all-or-nothing: the decision and the PO document commit
-  // together, or neither does. They take their own path because that guarantee
-  // needs one transaction spanning both, which the generic sequence below
-  // cannot provide — see poApprovalService.js.
+  // The instance's target (the RFQ, round, ARC, MR or PO its handlers act on)
+  // must be its own company's. One opened in this company naming another
+  // company's target (the generic submit route accepted every type until
+  // c3a51cd6) is answered like a missing instance, before any vote is
+  // recorded, any handler runs or anyone is notified. dispatchPostApprovalAction
+  // makes the same check for every other way a handler is reached.
+  if (instance && await refusesForeignTarget(db, instance, 'executeApprovalAction')) {
+    throw new ApprovalInstanceNotFoundError();
+  }
+
+  // PO decisions take their own path, both of them, and both lock the PO row
+  // before the approval instance (poApprovalService's lock order):
   //
-  // APPROVE only. A rejection produces no document, so it has nothing to be
-  // atomic with, and its handler is actively hostile to being run inside an
-  // open transaction: handlePORejectionByInstance opens its own `db.tx` and
-  // re-reads the instance to confirm it is REJECTED. On a separate connection
-  // that read still sees PENDING, so it would return early and the vendor
-  // de-finalization would silently never happen. Rejections stay on the
-  // post-commit path below, where they have always worked.
+  //   APPROVE — the decision and the PO document commit together, or neither
+  //             does (executePoApprovalAtomically).
+  //   REJECT  — decision, status, vendor de-finalization, the reason and the
+  //             lifecycle row commit together, then the people who can act are
+  //             told (rejectPurchaseOrder). Same function as POST
+  //             /po/approve/:po_id, so the two surfaces end in the same state.
+  if (instance?.entity_type === 'PO' && instance.entity_id) {
+    const action = String(args.action || '').toUpperCase();
+    if (action === 'APPROVE') return executePoApproval(args, instance);
+    if (action === 'REJECT') return executePoRejection(args, instance);
+  }
+
+  // 0. A NEGOTIATION_QUOTE approve: the award it carries (a parked finalize
+  // payload, or the selected_quotes of a submit-for-approval) must bind to its
+  // RFQ, vendor and this instance's product before the approval is recorded.
+  // negotiationQuotePostApproval turns a payload into a PO line after the
+  // commit, and a refusal there would leave the instance APPROVED with no PO.
+  // Throws PoDecisionError (404/400), which the action route answers with its
+  // own status and code.
+  //
+  // Only for an approver who can act on the current step now. This route has
+  // no tenant gate of its own (submitApprovalAction's approver check is it),
+  // so binding first would answer anyone, from any company, whether an
+  // instance's award binds (404/400) before telling them they are not an
+  // approver. Everyone else falls through to submitApprovalAction's refusal.
   if (
-    instance?.entity_type === 'PO' &&
-    instance.entity_id &&
-    String(args.action || '').toUpperCase() === 'APPROVE'
+    instance?.entity_type === 'NEGOTIATION_QUOTE'
+    && String(args.action || '').toUpperCase() === 'APPROVE'
+    && await isApproverOnCurrentStep(instance.id, args.approver_user_id, { pendingOnly: true })
   ) {
-    return executePoApproval(args, instance);
+    await bindParkedAward(db, instance);
+    await bindSelectedQuotes(db, instance);
   }
 
   // 1. Run the underlying transactional model action (status updates only).
   const result = await submitApprovalActionModel(args);
 
+  // A replay: the instance had already concluded (or this approver had already
+  // given this decision), so nothing was decided now. submitApprovalAction
+  // answers an already-concluded instance BEFORE its approver check, so the
+  // caller need not be an approver at all, and re-running the post-approval
+  // handler here re-drafted the award's PO (cancelling the one awaiting
+  // approval) and re-sent the outcome mail on behalf of whoever replayed it.
+  // The handler and the notifications ran when the decision was made.
+  if (result.already_completed) return result;
+
   // 2. Dispatch entity-specific post-action only if the instance terminally transitioned.
   if (result.instance_status === 'APPROVED' || result.instance_status === 'REJECTED') {
-    await dispatchPostApprovalAction(args.approval_instance_id, args.approver_user_id, {
+    const dispatched = await dispatchPostApprovalAction(args.approval_instance_id, args.approver_user_id, {
       status: result.instance_status,
       comment: args.comment,
     });
-    await notifyApprovalOutcome(args.approval_instance_id, args.approver_user_id, {
-      status: result.instance_status,
-      comment: args.comment,
-    });
+    if (!dispatched.refused) {
+      await notifyApprovalOutcome(args.approval_instance_id, args.approver_user_id, {
+        status: result.instance_status,
+        comment: args.comment,
+      });
+    }
   }
 
   return result;
+}
+
+/**
+ * A PO rejection from the generic approval card. The optional `reason_category`
+ * and `route` are the PO page's, with the same defaults (OTHER, COMMERCIAL).
+ * Returns the engine's result shape plus the route and reason taken.
+ */
+async function executePoRejection(args, instance) {
+  const { rejectPurchaseOrder } = await import('./poApprovalService.js');
+  const out = await rejectPurchaseOrder({
+    poId: Number(instance.entity_id),
+    approvalInstanceId: args.approval_instance_id,
+    approvalInstanceStepId: args.approval_instance_step_id || null,
+    user: { id: args.approver_user_id },
+    comment: args.comment || '',
+    reason_category: args.reason_category,
+    route: args.route,
+  });
+  return {
+    ...out.result,
+    route: out.route,
+    reason_category: out.reasonCategory,
+    send_back_id: out.sendBackId,
+  };
 }
 
 /**
@@ -205,7 +283,7 @@ async function executePoApproval(args, instance) {
       writeDocument: writePoDocument,
 
       // Inside the transaction: the PO status transition and its lifecycle row.
-      // Only APPROVED reaches here — rejections never take this path.
+      // Only APPROVE decisions take this path (rejections: executePoRejection).
       postAction: async (tx, result) => {
         if (result.instance_status !== 'APPROVED') return;
         const handler = await postActionRegistry.PO.APPROVED();
@@ -221,7 +299,7 @@ async function executePoApproval(args, instance) {
       // After the commit: everything that leaves the building.
       afterCommit: async (result) => {
         await notifyNextApprovalStep(args.approval_instance_id, result);
-        if (result.instance_status === 'APPROVED' || result.instance_status === 'REJECTED') {
+        if (result.instance_status === 'APPROVED') {
           await notifyApprovalOutcome(args.approval_instance_id, args.approver_user_id, {
             status: result.instance_status,
             comment: args.comment,
@@ -301,28 +379,45 @@ export async function notifyApprovalOutcome(approvalInstanceId, actorUserId, { s
 
 /**
  * Fire the entity-specific post-action for an instance that reached a
- * terminal status. Exported because instances can ALSO terminally transition
- * at CREATION time — createApprovalInstance auto-approves every step whose
- * only required approver is the initiator, returning `autoApproved: true`
- * WITHOUT any executeApprovalAction call. Callers that create instances must
- * invoke this when that happens, or side effects (contract generation,
- * status flips) silently never run.
+ * terminal status. THE dispatcher: executeApprovalAction, the propagation
+ * service's auto-completion (handleAutoCompletedInstances), ARC round recovery
+ * and every create-time auto-approval reach a handler through here. Exported
+ * because instances can ALSO terminally transition at CREATION time —
+ * createApprovalInstance auto-approves every step whose only required approver
+ * is the initiator, returning `autoApproved: true` WITHOUT any
+ * executeApprovalAction call. Callers that create instances must invoke this
+ * when that happens, or side effects (contract generation, status flips)
+ * silently never run.
+ *
+ * Before any handler: the instance's target must be its own company's
+ * (approvalTargetOwner). Otherwise nothing runs and `refused` is true, so the
+ * caller notifies nobody either.
  *
  * Post-actions must never fail the approval itself — errors are logged and
  * swallowed, matching the behaviour of the entity handlers' own try/catch.
+ *
+ * @returns {Promise<{dispatched: boolean, refused: boolean, result?: *}>}
+ *   result is the handler's own return value.
  */
 export async function dispatchPostApprovalAction(approvalInstanceId, actorUserId, { status, comment } = {}) {
   try {
     const instance = await getApprovalInstanceById(approvalInstanceId);
-    const lookup = postActionRegistry[instance?.entity_type];
+    if (!instance) return { dispatched: false, refused: false };
+    if (await refusesForeignTarget(db, instance, `dispatch:${status}`)) {
+      return { dispatched: false, refused: true };
+    }
+    const lookup = postActionRegistry[instance.entity_type];
     const loader = lookup?.[status];
     if (loader) {
       const handler = await loader();
       if (typeof handler === 'function') {
-        await handler(approvalInstanceId, actorUserId, { comment, instance });
+        const result = await handler(approvalInstanceId, actorUserId, { comment, instance });
+        return { dispatched: true, refused: false, result };
       }
     }
+    return { dispatched: false, refused: false };
   } catch (postErr) {
     logError(`Post-approval handler failed for instance ${approvalInstanceId}`, postErr);
+    return { dispatched: false, refused: false };
   }
 }

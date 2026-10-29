@@ -2,11 +2,14 @@ import { Router } from "express";
 import { acceptPO, addSiteRepresentative, approvePO, createMilestoneController, createTaskController, deleteMilestoneController, deleteTaskController, getMilestonesController, getPOByRFQ, getPODetails, getPoInitiators, getTasksController, initiatePO, markDispatched, markGRN, mergePODrafts, raiseInvoice, regeneratePO, rejectPO, uploadPODocument, updateGST, updateHSNForProduct, updateMilestoneController, updatePO, updateTaskController } from "../../controllers/po/purchaseOrderController.js";
 import { listPOs, dashboardKpis, awaitingPOs, poDetailFull, tracking, analytics, exportPOList, exportTracking, exportAnalytics } from "../../controllers/po/poDashboardController.js";
 import { vendorDashboard, vendorListView, vendorPoDetail, vendorPoPdf, vendorExport } from "../../controllers/po/poVendorController.js";
-import { poUploadMiddleware } from "../../validations/paramValidation/poValidation.js";
+import { getRejectionUndoState, withdrawRejection, getReinstate, reinstate } from "../../controllers/po/poRejectionRecoveryController.js";
+import { poUploadMiddleware, poSendBackUploadMiddleware } from "../../validations/paramValidation/poValidation.js";
+import { getTargets, getSendBacks, createSendBack, respondSendBack, withdrawSendBack, guardAsker, guardResponder } from "../../controllers/po/poSendBackController.js";
 import passport from '../../middleware/passport.js';
 import { acl, noAcl } from "../../helper/common.js";
 import auth from "../../middleware/auth.js";
 import hospitalityMiddleware from '../../middleware/hospitality.js';
+import { requireOwnS3Urls } from '../../helper/s3Urls.js';
 
 const passportSignIn = passport.authenticate('jwtUsr', { session: false });
 
@@ -60,6 +63,17 @@ PORoutes.get('/:po_id', auth.authUserOrGRNToken, getPODetails);
 // the PII is only ever shown to someone who could already open the PO. No
 // can() here, per the same reasoning as the initiate routes.
 PORoutes.get('/:po_id/initiators', passportSignIn, noAcl([3]), getPoInitiators);
+// Send-back (client ticket T3): an approver on the PO's current step puts it
+// on hold to ask a named person for information; that person answers, or the
+// request is withdrawn. Buyer-side only (noAcl([3]): a vendor gets 403 and
+// never sees any of it). The guard runs before the upload, so nothing is
+// stored for a request that would be refused; the person asked is resolved
+// from the PO, never read from the body. See poSendBackController.
+PORoutes.get('/:po_id/send-back/targets', passportSignIn, noAcl([3]), getTargets);
+PORoutes.get('/:po_id/send-backs', passportSignIn, noAcl([3]), getSendBacks);
+PORoutes.post('/:po_id/send-back', passportSignIn, noAcl([3]), guardAsker, poSendBackUploadMiddleware, createSendBack);
+PORoutes.post('/send-back/:id/respond', passportSignIn, noAcl([3]), guardResponder, poSendBackUploadMiddleware, respondSendBack);
+PORoutes.post('/send-back/:id/withdraw', passportSignIn, noAcl([3]), withdrawSendBack);
 // Edit PO: vendors are NEVER permitted to edit a PO. The hierarchy/creator
 // check inside handleUpdatePO is defence-in-depth; this `noAcl([3])` blocks
 // vendor user_types at the route layer.
@@ -111,6 +125,11 @@ PORoutes.post('/merge-drafts', passportSignIn, noAcl([3]), mergePODrafts);
 PORoutes.post('/approve/:po_id', passportSignIn, noAcl([3]), approvePO);
 PORoutes.post('/accept/:po_id', passportSignIn, acl([3]), acceptPO);
 PORoutes.post('/reject/:po_id', passportSignIn, acl([3]), rejectPO);
+// REQ-0032: a vendor who rejected by mistake takes it back within 24 hours.
+PORoutes.get('/vendor/:po_id/rejection-undo', passportSignIn, acl([3]), getRejectionUndoState);
+PORoutes.post('/vendor/:po_id/withdraw-rejection', passportSignIn, acl([3]), withdrawRejection);
+PORoutes.get('/:po_id/reinstate', passportSignIn, acl([2, 8, 10]), getReinstate);
+PORoutes.post('/:po_id/reinstate', passportSignIn, acl([2, 8, 10]), reinstate);
 PORoutes.post('/regenerate/:po_id', passportSignIn, noAcl([3]), regeneratePO);
 PORoutes.post('/upload-pdf/:po_id', passportSignIn, noAcl([3]), poUploadMiddleware, uploadPODocument);
 PORoutes.post('/updateGST/:po_id', passportSignIn, noAcl([3]), updateGST);
@@ -118,7 +137,8 @@ PORoutes.post('/updateHSN/:po_id', passportSignIn, noAcl([3]), updateHSNForProdu
 PORoutes.post('/raiseInvoice', passportSignIn, acl([3]), hospitalityMiddleware.requireActiveSubscriptionForIssuedPo, raiseInvoice);
 PORoutes.post('/markDispatched', passportSignIn, acl([3]), hospitalityMiddleware.requireActiveSubscriptionForIssuedPo, markDispatched);
 PORoutes.post('/addSiteRepresentative', passportSignIn, noAcl([3]), addSiteRepresentative);
-PORoutes.post('/markGRN', auth.authUserOrGRNToken, noAcl([3]), markGRN);
+// The GRN document must be a file we stored (helper/s3Urls.js), checked before the handler.
+PORoutes.post('/markGRN', auth.authUserOrGRNToken, noAcl([3]), requireOwnS3Urls('grn_document_url'), markGRN);
 
 // Milestone + Task routes. Deliberately NOT noAcl([3]): the vendor Order Book
 // creates and edits milestones on its own POs (components/dashboard/vendor/

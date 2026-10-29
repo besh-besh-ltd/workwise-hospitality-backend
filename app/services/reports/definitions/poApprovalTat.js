@@ -11,6 +11,12 @@
 // would get worse every day nobody touched it. What is still waiting is
 // report 3.2's job; this one reports what finished.
 //
+// ── Time on hold is left out ────────────────────────────────────────────────
+// While a PO is on hold (an approver asked someone for information) nobody on
+// its step can decide it, so that time is not the approver's turnaround. Every
+// measure here subtracts it: each hold from the question to its answer, or to
+// now if still open, clipped to the window being measured.
+//
 // The value bands are the ones in the approved sample. They are constants
 // here rather than configuration because there is no screen to configure them
 // on yet; when there is, they move to that screen and not before.
@@ -153,6 +159,10 @@ export default {
       "SLA",
       'Configured per approval step. Where none is set the SLA and Within-SLA columns show "—": unmeasured, not compliant.',
     ];
+    const holdNote = [
+      "On hold",
+      "Time on hold waiting for information is excluded: while someone has been asked a question about the PO, nobody on the step can decide it.",
+    ];
 
     const ws1 = reportSheet(wb, "TAT by Value", { footerTitle: "PO Approval TAT" });
     writeReportSheet(ws1, {
@@ -161,6 +171,7 @@ export default {
       params: [
         ["Reporting period", `FY ${period.label}`],
         basis,
+        holdNote,
         ["Bands", "Routine ≤ ₹1 L · Mid ₹1–5 L · High ₹5–25 L · Capex > ₹25 L"],
         ["As of", asOf],
       ],
@@ -179,6 +190,7 @@ export default {
       params: [
         ["Reporting period", `FY ${period.label}`],
         ["Measured", "Time from the step opening to this person's decision"],
+        holdNote,
         slaNote,
         ["Sort", "Most decisions first"],
         ["As of", asOf],
@@ -198,6 +210,7 @@ export default {
       params: [
         ["Reporting period", `FY ${period.label}`],
         ["Bottleneck Index", "Average TAT ÷ SLA. Above 1.00 means the step averages longer than its target."],
+        holdNote,
         slaNote,
         ["As of", asOf],
       ],

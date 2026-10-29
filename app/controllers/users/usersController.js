@@ -22,6 +22,18 @@ import { decryptClaim, encryptStable } from '../../helper/claimCrypto.js';
 import bcrypt from 'bcryptjs';
 import httpClient from '../../util/httpClient.js';
 import { logger } from '../../util/logger.js';
+import { normalizeMobile, MOBILE_INVALID_MESSAGE } from '../../helper/mobile.js';
+import {
+  resolveLoginAccount,
+  reportAmbiguousLogin,
+  isDeactivatedCompanyAccount,
+  normalizeEmployeeCode,
+  findEmployeeCodeConflict,
+  isEmployeeCodeIndexViolation,
+  employeeCodeConflictAfterRace,
+  ACCOUNT_DEACTIVATED_MESSAGE,
+  LOGIN_AMBIGUOUS_MESSAGE
+} from '../../helper/loginIdentity.js';
 import FormData from 'form-data';
 import Razorpay from 'razorpay';
 import Moment from 'moment';
@@ -131,6 +143,20 @@ function loginIdentityChanged(reqData, stored) {
     reqData.mobile !== undefined && nationalDigits(reqData.mobile) !== nationalDigits(stored.mobile);
   return emailChanged || mobileChanged;
 }
+
+/**
+ * Postgres SQLSTATEs that mean "the submitted data does not fit", raised by a
+ * user-account write. The request schemas should stop all of these first; this
+ * is the backstop that keeps one from surfacing as "An internal error".
+ */
+const USER_WRITE_DB_ERRORS = {
+  '22001': { http: 400, code: 'VALUE_TOO_LONG', message: 'One of the values is longer than that field allows. Please shorten it and try again.' },
+  '22P02': { http: 400, code: 'INVALID_VALUE', message: 'One of the values is not in an accepted format. Please check it and try again.' },
+  '23502': { http: 400, code: 'MISSING_VALUE', message: 'A required value is missing. Please fill it in and try again.' },
+  '23514': { http: 400, code: 'INVALID_VALUE', message: 'One of the values is not allowed. Please check it and try again.' },
+  '23505': { http: 409, code: 'DUPLICATE_VALUE', message: 'That value is already used by another account.' },
+};
+
 const generatePassword = (password) => {
   var salt = bcrypt.genSaltSync(10);
   var hash = bcrypt.hashSync(password, salt);
@@ -1129,14 +1155,28 @@ create_buyer_company_users: async (req, res, next) => {
 
     const { company_id: companyID, id: loginUserID } = req.user;
 
+    // Stored canonical ("+91-9876543210") so every edit screen reads it back
+    // correctly. The schema already refused anything unnormalisable; this
+    // guards a caller that bypasses it.
+    const { value: canonicalMobile, error: mobileError } = normalizeMobile(mobile);
+    if (mobileError || !canonicalMobile) {
+      return res.status(400).json({ status: 2, code: 'INVALID_MOBILE', message: MOBILE_INVALID_MESSAGE });
+    }
+
     let company = await userModel.getCompanyDetail(loginUserID);
     if (company) company = company[0];
+
+    // Buyers log in with this code, so it may belong to one live account only
+    // — a deactivated one included (helper/loginIdentity.js). Stored trimmed.
+    const employeeCode = company?.is_hospitality ? normalizeEmployeeCode(employee_code) : null;
+    const codeConflict = await findEmployeeCodeConflict({ code: employeeCode, companyId: companyID });
+    if (codeConflict) return res.status(409).json(codeConflict);
 
     /* -------------------- PREPARE USER DATA -------------------- */
     let userDetails = {
       name: name.trim(),
       email: email.toLowerCase().trim(),
-      mobile: mobile.trim(),
+      mobile: canonicalMobile,
       user_type,
       status: 1,
       password: generatePassword(password),
@@ -1148,7 +1188,7 @@ create_buyer_company_users: async (req, res, next) => {
     if (company?.is_hospitality) {
       userDetails = {
         ...userDetails,
-        employee_code,
+        employee_code: employeeCode,
         employee_type,
         payroll_company_id
       };
@@ -1359,6 +1399,13 @@ create_buyer_company_users: async (req, res, next) => {
     });
 
   } catch (err) {
+    // Another save took the code between the check above and the INSERT.
+    if (isEmployeeCodeIndexViolation(err)) {
+      return res.status(409).json(await employeeCodeConflictAfterRace({
+        code: normalizeEmployeeCode(req.body?.employee_code),
+        companyId: req.user?.company_id
+      }));
+    }
     // A duplicate role assignment is the admin asking for something they
     // already have, not a server failure. It used to surface as a bare 500
     // (UM-7), which tells them nothing about what to do next.
@@ -2168,13 +2215,32 @@ get_company_users: async (req, res, next) => {
       const created_at = dateFormat(now, 'yyyy-mm-dd HH:MM:ss');
       const employee_code = req.body.employee_code || '';
       let email = req.body.email?.toLowerCase() || '';
-      let user_detail = [];
+      let rows = [];
       if (employee_code) {
-        user_detail = await userModel.getUserAuthByEmployeeCode(employee_code);
-        email = user_detail[0]?.email?.toLowerCase() || '';
+        rows = await userModel.getUserAuthByEmployeeCode(employee_code);
       } else if (email) {
-        user_detail = await userModel.getUserAuthEmail(email);
+        rows = await userModel.getUserAuthEmail(email);
       }
+      // The same answer login gets (helper/loginIdentity.js). This used to take
+      // rows[0] while login took the last row, so a reset could land on one
+      // account and every login be checked against another.
+      const resolved = resolveLoginAccount(rows);
+      if (resolved.outcome === 'ambiguous') {
+        reportAmbiguousLogin(employee_code ? 'employee_code' : 'email', resolved.accountIds);
+        return res
+          .status(409)
+          .json({ status: 0, code: 'LOGIN_AMBIGUOUS', message: LOGIN_AMBIGUOUS_MESSAGE })
+          .end();
+      }
+      const account = resolved.outcome === 'found' ? resolved.account : null;
+      if (account && isDeactivatedCompanyAccount(account)) {
+        return res
+          .status(403)
+          .json({ status: 0, code: 'ACCOUNT_DEACTIVATED', message: ACCOUNT_DEACTIVATED_MESSAGE })
+          .end();
+      }
+      const user_detail = account ? [account] : [];
+      if (employee_code) email = account?.email?.toLowerCase() || '';
       if (email && user_detail.length > 0 && (await isNetworkManagedLogin(user_detail[0].id))) {
         return res.status(403).json(NETWORK_MANAGED_REFUSAL).end();
       }
@@ -2243,12 +2309,7 @@ get_company_users: async (req, res, next) => {
           actionUrl: '/validate-otp'
         }).catch((err) => logError('dispatch forgot_password_otp_sent failed', err));
 
-        let updateOtp = {
-          otp: otpseq,
-          email: email
-        };
-
-        let update_otp = await userModel.update_user_otp_resend(updateOtp);
+        await userModel.setForgotPasswordOtp(user_detail[0].id, otpseq);
         res
           .status(200)
           .json({
@@ -2425,12 +2486,31 @@ update_user_detail: async (req, res, next) => {
           [targetUserId]
         ),
         db.any('SELECT department_id FROM tbl_user_department WHERE user_id = $1', [targetUserId]),
-        db.oneOrNone('SELECT status FROM tbl_users WHERE id = $1', [targetUserId])
+        db.oneOrNone('SELECT status, employee_code FROM tbl_users WHERE id = $1', [targetUserId])
       ]);
       oldRoleScopes = oldScopesResult;
       oldRoleIds = oldRoleScopes.map(r => r.role_id);
       oldDeptIds = oldDeptsResult.map(d => d.department_id);
       oldStatus = oldUserResult?.status;
+
+      // One live account per employee code (helper/loginIdentity.js), checked
+      // before anything is written. Also on reactivation: an account from before
+      // the unique index may share its code with somebody active now, and
+      // reactivating it would leave login unable to tell the two apart.
+      const storedCode = normalizeEmployeeCode(oldUserResult?.employee_code);
+      const nextCode = reqData.employee_code !== undefined
+        ? normalizeEmployeeCode(reqData.employee_code)
+        : storedCode;
+      const codeChanged = (nextCode ?? '').toUpperCase() !== (storedCode ?? '').toUpperCase();
+      const reactivating = Number(reqData.status) === 1 && Number(oldStatus) !== 1;
+      if (nextCode && (codeChanged || reactivating)) {
+        const conflict = await findEmployeeCodeConflict({
+          code: nextCode,
+          excludeUserId: targetUserId,
+          companyId: loggedInUser.company_id
+        });
+        if (conflict) return res.status(409).json(conflict);
+      }
 
       // Build scope-aware new state from request.
       const newRoleIds = Array.isArray(reqData.roles) ? reqData.roles.map(r => r.role_id) : null;
@@ -2687,7 +2767,17 @@ update_user_detail: async (req, res, next) => {
     // stored values exactly as they are (no re-casing, no NULL -> '').
     const keepsLoginIdentity = isActingForAnotherLogin(req);
     if (reqData.email !== undefined && !keepsLoginIdentity) updateData.email = reqData.email.trim().toLowerCase();
-    if (reqData.mobile !== undefined && !keepsLoginIdentity) updateData.mobile = reqData.mobile.trim();
+    if (reqData.mobile !== undefined && !keepsLoginIdentity) {
+      // Rewrites every legacy shape ("9876500001", "9876500001-",
+      // "+91-75077 69010") into "+91-9876500001", and turns a blank number
+      // ("" or a bare "+91-") into NULL rather than storing it. The schema has
+      // already refused anything this cannot normalise.
+      const { value, error } = normalizeMobile(reqData.mobile);
+      if (error) {
+        return res.status(400).json({ status: 2, code: 'INVALID_MOBILE', message: MOBILE_INVALID_MESSAGE });
+      }
+      updateData.mobile = value;
+    }
     if (reqData.designation !== undefined) updateData.designation = reqData.designation;
 
     // Handle hospitality employee fields
@@ -2695,7 +2785,7 @@ update_user_detail: async (req, res, next) => {
       updateData.employee_type = reqData.employee_type;
     }
     if (isAdmin && reqData.employee_code !== undefined) {
-      updateData.employee_code = reqData.employee_code;
+      updateData.employee_code = normalizeEmployeeCode(reqData.employee_code);
     }
     if (isAdmin && reqData.payroll_company_id !== undefined) {
       updateData.payroll_company_id = reqData.payroll_company_id;
@@ -2856,8 +2946,25 @@ update_user_detail: async (req, res, next) => {
         message: err.message
       });
     }
+    // Another save took the code between the check above and this UPDATE.
+    if (isEmployeeCodeIndexViolation(err)) {
+      return res.status(409).json(await employeeCodeConflictAfterRace({
+        code: normalizeEmployeeCode(req.body?.employee_code),
+        excludeUserId: req.body?.user_id ?? req.user?.id,
+        companyId: req.user?.company_id
+      }));
+    }
     logError(err);
-    return res.status(400).json({
+    // A database refusal about the DATA is the caller's to fix, so say what
+    // was wrong. Everything else is ours: a real 500, so monitoring counts it.
+    // This used to be a blanket 400 with a generic sentence, which is how a
+    // varchar(15) overflow reached an admin as "An internal error has
+    // occurred" and never registered as an error anywhere.
+    const known = USER_WRITE_DB_ERRORS[err?.code];
+    if (known) {
+      return res.status(known.http).json({ status: false, code: known.code, message: known.message });
+    }
+    return res.status(500).json({
       status: false,
       message: Config.errorText.value
     });

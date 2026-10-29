@@ -55,8 +55,11 @@ afterAll(async () => {
 
 describe("administrators are visible in People", () => {
   it("lists an administrator alongside everyone else", async () => {
+    // One page big enough for the whole company: the list is newest-first and the
+    // fixture users share one created_at, so the default page of 10 holds an
+    // arbitrary ten of them — which made "is the admin on page one" a coin toss.
     const { company_id } = await db.one("SELECT company_id FROM tbl_users WHERE id = $1", [ADMIN]);
-    const { users } = await userModel.getCompanyUsersDetailed(company_id, {});
+    const { users } = await userModel.getCompanyUsersDetailed(company_id, { limit: 200 });
     expect(users.map((u) => Number(u.id))).toContain(ADMIN);
   });
 
@@ -98,7 +101,7 @@ describe("administrators are visible in People", () => {
 
   it("returns an administrator through the API the screen calls", async () => {
     const client = await httpClient(ADMIN);
-    const res = await client.get("/api/v1/users/company-users-detailed");
+    const res = await client.get("/api/v1/users/company-users-detailed?limit=200");
     expect(res.status).toBe(200);
     const ids = (res.body?.data?.users || []).map((u) => Number(u.id));
     expect(ids).toContain(ADMIN);

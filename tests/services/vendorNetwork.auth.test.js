@@ -580,7 +580,8 @@ describe("identity writes while acting for another login (§4.2)", () => {
       .send({ name: "Lone", email: "Lone-New@Example.com", mobile: "9800000000" });
     expect(res.status).toBe(200);
     const row = await db.one(`SELECT email, mobile FROM tbl_users WHERE id = $1`, [LONE]);
-    expect(row).toEqual({ email: "lone-new@example.com", mobile: "9800000000" });
+    // Saved in the canonical "<code>-<number>" shape (helper/mobile.js normalizeMobile).
+    expect(row).toEqual({ email: "lone-new@example.com", mobile: "+91-9800000000" });
   });
 
   it("a type-11 login response carries no user_key", async () => {

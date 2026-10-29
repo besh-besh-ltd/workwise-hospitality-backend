@@ -39,6 +39,7 @@ jest.unstable_mockModule("../../app/util/socket.js", () => ({
   },
   getIo: () => null,
   emitToCompany: () => {},
+  emitToCompanies: () => {},
   emitToUser: () => {},
   SocketConfig: () => null,
 }));

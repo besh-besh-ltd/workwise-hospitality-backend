@@ -131,8 +131,18 @@ nodemailer.createTransport = function stubCreateTransport() {
 // Everything except the two external calls still runs for real: the template
 // data build, the Handlebars render, the URL validation, the database write.
 import s3Client from "../../app/config/s3config.js";
-s3Client.send = async function stubbedS3Send() {
-  return { ETag: '"test-stub-etag"', $metadata: { httpStatusCode: 200 } };
+// The SDK also takes a node-style callback, send(command[, options], cb), and
+// multer-s3 uses that form to delete what it stored when an upload is refused
+// part-way (multer's file-count and size limits). A stub that ignored it left
+// those requests hanging until the test timed out.
+s3Client.send = function stubbedS3Send(command, optionsOrCb, cb) {
+  const result = { ETag: '"test-stub-etag"', $metadata: { httpStatusCode: 200 } };
+  const callback = typeof optionsOrCb === "function" ? optionsOrCb : cb;
+  if (typeof callback === "function") {
+    process.nextTick(() => callback(null, result));
+    return undefined;
+  }
+  return Promise.resolve(result);
 };
 
 import fs from "fs";

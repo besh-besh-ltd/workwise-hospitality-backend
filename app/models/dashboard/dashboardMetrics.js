@@ -16,6 +16,8 @@
 // ============================================================================
 
 import { SPEND_STATUSES, LEAF_CATEGORY_JOIN, lineVariant as reportsLineVariant } from '../reportsModel.js';
+import { techStuckSql } from '../techEvalStuck.js';
+import { instanceNotHeldSql } from '../../services/po/poHold.js';
 
 export { SPEND_STATUSES, LEAF_CATEGORY_JOIN };
 
@@ -180,6 +182,8 @@ export const approvalItemKey = (i = 'i') =>
  *   · I am a PENDING, not-removed approver on the instance's CURRENT, PENDING
  *     step (a REMOVED approver keeps a tombstone row — see getPendingNegotiationParentIds);
  *   · NULL-hotel instances are included (company-level approvals);
+ *   · a PO on hold (an open request for information) waits on the person
+ *     asked, not on its approvers;
  *   · a publish approval on an already-published RFQ is not actionable;
  *   · a NEGOTIATION round whose vendor window has closed is not actionable.
  * Deliberately NOT date-filtered (SPEC rule 2: queues are never windowed) and
@@ -200,6 +204,7 @@ export function myPendingApprovalsFrom(userIdx, buyerIdx, hotelsIdx) {
      AND sa.approver_user_id = $${userIdx}
      AND sa.status = 'PENDING'
      AND sa.removed_at IS NULL
+     AND ${instanceNotHeldSql('i')}
      AND i.hospitality_company_id IN (SELECT id FROM tbl_hospitality_companies WHERE buyer_company_id = $${buyerIdx})
      AND (i.hotel_id IS NULL OR i.hotel_id = ANY($${hotelsIdx}))
      AND NOT (
@@ -283,7 +288,9 @@ export const DISAGREE_SQL = (col) =>
 
 /**
  * The RFQ (alias) has an incomplete technical evaluation with at least one
- * disagreeing vendor response — the card's population, per RFQ.
+ * disagreeing vendor response — the card's population, per RFQ. A stuck
+ * evaluation (techEvalStuck.js) is not open work, even when a deadline
+ * extension has reset its is_complete flag.
  */
 export const hasOpenVendorDisagreement = (alias = 'r') => `EXISTS (
   SELECT 1
@@ -293,4 +300,5 @@ export const hasOpenVendorDisagreement = (alias = 'r') => `EXISTS (
       ON vr_d.tbl_rfq_product_tech_evaluation_clauses_id = c_d.id
    WHERE te_d.rfq_id = ${alias}.id
      AND te_d.is_complete = false
+     AND NOT ${techStuckSql({ te: 'te_d', rfq: alias })}
      AND ${DISAGREE_SQL('vr_d.vendor_response')})`;

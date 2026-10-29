@@ -22,15 +22,22 @@ const asArray = (value) => {
   return Array.isArray(value) ? value : String(value).split(',').map((v) => v.trim()).filter(Boolean);
 };
 
+/**
+ * The caller's buyer company and the hospitality companies under it — both
+ * from the session. The buyer company is also what admits company-wide events
+ * (roles, approval workflows, the company profile), which belong to no single
+ * hospitality company.
+ */
 const scopeFor = async (req) => {
-  const buyerCompanyId = req.companyDetails?.id;
-  return companiesVisibleTo(buyerCompanyId);
+  const buyerCompanyId = req.companyDetails?.id || null;
+  const companyIds = await companiesVisibleTo(buyerCompanyId);
+  return { companyIds, buyerCompanyId };
 };
 
 const activityController = {
   list: async (req, res) => {
     try {
-      const companyIds = await scopeFor(req);
+      const { companyIds, buyerCompanyId } = await scopeFor(req);
       if (!companyIds.length) {
         return res.status(200).json({ status: 1, data: { rows: [], total: 0, page: 1, limit: 0 } });
       }
@@ -40,6 +47,7 @@ const activityController = {
 
       const { rows, total } = await listActivity({
         companyIds,
+        buyerCompanyId,
         from: req.query.from || null,
         to: req.query.to || null,
         categories: asArray(req.query.category),
@@ -66,8 +74,8 @@ const activityController = {
 
   facets: async (req, res) => {
     try {
-      const companyIds = await scopeFor(req);
-      const facets = await activityFacets(companyIds);
+      const { companyIds, buyerCompanyId } = await scopeFor(req);
+      const facets = await activityFacets(companyIds, buyerCompanyId);
       return res.status(200).json({ status: 1, data: facets });
     } catch (error) {
       logError(error);
@@ -77,8 +85,8 @@ const activityController = {
 
   changes: async (req, res) => {
     try {
-      const companyIds = await scopeFor(req);
-      const result = await activityChanges(Number(req.params.id), companyIds);
+      const { companyIds, buyerCompanyId } = await scopeFor(req);
+      const result = await activityChanges(Number(req.params.id), companyIds, buyerCompanyId);
       // An event belonging to another company is indistinguishable from one
       // that does not exist. That is deliberate.
       if (!result) return res.status(404).json({ status: 2, message: 'Activity not found' });

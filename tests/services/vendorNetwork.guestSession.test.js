@@ -38,6 +38,11 @@ const BASE = "/api/v1/vendor-network";
 const HOUR = 3600 * 1000;
 const PASSWORD_HASH = bcrypt.hashSync("Secret@123", 4);
 
+// The limiter cases below model separate clients behind ONE proxy that appends the client
+// address (X-Forwarded-For), which is what TRUST_PROXY_HOPS=1 is for. The production
+// default (no proxy trusted) is pinned in vendorNetwork.linkTokens.test.js.
+process.env.TRUST_PROXY_HOPS = "1";
+
 const rfqIds = [];
 let VARIANT;
 
@@ -283,7 +288,8 @@ describe("fix round 1: a guest session can never become a permanent login", () =
     // A normal session's email change behaves exactly as before.
     const own = await (await httpClient(LONE)).put("/api/v1/users/update-user-detail").send({ email: "Lone-New@Example.com", mobile: "9800000000" });
     expect(own.status).toBe(200);
-    expect(await db.one(`SELECT email, mobile FROM tbl_users WHERE id = $1`, [LONE])).toEqual({ email: "lone-new@example.com", mobile: "9800000000" });
+    // Saved in the canonical "<code>-<number>" shape (helper/mobile.js normalizeMobile).
+    expect(await db.one(`SELECT email, mobile FROM tbl_users WHERE id = $1`, [LONE])).toEqual({ email: "lone-new@example.com", mobile: "+91-9800000000" });
   });
 
   it("update-company-detail is refused to a guest; nothing is written", async () => {

@@ -100,11 +100,11 @@ describe("ARC approvals land on the right stage of the right contract", () => {
 
 describe("approval copy names the thing being approved", () => {
   it.each([
-    ["ARC_PUBLISH", "Rate Contract Publication"],
-    ["ARC_TECH", "Rate Contract Technical Evaluation"],
-    ["ARC_COMMITTEE", "Rate Contract Committee Decision"],
-    ["ARC_AMENDMENT", "Rate Contract Amendment"],
-    ["ARC_NEGOTIATION", "Rate Contract Negotiation"],
+    ["ARC_PUBLISH", "Unit ARC"],
+    ["ARC_TECH", "Unit ARC technical evaluation"],
+    ["ARC_COMMITTEE", "Unit ARC committee decision"],
+    ["ARC_AMENDMENT", "Unit ARC amendment"],
+    ["ARC_NEGOTIATION", "Unit ARC negotiation round"],
     ["MR", "Material Requisition"],
   ])("%s reads as '%s', not the raw enum", async (entityType, label) => {
     await sendApprovalStepNotification(stepArgs(entityType, 12, { arc_id: 12, mr_id: 12 }));

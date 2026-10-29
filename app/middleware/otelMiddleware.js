@@ -1,4 +1,5 @@
 import { trace } from '@opentelemetry/api';
+import { redactUrlSecrets } from '../util/telemetryConfig.js';
 
 const otelMiddleware = (req, res, next) => {
   const span = trace.getActiveSpan();
@@ -16,7 +17,7 @@ const otelMiddleware = (req, res, next) => {
     if (duration > 2000 && span) {
       span.addEvent('slow_response', {
         'http.method': req.method,
-        'http.url': req.originalUrl,
+        'http.url': redactUrlSecrets(req.originalUrl), // no ?token= values on spans
         'response.duration_ms': duration,
         'http.status_code': res.statusCode,
       });

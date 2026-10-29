@@ -31,7 +31,7 @@
  * ── WHAT THIS SUITE PINS ──────────────────────────────────────────────────
  *  1. The ROLE path now WORKS end to end for ARC_TECH and ARC_NEGOTIATION —
  *     a code path that had never executed anywhere, ever.
- *  2. THE GOVERNING CONSTRAINT, FOR ROLE-SOURCE STEPS: 'ARC Tech Evaluator'
+ *  2. THE GOVERNING CONSTRAINT, FOR ROLE-SOURCE STEPS: 'ARC Technical Evaluator'
  *     cannot approve a technical evaluation and 'ARC Commercial Evaluator'
  *     cannot approve a negotiation round. A design in which an evaluator
  *     qualifies as approver of their own work is wrong by definition, so this is
@@ -94,13 +94,13 @@ import {
 // 86xxx/66xxx (approvalPropagation.rolePermissionRevocation),
 // 83xxx/63xxx (approvalPropagation.mapAndCreateGaps), 95xxx (ARC eval fixtures).
 const U_TECH_APPROVER = 89001; // holds 'ARC Technical Approver'
-const U_NEG_APPROVER  = 89002; // holds 'ARC Negotiation Approver'
-const U_TECH_EVAL     = 89003; // holds 'ARC Tech Evaluator'        — must NOT approve
+const U_NEG_APPROVER  = 89002; // holds 'ARC Commercial Approver'
+const U_TECH_EVAL     = 89003; // holds 'ARC Technical Evaluator'        — must NOT approve
 const U_COMM_EVAL     = 89004; // holds 'ARC Commercial Evaluator'  — must NOT approve
 const U_ARC_ADMIN     = 89005; // holds 'ARC Admin'                 — must NOT approve
 const U_INITIATOR     = 89006; // submits everything; never an approver except in the case-(a) test
 const U_NOPERM        = 89007; // holds a role with zero permissions
-const U_TENDER_APP    = 89008; // holds legacy 'Tender Approver' (boq.read + boq.approve)
+const U_TENDER_APP    = 89008; // holds 'RFQ Approver' (was Tender Approver) (boq.read + boq.approve)
 const U_AMEND_APP     = 89009; // holds legacy 'ARC Approver'    (arc.read  + arc.approve)
 const ALL_USERS = [
   U_TECH_APPROVER, U_NEG_APPROVER, U_TECH_EVAL, U_COMM_EVAL, U_ARC_ADMIN,
@@ -125,9 +125,9 @@ const INITIATOR_ROLE = 89101;
 // WHERE is_active, so each row below owns a distinct (hotel, dept) tuple. The
 // scope is otherwise irrelevant — every instance names its policy explicitly.
 const P_TECH_ROLE  = 69001; // ARC_TECH        / A2 / eng  — ARC Technical Approver
-const P_TECH_EVAL  = 69002; // ARC_TECH        / A3 / eng  — ARC Tech Evaluator (must be dropped)
-const P_NEG_ROLE   = 69003; // ARC_NEGOTIATION / A2 / eng  — ARC Negotiation Approver
-const P_NEG_EVAL   = 69004; // ARC_NEGOTIATION / A3 / eng  — ARC Commercial Evaluator (must be dropped)
+const P_TECH_EVAL  = 69002; // ARC_TECH        / A3 / eng  — ARC Technical Evaluator (must be dropped)
+const P_NEG_ROLE   = 69003; // ARC_NEGOTIATION / A2 / eng  — ARC Commercial Approver
+const P_NEG_EVAL   = 69004; // ARC_NEGOTIATION / A3 / eng  — ARC Commercial Evaluator (RFQ parity: qualifies)
 const P_TECH_ADMIN = 69005; // ARC_TECH        / A2 / fb   — ARC Admin (must be dropped)
 const P_CASE_A     = 69006; // ARC_TECH        / A3 / fb   — USER step naming the initiator
 const P_CASE_B     = 69007; // ARC_TECH        / A2 / hk   — ROLE step with a permission-less role
@@ -272,8 +272,8 @@ async function purge() {
 
 beforeAll(async () => {
   ROLE_TECH_APPROVER  = await systemRoleId("ARC Technical Approver");
-  ROLE_NEG_APPROVER   = await systemRoleId("ARC Negotiation Approver");
-  ROLE_TECH_EVALUATOR = await systemRoleId("ARC Tech Evaluator");
+  ROLE_NEG_APPROVER   = await systemRoleId("ARC Commercial Approver");
+  ROLE_TECH_EVALUATOR = await systemRoleId("ARC Technical Evaluator");
   ROLE_COMM_EVALUATOR = await systemRoleId("ARC Commercial Evaluator");
   ROLE_ARC_ADMIN      = await systemRoleId("ARC Admin");
   ROLE_ARC_APPROVER_LEGACY = await systemRoleId("ARC Approver");
@@ -282,7 +282,7 @@ beforeAll(async () => {
     `INSERT INTO tbl_users (id, name, email, mobile, password, user_type, status, company_id)
      VALUES ($1, 'ARC Tech Approver',   'arcstage.techapp@test.local',  '9000089001', 'x', 2, 1, $10),
             ($2, 'ARC Neg Approver',    'arcstage.negapp@test.local',   '9000089002', 'x', 2, 1, $10),
-            ($3, 'ARC Tech Evaluator',  'arcstage.techeval@test.local', '9000089003', 'x', 2, 1, $10),
+            ($3, 'ARC Technical Evaluator',  'arcstage.techeval@test.local', '9000089003', 'x', 2, 1, $10),
             ($4, 'ARC Comm Evaluator',  'arcstage.commeval@test.local', '9000089004', 'x', 2, 1, $10),
             ($5, 'ARC Module Admin',    'arcstage.arcadmin@test.local', '9000089005', 'x', 2, 1, $10),
             ($6, 'ARC Stage Initiator', 'arcstage.initiator@test.local','9000089006', 'x', 7, 1, $10),
@@ -428,7 +428,7 @@ describe("ARC stage approver roles — permission shape", () => {
     expect(await permissionKeysOf(ROLE_TECH_APPROVER)).toEqual(["arc-tech.approve", "arc-tech.read"]);
   });
 
-  it("seeds ARC Negotiation Approver with arc-comm.read + arc-comm.approve and nothing else", async () => {
+  it("seeds ARC Commercial Approver with arc-comm.read + arc-comm.approve and nothing else", async () => {
     expect(await permissionKeysOf(ROLE_NEG_APPROVER)).toEqual(["arc-comm.approve", "arc-comm.read"]);
   });
 
@@ -464,7 +464,7 @@ describe("ARC_TECH / ARC_NEGOTIATION ROLE-source steps produce real approvals", 
     expect(approvers[0].status).toBe("PENDING");
   });
 
-  it("ARC_NEGOTIATION + ARC Negotiation Approver → PENDING instance with that approver", async () => {
+  it("ARC_NEGOTIATION + ARC Commercial Approver → PENDING instance with that approver", async () => {
     const res = await makeInstance(P_NEG_ROLE, "ARC_NEGOTIATION", IDS.hotels.A2);
 
     expect(res.autoApproved).toBeUndefined();
@@ -493,7 +493,7 @@ describe("GOVERNING CONSTRAINT (ROLE-source steps): an evaluator cannot approve 
   // that its diagnostics name the evaluator role and the step it sat on — the
   // same fact, from the surface that now carries it.
 
-  it("ARC Tech Evaluator does not qualify to approve a technical evaluation", async () => {
+  it("ARC Technical Evaluator does not qualify to approve a technical evaluation", async () => {
     // Directly, at the gate...
     expect(await roleHasReadAndApprovePermission(ROLE_TECH_EVALUATOR, "arc-tech")).toBe(false);
 
@@ -515,18 +515,14 @@ describe("GOVERNING CONSTRAINT (ROLE-source steps): an evaluator cannot approve 
     expect(await instancesForPolicy(P_TECH_EVAL)).toEqual([]);
   });
 
-  it("ARC Commercial Evaluator does not qualify to approve a negotiation round", async () => {
-    expect(await roleHasReadAndApprovePermission(ROLE_COMM_EVALUATOR, "arc-comm")).toBe(false);
+  it("ARC Commercial Evaluator qualifies to approve a negotiation round (RFQ parity)", async () => {
+    // ARC mirrors RFQ: evaluators approve their colleagues' rounds. The
+    // initiator's own slot is auto-approved by the engine.
+    expect(await roleHasReadAndApprovePermission(ROLE_COMM_EVALUATOR, "arc-comm")).toBe(true);
 
-    const err = await expectRefusedCreation(makeInstance(P_NEG_EVAL, "ARC_NEGOTIATION", IDS.hotels.A3));
-    expect(err.diagnostics.skipped_steps[0]).toMatchObject({
-      approver_source_id: ROLE_COMM_EVALUATOR,
-      resource: "arc-comm",
-      reason: "ROLE_LACKS_READ_AND_APPROVE",
-    });
-
-    // No round goes live on an approval nobody granted.
-    expect(await instancesForPolicy(P_NEG_EVAL)).toEqual([]);
+    const result = await makeInstance(P_NEG_EVAL, "ARC_NEGOTIATION", IDS.hotels.A3);
+    expect(result.instance.id).toBeTruthy();
+    expect(await instancesForPolicy(P_NEG_EVAL)).toHaveLength(1);
   });
 
   it("ARC Admin is withheld BOTH new approve keys, so it cannot approve a tech evaluation", async () => {

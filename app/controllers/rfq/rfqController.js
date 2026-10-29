@@ -11,6 +11,13 @@ import {
   normalizeErrors
 } from '../../helper/common.js';
 import rfqModel from '../../models/rfqModel.js';
+import {
+  techStuckSql,
+  bidWindowOpenSql,
+  techBlockedNoPassSql,
+  techReopenCandidateSql,
+  techRecoverableSql,
+} from '../../models/techEvalStuck.js';
 import { shapeRfqLifecycle } from '../../models/rfq/rfqLifecycleShaper.js';
 import userModel from '../../models/userModel.js';
 import { sendNotification, dispatch as dispatchNotification } from '../../services/notificationService.js';
@@ -44,7 +51,10 @@ import {
 } from './rfqUpdateHelpers.js';
 import { cancelAndReissueApproval } from '../general/reapprovalService.js';
 import { v4 as uuidv4 } from 'uuid';
-import { executeApprovalAction } from '../../services/approvalActionService.js';
+import { executeApprovalAction, dispatchPostApprovalAction } from '../../services/approvalActionService.js';
+import { instanceTenantForCaller } from '../../services/approvalTenantScope.js';
+import { ApprovalInstanceNotFoundError } from '../../services/approvalTargetOwner.js';
+import { checkTechEvalWritable } from '../../services/techEvalScoringGuard.js';
 import {
   assertUserHasScope,
   assertCanReadParentRfq,
@@ -55,8 +65,9 @@ import {
 import moment from 'moment-timezone';
 import { deleteSchedule } from '../../helper/createSchedule.js';
 import { scheduleRfqPublish } from '../../helper/cronManager.js';
+import { notifyDraftCreated } from '../../services/po/poInitiateNotifier.js';
 import { draftPO, buildAuthoritativePOPayload } from '../po/purchaseOrderController.js';
-import { autoInitiateRFQPOs } from '../../models/purchaseOrderModel.js';
+import { autoInitiateRFQPOs, assertRfqPoListingAccess, PoAccessError, assertDraftMergeTarget } from '../../models/purchaseOrderModel.js';
 import { sendApprovalNotification } from '../po/purchaseOrderEmails.js';
 import UsersController from '../users/usersController.js';
 import { summaries } from '../../util/constants.js';
@@ -88,6 +99,11 @@ import { quoteGateApplies, assertOrgMayQuote, assertOrgMayClarify, memberRfqAssi
 import { lockLiveRfqAssignments, propagateRoutedCopiesLocked } from '../../services/vendorNetwork/subjects/rfqRoutedCopies.js';
 import { directInviteIdsForLine } from '../../services/vendorNetwork/directInvites.js';
 import { NetworkHttpError } from '../../services/vendorNetwork/guards.js';
+import { poFieldsFor, isVendorOrTokenViewer } from '../../services/po/buyerOnlyPoFields.js';
+import { closeOpenHoldTx, assertProductNotOnHeldPo } from '../../services/po/poHold.js';
+import { PoDecisionError } from '../../services/po/poDecisionError.js';
+import { bindFinalizeAward } from '../../services/po/awardQuoteBinding.js';
+import { quoteInSentence } from '../../helper/quoteInSentence.js';
 
 /** A Vendor Networks quote-gate refusal as its HTTP answer body. */
 const networkRefusalBody = (err) => ({ status: 0, message: err.message, ...(err.reason ? { reason: err.reason } : {}) });
@@ -4358,9 +4374,11 @@ const startApprovalForTechEval = async (rfqProductId, rfqId, userId, txContext =
 
   // Get tech evaluation record
   const techEval = await dbContext.oneOrNone(
-    `SELECT id, minimum_passing_score, is_complete, current_round, total_passed_verified, required_passed_vendors
-     FROM tbl_rfq_product_tech_evaluation
-     WHERE tbl_rfq_product_id = $1`,
+    `SELECT te.id, te.minimum_passing_score, te.is_complete, te.current_round,
+            te.total_passed_verified, te.required_passed_vendors,
+            ${techRecoverableSql({ te: 'te' })} AS recoverable
+     FROM tbl_rfq_product_tech_evaluation te
+     WHERE te.tbl_rfq_product_id = $1`,
     [rfqProductId]
   );
 
@@ -4368,9 +4386,25 @@ const startApprovalForTechEval = async (rfqProductId, rfqId, userId, txContext =
     throw techEvalRefusal('TECH_EVAL_NOT_FOUND', 'Technical evaluation not found for this product');
   }
 
-  // Check if already complete
+  // Check if already complete — unless it is locked with nobody passed while a
+  // vendor waits to be evaluated (techRecoverableSql). That shape cannot be
+  // edited (it is not stuck) and would otherwise refuse every submit: an
+  // evaluation locked before the keep-open rule in handleTechnicalPostApproval,
+  // after which a vendor quoted and bidding closed. Lift the lock here, inside
+  // the submit transaction, so a refusal further down rolls it back.
+  let reopenedBySubmit = false;
   if (techEval.is_complete) {
-    throw techEvalRefusal('TECH_EVAL_ALREADY_COMPLETE', 'Technical evaluation is already complete with required number of passed vendors');
+    if (techEval.recoverable !== true) {
+      throw techEvalRefusal('TECH_EVAL_ALREADY_COMPLETE', 'Technical evaluation is already complete with required number of passed vendors');
+    }
+    await dbContext.none(
+      `UPDATE tbl_rfq_product_tech_evaluation SET is_complete = FALSE WHERE id = $1`,
+      [techEval.id]
+    );
+    techEval.is_complete = false;
+    // Logged by the caller once the transaction has COMMITTED: a later refusal
+    // (pending round, nothing scored, no policy) rolls this reopen back.
+    reopenedBySubmit = true;
   }
 
   // Check if there's already a pending/submitted round for this evaluation
@@ -4516,7 +4550,9 @@ const startApprovalForTechEval = async (rfqProductId, rfqId, userId, txContext =
   return {
     ...result,
     round_id: round.id,
-    round_number: currentRound
+    round_number: currentRound,
+    techEvalId: techEval.id,
+    reopenedBySubmit
   };
 };
 
@@ -4812,12 +4848,37 @@ const handleTechnicalPostApproval = async (approval_instance_id, approver_user_i
         // No more replacement vendors available — all eligible vendors
         // have been evaluated, so mark as complete even if the passed
         // count is below the configured threshold.
+        //
+        // Except while bidding is still open and nobody has passed: then
+        // "every eligible vendor has been evaluated" is not yet true — a vendor
+        // can still quote — and closing the evaluation here would leave that
+        // vendor unevaluable once the window shuts (not stuck, because they are
+        // waiting to be scored; yet every submit refused as already complete).
+        // Keep it open and blocked: the same state a deadline extension
+        // produces (reopenStuckTechEvals), handled by the same screens.
+        // Read in a SAVEPOINT: a stored value that passes the date regex but is
+        // not a real date ('2026-02-30 10:00') makes the CAST raise, and an
+        // error inside the approval transaction would abort it even though we
+        // catch it here. A failed read counts as "window closed".
+        let windowOpen = false;
+        try {
+          ({ window_open: windowOpen } = await t.tx((sp) => sp.one(
+            `SELECT ${bidWindowOpenSql({ rfq: 'r' })} AS window_open FROM tbl_rfq r WHERE r.id = $1`,
+            [techEval.rfq_id]
+          )));
+        } catch (windowErr) {
+          logger.warn(`Could not read the bid window for rfq ${techEval.rfq_id} (tech eval ${techEval.id}); treating it as closed: ${windowErr.code || windowErr.message}`);
+          windowOpen = false;
+        }
+        const keepOpen = windowOpen === true && totalPassedVerified === 0;
         await rfqModel.updateTechEvalStatus(techEval.id, {
-          is_complete: true,
+          is_complete: !keepOpen,
           blocked_insufficient_vendors: true,
           total_passed_verified: totalPassedVerified
         }, t);
-        logger.info(`Tech evaluation ${techEval.id} complete (all eligible vendors evaluated, ${totalPassedVerified} passed)`);
+        logger.info(keepOpen
+          ? `Tech evaluation ${techEval.id} blocked with 0 passed; bidding still open, evaluation stays open`
+          : `Tech evaluation ${techEval.id} complete (all eligible vendors evaluated, ${totalPassedVerified} passed)`);
       }
     } else {
       // All vendors passed — if no failed vendors remain, all eligible
@@ -4834,6 +4895,73 @@ const handleTechnicalPostApproval = async (approval_instance_id, approver_user_i
     // Log but don't fail the transaction
     logError('Error handling TECHNICAL post-approval', techEvalError);
   }
+};
+
+const TECH_EVAL_REOPENED_REMARK = 'Technical evaluation reopened — bid deadline extended';
+
+/**
+ * Reopen tech-stuck evaluations after the RFQ's bid deadline was extended.
+ *
+ * Called by `update` inside its transaction, AFTER the new bid_end_date has
+ * been written, with the reopen candidates read BEFORE the edit
+ * (techReopenCandidateSql: stuck, or blocked with nobody passed and still
+ * locked as complete). The stuck predicate cannot be re-read afterwards: an
+ * open window is, by definition, not stuck.
+ *
+ * Only the lock lifts. blocked_insufficient_vendors, current_round,
+ * total_passed_verified and every approved verdict (cleared_vendors rows,
+ * APPROVED rounds) stay exactly as they were: the next round is numbered
+ * MAX(round_number) + 1 by startApprovalForTechEval and carries only vendors
+ * with no verified verdict, so round 1's failures are neither re-judged nor
+ * lost.
+ *
+ * Re-checks the window on the written row, in IST, so a deadline that is not
+ * actually in the future (or one stored in a shape the predicate reads as
+ * closed) reopens nothing.
+ *
+ * @returns {Promise<Array<{id:number, tbl_rfq_product_id:number}>>} reopened evaluations
+ */
+const reopenStuckTechEvals = async (t, { rfqId, techEvalIds, userId, editSessionId, previousBidEndDate }) => {
+  if (!techEvalIds || techEvalIds.length === 0) return [];
+
+  const reopened = await t.any(
+    `UPDATE tbl_rfq_product_tech_evaluation te
+        SET is_complete = FALSE
+       FROM tbl_rfq r
+      WHERE te.id = ANY($1::int[])
+        AND te.rfq_id = $2
+        AND r.id = te.rfq_id
+        AND ${techBlockedNoPassSql({ te: 'te' })}
+        AND ${bidWindowOpenSql({ rfq: 'r' })}
+      RETURNING te.id, te.tbl_rfq_product_id, r.bid_end_date`,
+    [techEvalIds, rfqId]
+  );
+
+  for (const te of reopened) {
+    await recordLifecycleEvent({
+      entity_type: 'TECHNICAL',
+      entity_id: te.tbl_rfq_product_id,
+      stage: 'REOPENED',
+      action: 'REOPEN',
+      performed_by: userId,
+      remarks: TECH_EVAL_REOPENED_REMARK,
+      metadata: {
+        rfq_id: rfqId,
+        rfq_product_id: te.tbl_rfq_product_id,
+        tech_evaluation_id: te.id,
+        reason: 'BID_DEADLINE_EXTENDED',
+        previous_bid_end_date: previousBidEndDate ?? null,
+        bid_end_date: te.bid_end_date,
+        edit_session_id: editSessionId,
+      },
+      txContext: t,
+    });
+  }
+
+  if (reopened.length > 0) {
+    logger.info({ rfqId, techEvalIds: reopened.map((r) => r.id) }, TECH_EVAL_REOPENED_REMARK);
+  }
+  return reopened.map(({ id, tbl_rfq_product_id }) => ({ id, tbl_rfq_product_id }));
 };
 
 /**
@@ -6572,15 +6700,24 @@ const rfqController = {
           LIMIT 1
         `, [rfq_id]));
 
-        // 1d. Check for tech-eval-stuck products — allows restricted editing
-        //     (only bid_end_date + vendor refresh) when all vendors failed tech eval.
-        const hasTechStuckProduct = !!(await t.oneOrNone(`
-          SELECT 1 FROM tbl_rfq_product_tech_evaluation te_stuck
-          WHERE te_stuck.rfq_id = $1
-            AND te_stuck.blocked_insufficient_vendors = TRUE
-            AND COALESCE(te_stuck.total_passed_verified, 0) = 0
-          LIMIT 1
-        `, [rfq_id]));
+        // 1d. Tech-eval-stuck products — allows restricted editing (only
+        //     bid_end_date + vendor refresh). Stuck is the shared predicate
+        //     (techEvalStuck.js): blocked, nobody passed, bidding closed, nobody
+        //     left to evaluate. Read BEFORE the edit is applied, together with
+        //     the evaluations a deadline extension reopens in step 6b — the
+        //     stuck ones plus any blocked-with-nobody-passed evaluation still
+        //     locked as complete (techReopenCandidateSql). Only the stuck ones
+        //     unlock the edit.
+        const reopenCandidates = await t.any(`
+          SELECT te_stuck.id, te_stuck.tbl_rfq_product_id,
+                 ${techStuckSql({ te: 'te_stuck', rfq: 'r_stuck' })} AS is_stuck
+            FROM tbl_rfq_product_tech_evaluation te_stuck
+            JOIN tbl_rfq r_stuck ON r_stuck.id = te_stuck.rfq_id
+           WHERE te_stuck.rfq_id = $1
+             AND ${techReopenCandidateSql({ te: 'te_stuck', rfq: 'r_stuck' })}
+           ORDER BY te_stuck.id
+        `, [rfq_id]);
+        const hasTechStuckProduct = reopenCandidates.some((te) => te.is_stuck === true);
 
         // 1e. Check for tech-eval-UNSTARTABLE products — the bid window has closed
         //     and a product carrying technical clauses has a real (non-regret) quote
@@ -6769,6 +6906,21 @@ const rfqController = {
 
         const allHistory = [...rfqHistory, ...productHistory, ...termsHistory, ...termFilesHistory];
 
+        // 6b. A deadline extension reopens every reopen candidate on the RFQ
+        //     (RFQ #536894: the client extended, and nothing reopened, because
+        //     nothing anywhere ever reset is_complete). Same transaction as the
+        //     edit, so the deadline and the reopen land together or not at all.
+        const bidEndChange = diff.rfqFields.find((f) => f.field_name === 'bid_end_date');
+        const reopenedTechEvals = bidEndChange && reopenCandidates.length > 0
+          ? await reopenStuckTechEvals(t, {
+            rfqId: rfq_id,
+            techEvalIds: reopenCandidates.map((te) => te.id),
+            userId,
+            editSessionId,
+            previousBidEndDate: bidEndChange.old_value,
+          })
+          : [];
+
         // 7. Record history rows
         if (allHistory.length > 0) {
           await rfqHistoryModel.recordChanges(
@@ -6807,7 +6959,10 @@ const rfqController = {
             edit_session_id: editSessionId,
             material: hasMaterialChange,
             field_count: allHistory.length,
-            reapproval: reapprovalResult || null
+            reapproval: reapprovalResult || null,
+            ...(reopenedTechEvals.length > 0
+              ? { tech_evaluations_reopened: reopenedTechEvals.map((te) => te.id) }
+              : {})
           },
           txContext: t
         });
@@ -6879,6 +7034,13 @@ const rfqController = {
     } catch (error) {
       logError(error);
 
+      // Typed errors from authorizationService (a missing rfq.create role, no
+      // approval policy) carry their own 4xx and a message the buyer can act
+      // on — same as POST /rfq/create.
+      if (error instanceof AuthorizationError || error instanceof NoApprovalPolicyError) {
+        return sendScopeError(res, error);
+      }
+
       // F-DRAFT-500: saveRfqDraft signals business-logic rejections by
       // throwing `new Error(JSON.stringify({message, status, ...}))`.
       // Translate the structured-error shape to a sensible HTTP code so
@@ -6903,14 +7065,24 @@ const rfqController = {
         }
       }
 
+      // An unexpected failure: its cause is in the log (logError above). The
+      // client toasts every value under `errors`, so a database message sent
+      // there reached the buyer verbatim ("Multiple rows were not expected.")
+      // and an empty `details` array became a blank toast. Send neither.
+      if (httpCode === 500) {
+        return res.status(500).json({
+          status: 3,
+          message: 'An error occurred while saving the draft',
+        });
+      }
+
+      const details = parsedError?.details || [];
       res.status(httpCode).json({
         status: 3,
-        message: httpCode === 500
-          ? 'An error occurred while saving the draft'
-          : (innerMessage || 'An error occurred while saving the draft'),
+        message: innerMessage || 'An error occurred while saving the draft',
         errors: {
           rfq: innerMessage || 'An error occurred while saving the draft',
-          details: parsedError?.details || [],
+          ...(details.length ? { details } : {}),
         }
       });
     }
@@ -8478,7 +8650,7 @@ const rfqController = {
       // sends the buyer to the edit/create flow instead of the stage page.
       const summaryP = (Number(rfq.status) === 0)
         ? Promise.resolve(null)
-        : rfqModel.getLifecycleSummary(rfqId, userId, { rfqRow });
+        : rfqModel.getLifecycleSummary(rfqId, userId, { rfqRow, user: req.user });
 
       // RFQ-scoped permissions (mirror ARC getLifecycle: rbac returns rows).
       const [permissions, summary] = await Promise.all([permissionsP, summaryP]);
@@ -8622,11 +8794,24 @@ const rfqController = {
         const lifecycleMap = await rfqModel.computeLifecycleStages([parseInt(rfqData.id)]);
         rfqData.lifecycle_stage = lifecycleMap[parseInt(rfqData.id)] || null;
 
+        // PO_REJECTED is internal: an approver turned a PO down. For a vendor
+        // or token user the RFQ is back in commercial evaluation, which is
+        // what is true for them; who evaluates is not theirs to read.
+        if (rfqData.lifecycle_stage === 'PO_REJECTED' && isVendorOrTokenViewer(req.user)) {
+          rfqData.lifecycle_stage = 'COMMERCIAL_EVALUATION';
+          rfqData.action_holders = null;
+          return;
+        }
+
         // Enrich with action holders (who can act at current lifecycle stage)
         if (rfqData.lifecycle_stage) {
           try {
             const actionHoldersMap = await rfqModel.getActionHoldersForRFQs([rfqData], lifecycleMap);
-            rfqData.action_holders = actionHoldersMap[parseInt(rfqData.id)] || null;
+            const holders = actionHoldersMap[parseInt(rfqData.id)] || null;
+            // This route also serves vendors (JWT and emailed-link token). The
+            // people asked for information on a held PO are buyer-internal:
+            // a vendor never learns that a PO is on hold.
+            rfqData.action_holders = holders?.kind === 'response' && isVendorOrTokenViewer(req.user) ? null : holders;
           } catch (err) {
             logError('Error fetching action holders for RFQ detail', err);
             rfqData.action_holders = null;
@@ -8656,14 +8841,22 @@ const rfqController = {
       // RFQ. Used by Quote Compare to surface why the vendor was de-finalized.
       // - rejection_type='vendor':   PO row status='rejected_by_vendor'.
       //   Reason from po.vendor_rejection_reason; rejected_by = the vendor.
-      // - rejection_type='approver': PO row status='rejected'. Reason and
+      // - rejection_type='approver': PO row status='rejected', or 'cancelled'
+      //   by an approver as not needed (route 'CANCEL'). Reason and
       //   rejecter pulled from the matching tbl_approval_actions REJECT row,
       //   joined via the PO's approval_instance_id.
       // Shared with the RFQ listing card (rfqModel.getLivePoRejectionsForRfqs)
       // so the re-award modal and the card cannot disagree about what counts.
-      const rejectionsP = Promise.resolve()
-        .then(() => rfqModel.getLivePoRejectionsForRfqs([rfqData.id]))
-        .catch((err) => { logError('Error fetching PO rejections for RFQ', err); return []; });
+      //
+      // BUYERS ONLY. This route also serves vendors (JWT and emailed-link
+      // token), and the rows name every vendor whose PO was rejected, why,
+      // and by whom. A vendor gets an empty list, and the query is not run.
+      const buyerOnlyHidden = isVendorOrTokenViewer(req.user);
+      const rejectionsP = buyerOnlyHidden
+        ? null
+        : Promise.resolve()
+          .then(() => rfqModel.getLivePoRejectionsForRfqs([rfqData.id]))
+          .catch((err) => { logError('Error fetching PO rejections for RFQ', err); return []; });
 
       // Attach close reason when RFQ is closed
       const closeCommentP = (rfqData && String(rfqData.status) === '2')
@@ -8697,7 +8890,7 @@ const rfqController = {
         rfqData.commercial_evaluators = [];
         rfqData.po_initiators = [];
       }
-      rfqData.vendor_rejections = rejections;
+      rfqData.vendor_rejections = buyerOnlyHidden ? [] : rejections;
       if (closeCommentP) rfqData.close_comment = closeComment;
 
       // Add tender payment status for vendor viewers (sourced from main query)
@@ -9042,7 +9235,7 @@ const rfqController = {
         AWAITING_QUOTES: 'ongoing', TECHNICAL_AWAITING_QUOTES: 'ongoing', TECHNICAL_EVALUATING: 'ongoing',
         TECHNICAL_APPROVING: 'ongoing', TECHNICAL_REJECTED: 'ongoing', RFQ_STUCK_TECHNICAL: 'ongoing',
         RFQ_STUCK_COMMERCIAL: 'ongoing', COMMERCIAL_EVALUATION: 'ongoing', NEGOTIATION_ONGOING: 'ongoing',
-        QUOTATION_APPROVAL: 'ongoing', AWAITING_PO: 'ongoing', PO_APPROVAL: 'ongoing', PO_VENDOR_REJECTED: 'ongoing',
+        QUOTATION_APPROVAL: 'ongoing', AWAITING_PO: 'ongoing', PO_APPROVAL: 'ongoing', PO_VENDOR_REJECTED: 'ongoing', PO_REJECTED: 'ongoing',
         APPROVED_COMPLETED: 'approved',
       };
       const statusKey = (r) => {
@@ -9119,6 +9312,12 @@ const rfqController = {
         }
         for (const p of (personalMap[parseInt(r.id)] || [])) {
           reasons.push({ kind: 'response', code: p.code, label: p.label, count: p.count ?? 1 });
+        }
+        // Every live PO on the RFQ is held and this user is the one asked:
+        // theirs is an answer, never an approval (they are not offered Approve
+        // below either: that needs type 'approval').
+        if (inHolders && holderKind === 'response') {
+          reasons.push({ kind: 'response', code: 'PO_INFO_REQUEST', label: holders.label || 'Asked for information', count: 1 });
         }
         if (inHolders && holderKind === 'evaluation') {
           reasons.push({
@@ -9241,12 +9440,17 @@ const rfqController = {
 
       // 8a. Heavy per-card columns (flags, counts, vendors json, can_edit),
       //     for this page only, in the same round trip as the 8b rejections.
+      // The rejection marker names vendors and approvers' reasons: buyers
+      // only. The route admits any signed-in user and a vendor's scope matches
+      // no rows today, but the marker does not rely on that.
       const [cardDetails, pageRejections] = await Promise.all([
         rfqModel.getRfqListViewCardDetails(pageRows.map((r) => r.id), user_id),
-        rfqModel.getLivePoRejectionsForRfqs(pageRows.map((r) => r.id)).catch((rejErr) => {
-          logError('getRfqListView: could not load PO rejections for the page', rejErr);
-          return [];
-        }),
+        isVendorOrTokenViewer(req.user)
+          ? []
+          : rfqModel.getLivePoRejectionsForRfqs(pageRows.map((r) => r.id)).catch((rejErr) => {
+            logError('getRfqListView: could not load PO rejections for the page', rejErr);
+            return [];
+          }),
       ]);
       for (const r of pageRows) Object.assign(r, cardDetails[Number(r.id)] || {});
 
@@ -9275,8 +9479,12 @@ const rfqController = {
         if (!entry?.latest) return null;
         const r = entry.latest;
         return {
+          po_id: r.po_id,
           po_number: r.po_number,
           rejection_type: r.rejection_type,
+          reason_category: r.reason_category ?? null,
+          // 'CANCEL': cancelled as not needed, nothing to re-award.
+          route: r.route ?? null,
           rejected_by_name: r.rejected_by_name,
           rejected_at: r.rejected_at,
           rejection_reason: r.rejection_reason,
@@ -10978,6 +11186,18 @@ const rfqController = {
 
       // Update RFQ status to CLOSED (2) and cancel ALL pending approvals tied to this RFQ.
       await db.tx(async t => {
+        // The RFQ's pending POs first, in id order, before any approval
+        // instance: the lock order every PO decision and hold uses (PO, then
+        // its instance). A hold cannot open or answer under us, and the holds
+        // closed below are closed on POs this transaction owns.
+        await t.any(
+          `SELECT id FROM tbl_rfq_purchase_order
+            WHERE rfq_id = $1 AND status = 'pending_approval'
+            ORDER BY id
+            FOR UPDATE`,
+          [rfq_id]
+        );
+
         await t.none(
           'UPDATE tbl_rfq SET status = 2, updated_by = $1 WHERE id = $2',
           [id, rfq_id]
@@ -11004,7 +11224,10 @@ const rfqController = {
         //   • Catch-all:         metadata->>'rfq_id' = rfq_id (covers any new entity_type that
         //                        consistently sets this field)
         const pendingInstances = await t.any(
-          `SELECT id, entity_type, entity_id, metadata
+          `SELECT id, entity_type, entity_id, metadata,
+                  COALESCE((SELECT p.entity_type LIKE 'ARC\\_GROUP%'
+                              FROM tbl_approval_policies p
+                             WHERE p.id = tbl_approval_instances.approval_policy_id), false) AS is_group
              FROM tbl_approval_instances
             WHERE status = 'PENDING'
               AND (
@@ -11083,6 +11306,14 @@ const rfqController = {
                 WHERE id = $1 AND status = 'pending_approval'`,
               [instance.entity_id]
             );
+            // Nobody will answer for an approval that no longer exists: the
+            // hold closes with it, and the person asked is told after commit.
+            await closeOpenHoldTx(t, {
+              poId: Number(instance.entity_id),
+              status: 'CLOSED',
+              resolution: 'RFQ_CLOSED',
+              actorId: id,
+            });
           }
 
           cancelledInstances.push({
@@ -11090,6 +11321,7 @@ const rfqController = {
             entity_type: instance.entity_type,
             entity_id: instance.entity_id,
             metadata: instance.metadata,
+            is_group: instance.is_group,
             approvers
           });
         }
@@ -11146,7 +11378,7 @@ const rfqController = {
           entityIdentifier: rfQItem.rfq_no,
           reason: cancelReason,
           approvers: inst.approvers,
-          extraContext: { rfq_id: parseInt(rfq_id) },
+          extraContext: { rfq_id: parseInt(rfq_id), is_group: Boolean(inst.is_group) },
         });
       }
 
@@ -11620,12 +11852,34 @@ const rfqController = {
     }
   },
 
+  /**
+   * GET /rfq/get-existing-po?rfq_id=&vendor_id= — a vendor's draft POs on one RFQ.
+   *
+   * No frontend calls this (2026-10-22). It used to admit any signed-in user and
+   * return raw draft rows for whatever rfq_id and vendor_id the query named: a
+   * cross-tenant read. Now buyer-only (acl([2, 8]) on the route) and gated on
+   * the RFQ with the same fail-closed check GET /po/rfq/:rfq_id uses, so an
+   * RFQ outside the caller's scope (or no RFQ at all) is a 404 that does not
+   * reveal whether it exists. vendor_id only narrows the rows of an RFQ the
+   * caller can already read.
+   */
   getExistingPO: async (req, res) => {
     try {
       const { vendor_id, rfq_id } = req.query;
       const user = req.user;
 
-      const existingPOS = await rfqModel.getDraftPOByVendor(vendor_id, rfq_id, user);
+      try {
+        await assertRfqPoListingAccess(user, rfq_id);
+      } catch (gateErr) {
+        if (gateErr instanceof PoAccessError) {
+          return res.status(gateErr.status).json({ status: 2, message: gateErr.message, code: gateErr.code });
+        }
+        throw gateErr;
+      }
+
+      // Raw draft PO rows (SELECT PO.*). Buyers only reach here; the strip is
+      // a no-op for them and stays as a second line of defence.
+      const existingPOS = poFieldsFor(user, await rfqModel.getDraftPOByVendor(vendor_id, rfq_id, user));
 
       return res.json({
         status: 1, 
@@ -11649,6 +11903,18 @@ const rfqController = {
     const selectedRoute = route_type || 'PO';
 
     try {
+      // Tenant gate, before anything is read or written: the caller must be
+      // able to read this RFQ. Without it, any buyer could award (and draft a
+      // PO on) another company's RFQ by its id. The same gate as
+      // getQuoteComparison; a vendor never reaches this route (acl).
+      if (Number(req.user.user_type) !== 3) {
+        try { await assertCanReadParentRfq(req.user.id, rfq_id); }
+        catch (e) {
+          if (e instanceof AuthorizationError) return sendScopeError(res, e);
+          throw e;
+        }
+      }
+
       // Check for active negotiation round blocking finalization.
       //
       // COVERAGE must come from coversProductSql, never the rfq_product_id
@@ -11697,6 +11963,33 @@ const rfqController = {
             message: 'An active negotiation round is ongoing for this product. Vendor finalization is restricted until the round ends.'
           });
         }
+      }
+
+      // The ids the award prices from must be THIS RFQ's, before anything is
+      // written: the quote line (and its quote) on this RFQ, submitted by the
+      // awarded vendor, for the product being awarded; product_info naming
+      // that product and vendor. The gate above covers rfq_id only, and the
+      // PO line copies the quote line's pricing, so an unbound id would read
+      // another tenant's prices onto this PO. 404 AWARD_QUOTE_NOT_FOUND for an
+      // id that is not this RFQ's, 400 AWARD_QUOTE_MISMATCH otherwise, via the
+      // PoDecisionError branch below. buildAuthoritativePOPayload and draftPO
+      // bind again on every path that drafts a PO.
+      await bindFinalizeAward(db, { body: req.body, rfqProductId: rfqProductForNego?.id ?? null });
+
+      // A PO the client chose to merge this line into must be this RFQ's
+      // draft for the awarded vendor (the vendor the PO line is written for).
+      // Refused here (400 PO_MERGE_TARGET_INVALID, via the PoDecisionError
+      // branch below), before anything is awarded or parked in an approval;
+      // draftPurchaseOrder re-checks it under lock. The award payload carries
+      // the checked int from here on, never the raw body value.
+      let awardBody = req.body;
+      if (req.body.existing_po_id) {
+        const mergeTargetId = await assertDraftMergeTarget(db, {
+          poId: req.body.existing_po_id,
+          rfqId: rfq_id,
+          vendorId: req.body.product_info?.finalized_vendor_id ?? vendor_id,
+        });
+        awardBody = { ...req.body, existing_po_id: mergeTargetId };
       }
 
       // ---------------------------------------------------------------------
@@ -11759,6 +12052,15 @@ const rfqController = {
         // return 09 Conflict status code if vendor already exist for same product + variant,
 
         const response = await db.tx(async (t) => {
+          // A product on a PO that is on hold (an approver waiting on an
+          // answer) cannot be re-awarded: the re-draft would cancel that PO
+          // under them. Checked here, inside the transaction, after locking
+          // every pending-approval PO that carries the product, so no hold can
+          // open between the check and the draft. 409 PO_ON_HOLD.
+          if (rfqProductForNego) {
+            await assertProductNotOnHeldPo(t, { rfqProductId: rfqProductForNego.id, lock: true });
+          }
+
           // const userInHierarchy = t.oneOrNone(
           //   `SELECT * FROM tbl_approval_hierarchy
           //   WHERE company_id = $1 AND user_id = $2 AND hierarchy_type = $3 AND is_active = true`,
@@ -11981,7 +12283,7 @@ const rfqController = {
                         quote_id,
                         quote_item_id,
                         finalization_comment: trimmedComment || null,
-                        po_payload: { ...req.body, quote_id: quote_item_id },
+                        po_payload: { ...awardBody, quote_id: quote_item_id },
                         po_user: { id: req.user.id, company_id: req.user.company_id }
                       },
                       txContext: t
@@ -12009,7 +12311,7 @@ const rfqController = {
                       });
                     } else if (approvalResult && approvalResult.autoApproved) {
                       // Auto-approved (no approvers or creator-only) - create PO immediately
-                      const authPayload = await buildAuthoritativePOPayload({...req.body, quote_id: quote_item_id}, t);
+                      const authPayload = await buildAuthoritativePOPayload({...awardBody, quote_id: quote_item_id}, t);
                       result = await draftPO(authPayload, req.user, t);
                       approvalTriggered = true;
                     }
@@ -12030,7 +12332,7 @@ const rfqController = {
 
             // Fallback: if no approval was triggered, create PO directly
             if (!approvalTriggered) {
-              const authPayload = await buildAuthoritativePOPayload({...req.body, quote_id: quote_item_id}, t);
+              const authPayload = await buildAuthoritativePOPayload({...awardBody, quote_id: quote_item_id}, t);
               result = await draftPO(authPayload, req.user, t);
             }
           }
@@ -12221,6 +12523,8 @@ const rfqController = {
         // approvals), batch-initiate every draft PO spawned by this RFQ
         // now that the finalize transaction has committed. Wrapped in
         // try/catch so a failure here never breaks the finalize response.
+        // Post-commit: tell the initiators, only if this finalize CREATED the draft.
+        if (response.result?.created && response.result?.po_id) void notifyDraftCreated(response.result.po_id);
         let auto_initiate_summary = null;
         if (response.result?.should_auto_initiate && response.result?.rfq_id) {
           try {
@@ -12263,6 +12567,11 @@ const rfqController = {
           .end();
       }
     } catch (error) {
+      // A refused award (a product on a held PO) answers with its own status
+      // and code, the same body as every PO hold refusal.
+      if (error instanceof PoDecisionError) {
+        return res.status(error.httpStatus || 409).json({ status: 0, message: error.message, code: error.code });
+      }
       logError(error);
       res
         .status(400)
@@ -17176,17 +17485,53 @@ getClauses: async (req, res) => {
             'Invalid input. Please provide vendor ID , rfq_product_tech_evaluation_id and status'
         });
       }
+      // Only 0 / 1 (numbers or the strings "0" / "1"); null, '', booleans,
+      // arrays and the rest are refused. Normalised HERE because the model
+      // compares `status === 1` to set is_verified.
+      const statusNum = (typeof status === 'string' && /^\s*[01]\s*$/.test(status)) ? Number(status) : status;
+      if (statusNum !== 0 && statusNum !== 1) {
+        return res.status(400).json({ status: 0, message: 'status must be 0 (reject) or 1 (accept).' });
+      }
+
+      // This endpoint writes a verdict straight to the cleared-vendors table,
+      // outside the approval flow. It is only for the buyers of the RFQ, only
+      // while the evaluation is open, and only once per vendor.
+      const gate = await checkTechEvalWritable({
+        userId: user_id,
+        vendorId: Number(vendor_id),
+        techEvalId: Number(rfq_product_tech_evaluation_id)
+      });
+      if (!gate.ok) {
+        return res.status(gate.httpStatus).json({ status: 0, code: gate.code, message: gate.message });
+      }
+
+      // A blocked evaluation with nobody passed (reopened, recoverable or
+      // stuck) moves only through rounds: a direct verdict here would skip the
+      // recompute and make the eligible vendor read as decided while the line
+      // still reads "No vendor passed".
+      const blockedNoPass = await db.one(
+        `SELECT ${techBlockedNoPassSql({ te: 'te' })} AS blocked
+           FROM tbl_rfq_product_tech_evaluation te WHERE te.id = $1`,
+        [Number(rfq_product_tech_evaluation_id)]
+      );
+      if (blockedNoPass.blocked) {
+        return res.status(409).json({
+          status: 0,
+          code: 'TECH_EVAL_USE_ROUND',
+          message: 'Score this vendor and submit the round for approval.'
+        });
+      }
 
       const response = await rfqModel.addtechEvaluationClearedVendors(
         vendor_id,
         rfq_product_tech_evaluation_id,
-        status,
+        statusNum,
         reject_message,
         user_id
       );
 
       await sendTechEvalAccepOrRejectMailToVendor(
-        rfq_id,
+        gate.techEval.rfq_id,
         product,
         vendor_id,
         user_id,
@@ -17194,6 +17539,7 @@ getClauses: async (req, res) => {
 
       res.status(200).json(response).end();
     } catch (error) {
+      if (error instanceof AuthorizationError) return sendScopeError(res, error);
       logError('Error in addVendorResponse API:', error);
       res.status(500).json({
         status: 0,
@@ -17469,6 +17815,10 @@ getClauses: async (req, res) => {
       const { rfq_id, rfq_product_id } = req.body;
       const userId = req.user.id;
 
+      // The caller must be able to read the RFQ they are submitting for — the
+      // acl() gate only says "a buyer", not "a buyer of THIS RFQ".
+      await assertCanReadParentRfq(userId, rfq_id);
+
       // Wrap in transaction for atomicity
       const result = await db.tx(async (t) => {
         // Start approval for the technical evaluation (creates round record)
@@ -17511,9 +17861,18 @@ getClauses: async (req, res) => {
           total_steps: approvalResult.totalSteps,
           auto_approved: approvalResult.autoApproved || false,
           round_id: approvalResult.round_id,
-          round_number: approvalResult.round_number
+          round_number: approvalResult.round_number,
+          reopened_tech_eval_id: approvalResult.reopenedBySubmit ? approvalResult.techEvalId : null
         };
       });
+
+      // The transaction has committed: the reopen is real now.
+      if (result.reopened_tech_eval_id) {
+        logger.info(
+          { techEvalId: result.reopened_tech_eval_id, rfqId: rfq_id, rfqProductId: rfq_product_id, userId },
+          'Tech evaluation was locked with 0 passed but a vendor is waiting to be evaluated; reopened by submit'
+        );
+      }
 
       if (!result.success) {
         return res.status(400).json({
@@ -17522,10 +17881,11 @@ getClauses: async (req, res) => {
         });
       }
 
-      // If auto-approved, trigger post-approval processing (mark vendors, update round, send notifications)
+      // If auto-approved, trigger post-approval processing (mark vendors, update round, send notifications).
+      // Through the one dispatcher, which checks the instance's target first.
       if (result.auto_approved && result.approval_instance_id) {
         try {
-          await handleTechnicalPostApproval(result.approval_instance_id, userId);
+          await dispatchPostApprovalAction(result.approval_instance_id, userId, { status: 'APPROVED' });
         } catch (postApprovalError) {
           logError('Error in TECHNICAL auto-approve post-approval processing', postApprovalError);
         }
@@ -17545,6 +17905,7 @@ getClauses: async (req, res) => {
         }
       });
     } catch (error) {
+      if (error instanceof AuthorizationError) return sendScopeError(res, error);
       logError(error);
 
       // Every refusal this endpoint can raise carries its own status and a
@@ -17993,7 +18354,11 @@ getClauses: async (req, res) => {
 
   updateBuyerMarks: async (req, res) => {
     try {
-      const { clause_id, vendor_id, buyer_marks, buyer_remark } = req.body;
+      const { clause_id, vendor_id, buyer_remark } = req.body;
+      // Joi accepts numeric strings; normalise so the range check sees a number.
+      const buyer_marks = (typeof req.body.buyer_marks === 'string' && req.body.buyer_marks.trim() !== '')
+        ? Number(req.body.buyer_marks)
+        : req.body.buyer_marks;
       const buyer_id = req.user.id;
 
       if (!clause_id || !vendor_id) {
@@ -18001,6 +18366,32 @@ getClauses: async (req, res) => {
           status: 0,
           message: 'Invalid input. Ensure clause_id and vendor_id are provided.'
         });
+      }
+
+      // Who may score what, and when: scope from req.user, lock state from
+      // the database (see techEvalScoringGuard).
+      const gate = await checkTechEvalWritable({
+        userId: buyer_id,
+        vendorId: Number(vendor_id),
+        clauseId: Number(clause_id),
+        // Only a verdict an approved round wrote locks a vendor's marks.
+        verdictLock: 'approved'
+      });
+      if (!gate.ok) {
+        return res.status(gate.httpStatus).json({ status: 0, code: gate.code, message: gate.message });
+      }
+      if (!gate.clause) {
+        return res.status(404).json({ status: 0, code: 'CLAUSE_NOT_FOUND', message: 'Clause not found.' });
+      }
+      if (buyer_marks !== null && buyer_marks !== undefined) {
+        const max = Number(gate.clause.weightage);
+        if (!Number.isInteger(buyer_marks) || buyer_marks < 0 || (Number.isFinite(max) && buyer_marks > max)) {
+          return res.status(400).json({
+            status: 0,
+            code: 'MARKS_OUT_OF_RANGE',
+            message: `Marks must be a whole number between 0 and ${Number.isFinite(max) ? max : 'the clause weightage'}.`
+          });
+        }
       }
 
       // Check clause type - remarks only allowed for sampling
@@ -18025,6 +18416,7 @@ getClauses: async (req, res) => {
 
       res.status(200).json(result).end();
     } catch (error) {
+      if (error instanceof AuthorizationError) return sendScopeError(res, error);
       logError(error);
       res.status(500).json({
         status: 0,
@@ -18205,7 +18597,8 @@ getClauses: async (req, res) => {
           category: 'clarification',
           type: 'clarification_raised',
           title: `Clarification raised on RFQ #${rfq.rfq_no}`,
-          body: `${vendorName?.name || 'A vendor'} asked: "${subject}". Quoting is paused for all vendors until you close it.`,
+          // The subject is usually a question: quoted so it keeps its own "?".
+          body: `${vendorName?.name || 'A vendor'} asked:${quoteInSentence(subject)} Quoting is paused for all vendors until you close it.`,
           data: { rfq_id: rfq.id, clarification_id: clarification.id },
           actionUrl: buyerClarifications(rfq.id) || buyerRfqDetail(rfq.id)
         });
@@ -18840,8 +19233,12 @@ getClauses: async (req, res) => {
         });
       }
 
-      // Verify this is a TECHNICAL approval instance
-      const instance = await getApprovalInstanceById(approval_instance_id);
+      // Verify this is a TECHNICAL approval instance. Tenant first: an
+      // instance of another company answers exactly like a missing one,
+      // before its type or state is said.
+      const instance = (await instanceTenantForCaller(req, approval_instance_id))
+        ? await getApprovalInstanceById(approval_instance_id)
+        : null;
       if (!instance) {
         return res.status(404).json({
           status: 2,
@@ -18876,11 +19273,23 @@ getClauses: async (req, res) => {
           instance_status: result.instance_status,
           step_status: result.step_status,
           next_step: result.next_step,
-          next_step_id: result.next_step_id
+          next_step_id: result.next_step_id,
+          // A replay of a concluded instance: nothing was decided or run, and
+          // the activity trail records nothing for it.
+          ...(result.already_completed ? { already_completed: true } : {})
         }
       });
     } catch (error) {
       logError(error);
+
+      // The engine refused an instance whose target is another company's:
+      // the same answer as an unknown id.
+      if (error instanceof ApprovalInstanceNotFoundError) {
+        return res.status(404).json({
+          status: 2,
+          message: 'Approval instance not found'
+        });
+      }
 
       if (error.message?.includes('not an approver')) {
         return res.status(403).json({
@@ -18945,8 +19354,11 @@ getClauses: async (req, res) => {
         });
       }
 
-      // Verify this is an RFQ or TENDER approval instance
-      const instance = await getApprovalInstanceById(approval_instance_id);
+      // Verify this is an RFQ or TENDER approval instance. Tenant first (see
+      // techEvalApprovalAction): a foreign instance is a missing one.
+      const instance = (await instanceTenantForCaller(req, approval_instance_id))
+        ? await getApprovalInstanceById(approval_instance_id)
+        : null;
       if (!instance) {
         return res.status(404).json({
           status: 2,
@@ -18989,11 +19401,22 @@ getClauses: async (req, res) => {
           instance_status: result.instance_status,
           step_status: result.step_status,
           next_step: result.next_step,
-          next_step_id: result.next_step_id
+          next_step_id: result.next_step_id,
+          // A replay of a concluded instance (see techEvalApprovalAction).
+          ...(result.already_completed ? { already_completed: true } : {})
         }
       });
     } catch (error) {
       logError(error);
+
+      // The engine refused an instance whose target is another company's:
+      // the same answer as an unknown id.
+      if (error instanceof ApprovalInstanceNotFoundError) {
+        return res.status(404).json({
+          status: 2,
+          message: 'Approval instance not found'
+        });
+      }
 
       if (error.message?.includes('not an approver')) {
         return res.status(403).json({

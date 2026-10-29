@@ -1193,7 +1193,17 @@ describe("rfqController.update — restricted edit mode", () => {
   });
 
   it("Case 3 — tech-stuck product → restricted: comment edit rejected, bid_end_date allowed", async () => {
-    const rfq_id = await makeEditableRfq({ status: 1, is_published: 1 });
+    // Tech-stuck is the shared predicate (app/models/techEvalStuck.js): blocked,
+    // nobody passed, nobody left to evaluate AND bidding closed — an open window
+    // is not stuck, because more vendors can still quote. So the window has to
+    // have closed for this shape to be tech-stuck at all.
+    const rfq_id = await makeEditableRfq({
+      status: 1,
+      is_published: 1,
+      bid_end_date: istString(-3600_000),
+      vendor_clarification_date: istString(-2 * 3600_000),
+      tender_publish_date: istString(-3 * 86400_000),
+    });
     const rfq_product_id = await attachOneProduct(rfq_id);
     await db.none(
       `INSERT INTO tbl_rfq_product_tech_evaluation
@@ -1202,11 +1212,12 @@ describe("rfqController.update — restricted edit mode", () => {
       [rfq_id, rfq_product_id]
     );
 
-    // 1) Non-deadline change → 400
+    // 1) Non-deadline change → 400 (sent with a valid new deadline, so it is
+    //    the restricted-edit rule that refuses it, not the 2-hour rule)
     let snap = await fetchSnapshot(rfq_id);
     let m = mockExpress({
       user: { id: IDS.users.a1_proc_buyer },
-      body: { rfq_id, snapshot: { ...snap, comment: "after tech-stuck" } },
+      body: { rfq_id, snapshot: { ...snap, comment: "after tech-stuck", bid_end_date: istString(10 * 86400_000) } },
     });
     await rfqController.update(m.req, m.res);
     expect(m.calls.status).toBe(400);

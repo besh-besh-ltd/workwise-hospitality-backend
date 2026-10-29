@@ -8,6 +8,7 @@ import Config from '../../config/app.config.js';
 import userModel from '../../models/userModel.js';
 import { logError, currentDateTime, titleToSlug } from '../../helper/common.js';
 import { logger } from '../../util/logger.js';
+import { mobileRule } from '../../helper/mobile.js';
 import { S3Client } from '@aws-sdk/client-s3';
 import s3Client from '../../config/s3config.js';
 
@@ -368,15 +369,19 @@ const schemas = {
    * Vendors are onboarded through their own flow.
    */
   create_buyer_company_user: Joi.object().keys({
-    name: Joi.string().trim().required(),
-    email: Joi.string().email({ tlds: { allow: false } }).required(),
-    mobile: Joi.string().trim().required(),
+    // Every string limit below is the tbl_users column size. Past them the
+    // INSERT fails in Postgres and the admin is told only "An internal error
+    // has occurred" — see tests/services/admin.userMobileEdit.test.js, which
+    // checks these against the live column sizes.
+    name: Joi.string().trim().max(255).required(),
+    email: Joi.string().email({ tlds: { allow: false } }).max(255).required(),
+    mobile: mobileRule(Joi, { required: true }),
     countryCode: Joi.string().optional().allow('', null),
     user_type: Joi.number().valid(2, 7).default(2),
     password: Joi.string().optional().allow('', null),
-    designation: Joi.string().optional().allow('', null),
-    employee_code: Joi.string().optional().allow('', null),
-    employee_type: Joi.string().optional().allow('', null),
+    designation: Joi.string().max(99).optional().allow('', null),
+    employee_code: Joi.string().max(99).optional().allow('', null),
+    employee_type: Joi.string().valid('freelance', 'part-time', 'full-time', 'contracted', 'other').optional().allow('', null),
     payroll_company_id: Joi.number().integer().optional().allow(null),
     department_ids: Joi.array().items(Joi.number()).optional(),
     roles: Joi.array().items(
@@ -394,9 +399,10 @@ const schemas = {
   }),
 
   update_profile: Joi.object().keys({
-    email: Joi.string().email().optional(),
-    name: Joi.string().optional(),
-    mobile: Joi.string().optional(),
+    // Limits are the tbl_users column sizes — see create_buyer_company_user.
+    email: Joi.string().email().max(255).optional(),
+    name: Joi.string().max(255).optional(),
+    mobile: mobileRule(Joi).allow('', null),
     status: Joi.number().valid(0, 1).optional(),
     user_id: Joi.number().optional(),
     department_ids: Joi.array().items(Joi.number()).optional(),
@@ -411,8 +417,8 @@ const schemas = {
         permissions: Joi.object().optional()
       })
     ).optional(),
-    employee_type: Joi.string().optional().allow('', null),
-    employee_code: Joi.string().optional().allow('', null),
+    employee_type: Joi.string().valid('freelance', 'part-time', 'full-time', 'contracted', 'other').optional().allow('', null),
+    employee_code: Joi.string().max(99).optional().allow('', null),
     payroll_company_id: Joi.number().integer().optional().allow(null),
     // Set by the frontend after admin clicks "Proceed Anyway" on the approval
     // impact warning modal. Bypasses the pre-flight check in the controller

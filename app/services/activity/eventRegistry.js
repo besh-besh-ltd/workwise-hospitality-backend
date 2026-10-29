@@ -24,6 +24,7 @@ export const CATEGORIES = {
   AWARDING: 'Awarding',
   ORDERS: 'Purchase Orders',
   RECEIPT: 'Goods Receipt',
+  INVENTORY: 'Inventory',
   CONTRACTS: 'Rate Contracts',
   REQUISITIONS: 'Material Requisitions',
   PURCHASE_REQUISITIONS: 'Purchase Requisitions',
@@ -51,6 +52,14 @@ const SCOPE = {
   entity: (type) => ({ via: 'entity', type }),
   params: (companyKey, hotelKey) => ({ via: 'params', companyKey, hotelKey }),
   actor: () => ({ via: 'actor' }),
+  // What the controller validated and handed over on res.locals.activityDetail
+  // — the only source for a fact that no longer exists once the request is
+  // done, like the business unit a user was just removed from.
+  detail: () => ({ via: 'detail' }),
+  // The acting user's own buyer company, as a company-wide event. For things
+  // that belong to the company as a whole, where filing them under whichever
+  // unit the actor happens to be mapped to would be wrong.
+  buyer: () => ({ via: 'actorBuyer' }),
 };
 
 const e = (def) => def;
@@ -61,10 +70,20 @@ const e = (def) => def;
  * that passes its validation (`rejected`, but also `pending` and `cancelled`)
  * is sent to the engine as REJECT. Anything else is refused with a 400, and a
  * refused request must not be written up as a decision either way.
+ *
+ * A rejection takes one of two routes. CANCEL ("not needed any more") cancels
+ * the PO rather than sending it back for re-award, and the trail says so. The
+ * route the server actually took (response `data.route`) wins; without one the
+ * body is read with the server's own default (NOT_REQUIRED means CANCEL).
  */
-const poDecisionVerb = (decision) => {
+const poDecisionVerb = (decision, { route, reasonCategory } = {}) => {
   if (decision === 'approved') return 'approved';
-  if (['rejected', 'pending', 'cancelled'].includes(decision)) return 'rejected';
+  if (['rejected', 'pending', 'cancelled'].includes(decision)) {
+    const taken = route
+      ? String(route).toUpperCase()
+      : String(reasonCategory || '').toUpperCase() === 'NOT_REQUIRED' ? 'CANCEL' : 'COMMERCIAL';
+    return taken === 'CANCEL' ? 'cancelled' : 'rejected';
+  }
   return 'tried to decide on';
 };
 
@@ -256,7 +275,31 @@ export const EVENTS = [
     method: 'POST', path: '/po/approve/:po_id', key: 'po_approval_decided',
     category: CATEGORIES.APPROVALS, severity: 'critical',
     entity: { type: 'PO', id: P('po_id') }, scope: SCOPE.entity('PO'),
-    summary: (c) => `${c.actor} ${poDecisionVerb(c.body?.decision)} purchase order ${c.entityLabel}`,
+    summary: (c) => `${c.actor} ${poDecisionVerb(c.body?.decision, {
+      route: c.response?.data?.route || c.body?.route,
+      reasonCategory: c.body?.reason_category,
+    })} purchase order ${c.entityLabel}`,
+  }),
+  // A PO put on hold to ask someone for information, and how the hold ends.
+  // Answer and withdraw act on a send-back id; the response carries the PO's
+  // id beside the send-back so the event files under the PO.
+  e({
+    method: 'POST', path: '/po/:po_id/send-back', key: 'po_send_back_requested',
+    category: CATEGORIES.APPROVALS, severity: 'notable',
+    entity: { type: 'PO', id: P('po_id') }, scope: SCOPE.entity('PO'),
+    summary: (c) => `${c.actor} put purchase order ${c.entityLabel} on hold to ask for information`,
+  }),
+  e({
+    method: 'POST', path: '/po/send-back/:id/respond', key: 'po_send_back_answered',
+    category: CATEGORIES.APPROVALS, severity: 'notable',
+    entity: { type: 'PO', id: R('data.po_id') }, scope: SCOPE.entity('PO'),
+    summary: (c) => `${c.actor} answered the request for information on purchase order ${c.entityLabel}`,
+  }),
+  e({
+    method: 'POST', path: '/po/send-back/:id/withdraw', key: 'po_send_back_withdrawn',
+    category: CATEGORIES.APPROVALS, severity: 'notable',
+    entity: { type: 'PO', id: R('data.po_id') }, scope: SCOPE.entity('PO'),
+    summary: (c) => `${c.actor} withdrew the request for information on purchase order ${c.entityLabel}`,
   }),
   e({
     method: 'POST', path: '/po/accept/:po_id', key: 'po_accepted',
@@ -271,16 +314,39 @@ export const EVENTS = [
     summary: (c) => `${c.actor} rejected purchase order ${c.entityLabel}`,
   }),
   e({
+    method: 'POST', path: '/po/vendor/:po_id/withdraw-rejection', key: 'po_rejection_withdrawn',
+    category: CATEGORIES.ORDERS, severity: 'critical',
+    entity: { type: 'PO', id: P('po_id') }, scope: SCOPE.entity('PO'),
+    summary: (c) => `${c.actor} withdrew their rejection and accepted purchase order ${c.entityLabel}`,
+  }),
+  e({
+    method: 'POST', path: '/po/:po_id/reinstate', key: 'po_sent_back_to_vendor',
+    category: CATEGORIES.ORDERS, severity: 'critical',
+    entity: { type: 'PO', id: P('po_id') }, scope: SCOPE.entity('PO'),
+    summary: (c) => `${c.actor} sent purchase order ${c.entityLabel} back to the vendor for acceptance`,
+  }),
+  e({
     method: 'POST', path: '/po/markGRN', key: 'po_grn_recorded',
     category: CATEGORIES.RECEIPT, severity: 'critical',
     entity: { type: 'PO', id: B('po_id') }, scope: SCOPE.entity('PO'),
     summary: (c) => `${c.actor} recorded goods receipt against purchase order ${c.entityLabel}`,
   }),
+  // The controller hands over the hotel the invoice bills (its dispatch's, else
+  // the PO's own), so an invoice for a second hotel files under that hotel.
   e({
     method: 'POST', path: '/po/raiseInvoice', key: 'po_invoice_raised',
     category: CATEGORIES.ORDERS, severity: 'notable',
-    entity: { type: 'PO', id: B('po_id') }, scope: SCOPE.entity('PO'),
+    entity: { type: 'PO', id: B('po_id') }, scope: [SCOPE.detail(), SCOPE.entity('PO')],
     summary: (c) => `${c.actor} raised an invoice against purchase order ${c.entityLabel}`,
+  }),
+  // Site rep link issued: a receiving link minted for, and emailed to, someone
+  // at the hotel. The controller hands over the hotel the link is for, so the
+  // event files under that unit, call-off POs included.
+  e({
+    method: 'POST', path: '/po/addSiteRepresentative', key: 'po_site_rep_link_issued',
+    category: CATEGORIES.RECEIPT, severity: 'notable',
+    entity: { type: 'PO', id: B('po_id') }, scope: [SCOPE.detail(), SCOPE.entity('PO')],
+    summary: (c) => `${c.actor} issued a site representative link for purchase order${c.entityLabel ? ` ${c.entityLabel}` : ''}`,
   }),
 
   // ── Organisation ────────────────────────────────────────────────────────
@@ -327,11 +393,24 @@ export const EVENTS = [
     summary: (c) =>
       `${c.actor} gave ${(c.body?.user_ids || []).length || 'some'} user(s) access to ${c.entityLabel || 'the company'}`,
   }),
+  // The unit the user was removed from no longer has a mapping row to look up
+  // once the request is done, and the user's remaining mappings would name the
+  // wrong unit — so the controller captures both names before deleting and
+  // hands them over. It does so only when the removal actually happens: the
+  // same route answers 200 with an approval-impact warning and changes
+  // nothing, and that must not read as a removal.
   e({
     method: 'DELETE', path: '/hospitality/user/:user_id/mapping', key: 'user_mapping_removed',
     category: CATEGORIES.ACCESS, severity: 'critical',
-    entity: { type: 'USER', id: P('user_id') }, scope: SCOPE.actor(),
-    summary: (c) => `${c.actor} removed a user's access to a business unit`,
+    entity: { type: 'USER', id: P('user_id') }, scope: SCOPE.detail(), requireDetail: true,
+    summary: (c) => {
+      const who = c.detail?.user_label || "a user";
+      const unit = c.detail?.unit_label || 'a business unit';
+      const roles = c.detail?.removed_role_scopes
+        ? ` (and ${c.detail.removed_role_scopes} role assignment${c.detail.removed_role_scopes === 1 ? '' : 's'} there)`
+        : '';
+      return `${c.actor} removed ${who} from ${unit}${roles}`;
+    },
   }),
   e({
     method: 'POST', path: '/hospitality/company/:company_id/hotels/:hotel_id/send-credentials',
@@ -340,6 +419,43 @@ export const EVENTS = [
     entity: { type: 'HOTEL', id: P('hotel_id') },
     scope: [SCOPE.entity('HOTEL'), SCOPE.params('company_id', 'hotel_id')],
     summary: (c) => `${c.actor} sent login credentials to users at ${c.entityLabel || 'a business unit'}`,
+  }),
+
+  // The buyer company's own profile (name, GSTIN, head-office address). Not
+  // any one hospitality company's, so it is a company-wide event, labelled
+  // with the company's name. Vendors use the same route for their own profile;
+  // a vendor's company has no administrator to show it to, so those resolve
+  // to nothing and are counted as unscoped rather than written.
+  e({
+    method: 'PUT', path: '/users/update-company-detail', key: 'company_details_updated',
+    category: CATEGORIES.ORGANISATION, severity: 'notable',
+    scope: SCOPE.buyer(), labelFromBuyer: true,
+    summary: (c) => `${c.actor} updated the company details for ${c.entityLabel || 'the company'}`,
+  }),
+  e({
+    method: 'POST', path: '/hospitality/company/:company_id/map-projects', key: 'projects_mapped_to_unit',
+    category: CATEGORIES.ORGANISATION, severity: 'notable',
+    entity: { type: 'COMPANY', id: P('company_id') },
+    scope: [SCOPE.entity('COMPANY'), SCOPE.params('company_id')],
+    summary: (c) => {
+      const n = (c.body?.project_ids || []).length;
+      const what = n ? `${n} project${n === 1 ? '' : 's'}` : 'projects';
+      const where = c.body?.hotel_id ? `a business unit of ${c.entityLabel || 'the company'}` : (c.entityLabel || 'the company');
+      return `${c.actor} linked ${what} to ${where}`;
+    },
+  }),
+  e({
+    method: 'DELETE', path: '/hospitality/project/:project_id/mapping', key: 'project_mapping_removed',
+    category: CATEGORIES.ORGANISATION, severity: 'notable',
+    entity: { type: 'PROJECT', id: P('project_id') }, scope: SCOPE.entity('PROJECT'),
+    // Placed by the controller's detail, not the body: the body's company is
+    // checked against the caller but its unit is not, so a unit id belonging
+    // to another tenant would have been filed (and named, through the
+    // business-unit filter) in this company's trail. The controller hands over
+    // only a unit where a mapping was actually removed.
+    requireDetail: true,
+    summary: (c) =>
+      `${c.actor} unlinked the project ${c.entityLabel ? `"${c.entityLabel}"` : `#${c.entityId}`} from a business unit`,
   }),
 
   // ── People and access ───────────────────────────────────────────────────
@@ -365,35 +481,50 @@ export const EVENTS = [
     // meant an administrator with no hospitality mapping of their own — the
     // platform account that moved RFQ 536263's step-2 approver on 15 Sep —
     // resolved to no company, and every one of their edits was dropped.
-    entity: { type: 'USER', id: B('user_id') }, scope: SCOPE.entity('USER'),
+    // With no user_id the controller edits the caller's own account, so the
+    // subject is the caller (`orActor`) — otherwise a self-edit was filed as
+    // "changed a user's approval roles", naming nobody.
+    entity: { type: 'USER', id: { ...B('user_id'), orActor: true } }, scope: SCOPE.entity('USER'),
     // This endpoint multiplexes profile edits, role grants, department moves
     // and activation. When the save changed approval roles the controller
     // hands over the exact diff, and the sentence says who gained and lost what.
     summary: (c) => {
-      const whose = c.entityLabel ? `${c.entityLabel}'s` : 'a user\'s';
+      const self = c.entityId != null && c.actorUserId != null && Number(c.entityId) === Number(c.actorUserId);
+      const whose = self ? 'their own' : c.entityLabel ? `${c.entityLabel}'s` : 'a user\'s';
       const changes = roleScopeChangePhrase(c.detail?.role_scopes);
-      return changes
-        ? `${c.actor} changed ${whose} approval roles — ${changes}`
-        : `${c.actor} updated ${c.entityLabel ? `${c.entityLabel}'s account` : 'a user account'}`;
+      if (changes) return `${c.actor} changed ${whose} approval roles — ${changes}`;
+      if (self) return `${c.actor} updated their own account`;
+      return `${c.actor} updated ${c.entityLabel ? `${c.entityLabel}'s account` : 'a user account'}`;
     },
   }),
   e({
     method: 'POST', path: '/users/:user_id/send-password-reset', key: 'password_reset_sent',
     category: CATEGORIES.PEOPLE, severity: 'critical',
-    entity: { type: 'USER', id: P('user_id') }, scope: SCOPE.actor(),
-    summary: (c) => `${c.actor} sent a password reset to a user`,
+    entity: { type: 'USER', id: P('user_id') }, scope: SCOPE.entity('USER'),
+    summary: (c) => `${c.actor} sent a password reset to ${c.entityLabel || 'a user'}`,
+  }),
+  // Roles belong to the buyer company as a whole — they are company-wide
+  // events. The response carries the new role's id as data.role_id, not
+  // data.id; extracting the wrong path left every creation with no entity.
+  // A person changing their own password. Self-service, but the first thing a
+  // security review asks about an account suspected of misuse.
+  e({
+    method: 'POST', path: '/users/change-password', key: 'password_changed',
+    category: CATEGORIES.PEOPLE, severity: 'notable',
+    summary: (c) => `${c.actor} changed their password`,
   }),
   e({
     method: 'POST', path: '/rbac/roles', key: 'role_created',
     category: CATEGORIES.ACCESS, severity: 'critical',
-    entity: { type: 'ROLE', id: R() }, scope: SCOPE.actor(),
-    summary: (c) => `${c.actor} created the role "${c.body?.title || 'a new role'}"`,
+    entity: { type: 'ROLE', id: R('data.role_id') }, scope: SCOPE.entity('ROLE'),
+    summary: (c) => `${c.actor} created the role "${c.entityLabel || c.body?.title || 'a new role'}"`,
   }),
   e({
     method: 'PUT', path: '/rbac/roles/:roleId', key: 'role_updated',
     category: CATEGORIES.ACCESS, severity: 'critical',
-    entity: { type: 'ROLE', id: P('roleId') }, scope: SCOPE.actor(),
-    summary: (c) => `${c.actor} changed what the role "${c.body?.title || `#${c.entityId}`}" can do`,
+    entity: { type: 'ROLE', id: P('roleId') }, scope: SCOPE.entity('ROLE'),
+    summary: (c) =>
+      `${c.actor} changed what the role "${c.entityLabel || c.body?.title || `#${c.entityId}`}" can do`,
   }),
 
   // ── Purchase requisitions ───────────────────────────────────────────────
@@ -557,17 +688,63 @@ export const EVENTS = [
     entity: { type: 'APPROVAL_POLICY', id: P('id') }, scope: SCOPE.entity('APPROVAL_POLICY'),
     summary: (c) => `${c.actor} deleted an approval policy`,
   }),
+  // Approval workflows are buyer-company-wide (tbl_approval_processes.company_id
+  // is the tbl_company id). Deletion is soft, so a deleted one is still named.
   e({
     method: 'POST', path: '/general/hospitality/approval/processes', key: 'approval_process_created',
     category: CATEGORIES.APPROVAL_CONFIG, severity: 'notable',
-    entity: { type: 'APPROVAL_PROCESS', id: R() }, scope: SCOPE.actor(),
-    summary: (c) => `${c.actor} created the approval workflow "${c.body?.name || 'a new workflow'}"`,
+    entity: { type: 'APPROVAL_PROCESS', id: R() }, scope: SCOPE.entity('APPROVAL_PROCESS'),
+    summary: (c) =>
+      `${c.actor} created the approval workflow "${c.entityLabel || c.body?.name || 'a new workflow'}"`,
+  }),
+  e({
+    method: 'PUT', path: '/general/hospitality/approval/processes/:id', key: 'approval_process_updated',
+    category: CATEGORIES.APPROVAL_CONFIG, severity: 'notable',
+    entity: { type: 'APPROVAL_PROCESS', id: P('id') }, scope: SCOPE.entity('APPROVAL_PROCESS'),
+    summary: (c) => {
+      const name = c.entityLabel || 'an approval workflow';
+      if (c.body?.is_active === false) return `${c.actor} switched off the approval workflow "${name}"`;
+      if (c.body?.is_active === true && Object.keys(c.body).length === 1) {
+        return `${c.actor} switched on the approval workflow "${name}"`;
+      }
+      return `${c.actor} edited the approval workflow "${name}"`;
+    },
   }),
   e({
     method: 'DELETE', path: '/general/hospitality/approval/processes/:id', key: 'approval_process_deleted',
     category: CATEGORIES.APPROVAL_CONFIG, severity: 'critical',
-    entity: { type: 'APPROVAL_PROCESS', id: P('id') }, scope: SCOPE.actor(),
-    summary: (c) => `${c.actor} deleted an approval workflow`,
+    entity: { type: 'APPROVAL_PROCESS', id: P('id') }, scope: SCOPE.entity('APPROVAL_PROCESS'),
+    summary: (c) => `${c.actor} deactivated the approval workflow "${c.entityLabel || `#${c.entityId}`}"`,
+  }),
+
+  // The legacy approval hierarchy (pre-policy engine). Its tables are empty on
+  // production (checked 2026-10-12) and the policy engine replaced it, but the
+  // routes are still mounted, so any use of them is recorded rather than
+  // silent. Company-wide: a hierarchy belongs to the buyer company.
+  e({
+    method: 'POST', path: '/general/hierarchy', key: 'approval_hierarchy_created',
+    category: CATEGORIES.APPROVAL_CONFIG, severity: 'critical', scope: SCOPE.buyer(),
+    summary: (c) => `${c.actor} created a legacy approval hierarchy${c.body?.type ? ` (${c.body.type})` : ''}`,
+  }),
+  e({
+    method: 'PUT', path: '/general/hierarchy', key: 'approval_hierarchy_updated',
+    category: CATEGORIES.APPROVAL_CONFIG, severity: 'critical', scope: SCOPE.buyer(),
+    summary: (c) => `${c.actor} changed a legacy approval hierarchy${c.body?.type ? ` (${c.body.type})` : ''}`,
+  }),
+  e({
+    method: 'DELETE', path: '/general/hierarchy/:id', key: 'approval_hierarchy_deleted',
+    category: CATEGORIES.APPROVAL_CONFIG, severity: 'critical', scope: SCOPE.buyer(),
+    summary: (c) => `${c.actor} deleted legacy approval hierarchy #${c.params?.id}`,
+  }),
+  e({
+    method: 'POST', path: '/general/mapHierarchyToProject', key: 'approval_hierarchy_mapped',
+    category: CATEGORIES.APPROVAL_CONFIG, severity: 'notable', scope: SCOPE.buyer(),
+    summary: (c) => `${c.actor} attached a legacy approval hierarchy to project #${c.body?.project_id ?? '?'}`,
+  }),
+  e({
+    method: 'POST', path: '/general/setDefaultHierarchy', key: 'approval_hierarchy_default_set',
+    category: CATEGORIES.APPROVAL_CONFIG, severity: 'notable', scope: SCOPE.buyer(),
+    summary: (c) => `${c.actor} made a legacy approval hierarchy the company default`,
   }),
 
   // ── Approval decisions (the generic engine) ─────────────────────────────
@@ -644,16 +821,17 @@ export const EVENTS = [
     method: 'POST', path: '/general/hospitality/approval/delegations',
     key: 'approval_delegation_created',
     category: CATEGORIES.APPROVALS, severity: 'notable',
-    entity: { type: 'APPROVAL_DELEGATION', id: R() }, scope: SCOPE.actor(),
+    entity: { type: 'APPROVAL_DELEGATION', id: R() }, scope: SCOPE.entity('APPROVAL_DELEGATION'),
     summary: (c) =>
-      `${c.actor} arranged for someone to cover approvals until ${onDate(c.body?.ends_at)}`,
+      `${c.actor} arranged for ${c.entityLabel || 'someone to cover approvals'} until ${onDate(c.body?.ends_at)}`,
   }),
   e({
     method: 'DELETE', path: '/general/hospitality/approval/delegations/:id',
     key: 'approval_delegation_revoked',
     category: CATEGORIES.APPROVALS, severity: 'notable',
-    entity: { type: 'APPROVAL_DELEGATION', id: P('id') }, scope: SCOPE.actor(),
-    summary: (c) => `${c.actor} ended an approval cover arrangement early`,
+    entity: { type: 'APPROVAL_DELEGATION', id: P('id') }, scope: SCOPE.entity('APPROVAL_DELEGATION'),
+    summary: (c) =>
+      `${c.actor} ended ${c.entityLabel ? `the arrangement for ${c.entityLabel}` : 'an approval cover arrangement'} early`,
   }),
 
   // Changing who authorises spend on a live item, with a mandatory reason.
@@ -669,6 +847,40 @@ export const EVENTS = [
       `${c.actor} moved an approval on ${c.entityLabel || 'an item'} to a different approver — ${c.body?.reason || 'no reason given'}`,
   }),
 
+  // ── Billing ─────────────────────────────────────────────────────────────
+  e({
+    method: 'POST', path: '/hospitality/company/:company_id/hotels/:hotel_id/send-payment-link',
+    key: 'payment_link_sent',
+    category: CATEGORIES.BILLING, severity: 'notable',
+    entity: { type: 'HOTEL', id: P('hotel_id') },
+    scope: [SCOPE.entity('HOTEL'), SCOPE.params('company_id', 'hotel_id')],
+    summary: (c) => `${c.actor} sent a subscription payment link for ${c.entityLabel || 'a business unit'}`,
+  }),
+  e({
+    method: 'POST', path: '/hospitality/company/send-batch-payment-links', key: 'payment_links_sent',
+    category: CATEGORIES.BILLING, severity: 'notable',
+    entity: { type: 'COMPANY', id: B('company_id') },
+    // Validated against the caller's buyer company before any link is sent.
+    scope: SCOPE.entity('COMPANY'),
+    summary: (c) => {
+      const n = (c.body?.hotel_ids || []).length;
+      return `${c.actor} sent subscription payment links for ${n || 'several'} business unit${n === 1 ? '' : 's'} of ${c.entityLabel || 'the company'}`;
+    },
+  }),
+
+  // ── Vendors ─────────────────────────────────────────────────────────────
+  e({
+    method: 'POST', path: '/users/buyer-private-vendor', key: 'private_vendor_added',
+    category: CATEGORIES.VENDORS, severity: 'notable',
+    summary: (c) =>
+      `${c.actor} added ${c.body?.vendorName || 'a vendor'} to the company's ${Number(c.body?.is_private) === 1 ? 'private' : 'approved'} vendor list`,
+  }),
+  e({
+    method: 'POST', path: '/users/buyer-excel-add-vendor', key: 'vendors_uploaded',
+    category: CATEGORIES.VENDORS, severity: 'notable',
+    summary: (c) => `${c.actor} added vendors to the company's vendor list from a spreadsheet`,
+  }),
+
   // ── Workwise's own staff, in the internal console ───────────────────────
   //
   // The only entries here that are GETs. For a client's own people the trail
@@ -676,9 +888,11 @@ export const EVENTS = [
   // account, looking is the thing worth recording, because "who at Workwise
   // can see our data" is the first question a client's security review asks.
   //
-  // Unnamed internal routes are still recorded — the middleware files anything
-  // by Workwise staff under this category — so this list makes the sentences
-  // read properly rather than deciding what is captured.
+  // A staff event is placed only by what it touched — never by the staff
+  // account's own company — so an internal route that should reach a
+  // customer's trail needs an entry here naming its entity. An unnamed one
+  // can only be placed by a controller's validated detail, and otherwise lands
+  // nowhere rather than in the wrong client's feed.
   //
   // Routes that name no single customer (a list of every buyer, the companies
   // list) resolve to no company and so appear in nobody's feed. That is a
@@ -753,6 +967,262 @@ export const EVENTS = [
     summary: (c) =>
       `Workwise staff (${c.actor}) marked their work on RFQ ${c.entityLabel || c.entityId} as ${c.body?.status || 'updated'}`,
   }),
+  // ── Inventory & goods receipt (scaffolded in A4; one entry per mutating route) ──
+  // Scope comes from res.locals.activityDetail (set by the controller), then the
+  // actor: ENTITY_SCOPE_SQL cannot resolve call-off POs or inventory documents.
+  e({
+    method: 'PUT', path: '/inventory/po/:poId/deliveries', key: 'inventory_delivery_plan_saved',
+    category: CATEGORIES.RECEIPT, severity: 'notable',
+    entity: { type: 'PO', id: P('poId') }, scope: SCOPE.detail(),
+    summary: (c) => `${c.actor} saved the delivery plan for purchase order${c.entityLabel ? ` ${c.entityLabel}` : ''}`,
+  }),
+  e({
+    method: 'PATCH', path: '/inventory/po/:poId/deliveries/:deliveryId', key: 'inventory_delivery_date_changed',
+    category: CATEGORIES.RECEIPT, severity: 'routine',
+    entity: { type: 'PO', id: P('poId') }, scope: SCOPE.detail(),
+    summary: (c) => `${c.actor} changed a delivery date on purchase order${c.entityLabel ? ` ${c.entityLabel}` : ''}`,
+  }),
+  e({
+    method: 'POST', path: '/inventory/po/:poId/short-close', key: 'inventory_po_short_closed',
+    category: CATEGORIES.RECEIPT, severity: 'critical',
+    entity: { type: 'PO', id: P('poId') }, scope: SCOPE.detail(),
+    summary: (c) => `${c.actor} short-closed the undelivered quantity on purchase order${c.entityLabel ? ` ${c.entityLabel}` : ''}`,
+  }),
+  e({
+    method: 'POST', path: '/inventory/po/:poId/short-close/reopen', key: 'inventory_po_short_close_reopened',
+    category: CATEGORIES.RECEIPT, severity: 'critical',
+    entity: { type: 'PO', id: P('poId') }, scope: SCOPE.detail(),
+    summary: (c) => `${c.actor} reopened a short-closed delivery on purchase order${c.entityLabel ? ` ${c.entityLabel}` : ''}`,
+  }),
+  e({
+    method: 'POST', path: '/inventory/po/:poId/site-rep/revoke', key: 'inventory_site_rep_revoked',
+    category: CATEGORIES.RECEIPT, severity: 'notable',
+    entity: { type: 'PO', id: P('poId') }, scope: SCOPE.detail(),
+    summary: (c) => `${c.actor} revoked the site representative link for purchase order${c.entityLabel ? ` ${c.entityLabel}` : ''}`,
+  }),
+  e({
+    method: 'POST', path: '/inventory/grn', key: 'inventory_grn_created',
+    category: CATEGORIES.RECEIPT, severity: 'notable',
+    entity: { type: 'GRN', id: R() }, scope: SCOPE.detail(), requireDetail: true,
+    // post:true creates and posts in one request: logged as the posting. A
+    // replayed clientEventId changes nothing: no detail, so no second row.
+    summary: (c) => `${c.actor} ${c.detail?.posted ? 'posted' : 'started a'} goods receipt note${c.entityLabel ? ` ${c.entityLabel}` : ''}`,
+  }),
+  e({
+    method: 'PUT', path: '/inventory/grn/:id', key: 'inventory_grn_updated',
+    category: CATEGORIES.RECEIPT, severity: 'routine',
+    entity: { type: 'GRN', id: P('id') }, scope: SCOPE.detail(),
+    summary: (c) => `${c.actor} ${c.detail?.posted ? 'posted' : 'edited a draft'} goods receipt note${c.entityLabel ? ` ${c.entityLabel}` : ''}`,
+  }),
+  e({
+    method: 'POST', path: '/inventory/grn/:id/post', key: 'inventory_grn_posted',
+    category: CATEGORIES.RECEIPT, severity: 'critical',
+    entity: { type: 'GRN', id: P('id') }, scope: SCOPE.detail(), requireDetail: true, // none on a replay
+    summary: (c) => `${c.actor} posted goods receipt note${c.entityLabel ? ` ${c.entityLabel}` : ''}`,
+  }),
+  e({
+    method: 'DELETE', path: '/inventory/grn/:id', key: 'inventory_grn_discarded',
+    category: CATEGORIES.RECEIPT, severity: 'routine',
+    entity: { type: 'GRN', id: P('id') }, scope: SCOPE.detail(),
+    summary: (c) => `${c.actor} discarded a draft goods receipt note${c.entityLabel ? ` ${c.entityLabel}` : ''}`,
+  }),
+  e({
+    method: 'POST', path: '/inventory/grn/:id/reverse', key: 'inventory_grn_reversed',
+    category: CATEGORIES.RECEIPT, severity: 'critical',
+    entity: { type: 'GRN', id: P('id') }, scope: SCOPE.detail(),
+    summary: (c) => `${c.actor} reversed goods receipt note${c.entityLabel ? ` ${c.entityLabel}` : ''}`,
+  }),
+  e({
+    method: 'POST', path: '/inventory/grn/:id/attachments', key: 'inventory_grn_attachment_added',
+    category: CATEGORIES.RECEIPT, severity: 'routine',
+    entity: { type: 'GRN', id: P('id') }, scope: SCOPE.detail(),
+    summary: (c) => `${c.actor} attached a document to goods receipt note${c.entityLabel ? ` ${c.entityLabel}` : ''}`,
+  }),
+  e({
+    method: 'DELETE', path: '/inventory/grn/:id/attachments/:attId', key: 'inventory_grn_attachment_removed',
+    category: CATEGORIES.RECEIPT, severity: 'routine',
+    entity: { type: 'GRN', id: P('id') }, scope: SCOPE.detail(),
+    summary: (c) => `${c.actor} removed an attachment from goods receipt note${c.entityLabel ? ` ${c.entityLabel}` : ''}`,
+  }),
+  e({
+    method: 'POST', path: '/inventory/rtv', key: 'inventory_rtv_created',
+    category: CATEGORIES.RECEIPT, severity: 'notable',
+    entity: { type: 'RTV', id: R() }, scope: SCOPE.detail(),
+    summary: (c) => `${c.actor} created a return to vendor${c.entityLabel ? ` ${c.entityLabel}` : ''}`,
+  }),
+  e({
+    method: 'POST', path: '/inventory/rtv/:id/dispatch', key: 'inventory_rtv_dispatched',
+    category: CATEGORIES.RECEIPT, severity: 'critical',
+    entity: { type: 'RTV', id: P('id') }, scope: SCOPE.detail(),
+    summary: (c) => `${c.actor} dispatched return to vendor${c.entityLabel ? ` ${c.entityLabel}` : ''}`,
+  }),
+  e({
+    method: 'POST', path: '/inventory/rtv/:id/close', key: 'inventory_rtv_closed',
+    category: CATEGORIES.RECEIPT, severity: 'notable',
+    entity: { type: 'RTV', id: P('id') }, scope: SCOPE.detail(),
+    summary: (c) => `${c.actor} closed return to vendor${c.entityLabel ? ` ${c.entityLabel}` : ''}`,
+  }),
+  e({
+    method: 'POST', path: '/inventory/rtv/:id/cancel', key: 'inventory_rtv_cancelled',
+    category: CATEGORIES.RECEIPT, severity: 'notable',
+    entity: { type: 'RTV', id: P('id') }, scope: SCOPE.detail(),
+    summary: (c) => `${c.actor} cancelled return to vendor${c.entityLabel ? ` ${c.entityLabel}` : ''}`,
+  }),
+  e({
+    method: 'POST', path: '/inventory/vendor/po/:poId/dispatches', key: 'inventory_dispatch_created',
+    category: CATEGORIES.RECEIPT, severity: 'notable',
+    entity: { type: 'PO', id: P('poId') }, scope: SCOPE.detail(),
+    summary: (c) => `${c.actor} dispatched goods against purchase order${c.entityLabel ? ` ${c.entityLabel}` : ''}`,
+  }),
+  e({
+    method: 'POST', path: '/inventory/vendor/po/:poId/dispatches/:id/cancel', key: 'inventory_dispatch_cancelled',
+    category: CATEGORIES.RECEIPT, severity: 'notable',
+    entity: { type: 'PO', id: P('poId') }, scope: SCOPE.detail(),
+    summary: (c) => `${c.actor} cancelled a dispatch on purchase order${c.entityLabel ? ` ${c.entityLabel}` : ''}`,
+  }),
+  e({
+    method: 'POST', path: '/inventory/token/grn', key: 'inventory_token_grn_created',
+    category: CATEGORIES.RECEIPT, severity: 'notable',
+    entity: { type: 'GRN', id: R() }, scope: SCOPE.detail(), requireDetail: true, // none on a replay
+    summary: (c) => `${c.actor} recorded a goods receipt through a site link${c.entityLabel ? ` ${c.entityLabel}` : ''}`,
+  }),
+  e({
+    method: 'POST', path: '/inventory/token/grn/:id/attachments', key: 'inventory_token_grn_attachment_added',
+    category: CATEGORIES.RECEIPT, severity: 'routine',
+    entity: { type: 'GRN', id: P('id') }, scope: SCOPE.detail(),
+    summary: (c) => `${c.actor} attached a document to a goods receipt through a site link${c.entityLabel ? ` ${c.entityLabel}` : ''}`,
+  }),
+  e({
+    method: 'POST', path: '/inventory/items', key: 'inventory_item_created',
+    category: CATEGORIES.INVENTORY, severity: 'notable',
+    entity: { type: 'INV_ITEM', id: R() }, scope: SCOPE.detail(),
+    summary: (c) => `${c.actor} created a stock item${c.entityLabel ? ` ${c.entityLabel}` : ''}`,
+  }),
+  e({
+    method: 'PUT', path: '/inventory/items/:id', key: 'inventory_item_updated',
+    category: CATEGORIES.INVENTORY, severity: 'routine',
+    entity: { type: 'INV_ITEM', id: P('id') }, scope: SCOPE.detail(),
+    summary: (c) => `${c.actor} edited a stock item${c.entityLabel ? ` ${c.entityLabel}` : ''}`,
+  }),
+  e({
+    method: 'POST', path: '/inventory/items/:id/variants', key: 'inventory_item_variant_mapped',
+    category: CATEGORIES.INVENTORY, severity: 'routine',
+    entity: { type: 'INV_ITEM', id: P('id') }, scope: SCOPE.detail(),
+    summary: (c) => `${c.actor} mapped a product variant to a stock item${c.entityLabel ? ` ${c.entityLabel}` : ''}`,
+  }),
+  e({
+    method: 'PUT', path: '/inventory/items/:id/uoms', key: 'inventory_item_uoms_saved',
+    category: CATEGORIES.INVENTORY, severity: 'routine',
+    entity: { type: 'INV_ITEM', id: P('id') }, scope: SCOPE.detail(),
+    summary: (c) => `${c.actor} saved unit conversions for a stock item${c.entityLabel ? ` ${c.entityLabel}` : ''}`,
+  }),
+  e({
+    method: 'POST', path: '/inventory/items/:id/barcodes', key: 'inventory_item_barcode_added',
+    category: CATEGORIES.INVENTORY, severity: 'routine',
+    entity: { type: 'INV_ITEM', id: P('id') }, scope: SCOPE.detail(),
+    summary: (c) => `${c.actor} added a barcode to a stock item${c.entityLabel ? ` ${c.entityLabel}` : ''}`,
+  }),
+  e({
+    method: 'DELETE', path: '/inventory/items/:id/barcodes/:barcodeId', key: 'inventory_item_barcode_removed',
+    category: CATEGORIES.INVENTORY, severity: 'routine',
+    entity: { type: 'INV_ITEM', id: P('id') }, scope: SCOPE.detail(),
+    summary: (c) => `${c.actor} removed a barcode from a stock item${c.entityLabel ? ` ${c.entityLabel}` : ''}`,
+  }),
+  e({
+    method: 'PUT', path: '/inventory/hotel-items/:hotelId/:invItemId', key: 'inventory_hotel_item_saved',
+    category: CATEGORIES.INVENTORY, severity: 'routine',
+    entity: { type: 'INV_ITEM', id: P('invItemId') }, scope: SCOPE.detail(),
+    summary: (c) => `${c.actor} set stock levels for an item${c.entityLabel ? ` ${c.entityLabel}` : ''}`,
+  }),
+  e({
+    method: 'PUT', path: '/inventory/settings/company', key: 'inventory_company_settings_saved',
+    category: CATEGORIES.INVENTORY, severity: 'critical',
+    entity: { type: 'COMPANY' }, scope: SCOPE.detail(),
+    summary: (c) => `${c.actor} changed company inventory settings${c.entityLabel ? ` ${c.entityLabel}` : ''}`,
+  }),
+  e({
+    method: 'PUT', path: '/inventory/settings/hotel/:hotelId', key: 'inventory_hotel_settings_saved',
+    category: CATEGORIES.INVENTORY, severity: 'notable',
+    entity: { type: 'HOTEL', id: P('hotelId') }, scope: SCOPE.detail(),
+    summary: (c) => `${c.actor} changed hotel inventory settings${c.entityLabel ? ` ${c.entityLabel}` : ''}`,
+  }),
+  e({
+    method: 'PUT', path: '/inventory/category-defaults', key: 'inventory_category_defaults_saved',
+    category: CATEGORIES.INVENTORY, severity: 'notable',
+    entity: { type: 'COMPANY' }, scope: SCOPE.detail(),
+    summary: (c) => `${c.actor} changed inventory category defaults${c.entityLabel ? ` ${c.entityLabel}` : ''}`,
+  }),
+  e({
+    method: 'POST', path: '/inventory/opening/:hotelId/post', key: 'inventory_opening_stock_posted',
+    category: CATEGORIES.INVENTORY, severity: 'critical',
+    entity: { type: 'HOTEL', id: P('hotelId') }, scope: SCOPE.detail(),
+    summary: (c) => `${c.actor} posted opening stock${c.entityLabel ? ` ${c.entityLabel}` : ''}`,
+  }),
+  e({
+    method: 'POST', path: '/inventory/out', key: 'inventory_stock_marked_out',
+    category: CATEGORIES.INVENTORY, severity: 'notable',
+    entity: { type: 'INV_OUT', id: R() }, scope: SCOPE.detail(),
+    // One route posts both directions; a RETURN puts stock back (E1 cf 15).
+    summary: (c) => {
+      const docType = c.detail?.metadata?.docType ?? c.body?.docType;
+      return `${c.actor} ${docType === 'RETURN' ? 'returned stock' : 'marked stock out'}${c.entityLabel ? ` ${c.entityLabel}` : ''}`;
+    },
+  }),
+  e({
+    method: 'POST', path: '/inventory/adjustments', key: 'inventory_adjustment_created',
+    category: CATEGORIES.INVENTORY, severity: 'notable',
+    entity: { type: 'INV_ADJUSTMENT', id: R() }, scope: SCOPE.detail(),
+    summary: (c) => `${c.actor} recorded a stock adjustment${c.entityLabel ? ` ${c.entityLabel}` : ''}`,
+  }),
+  e({
+    method: 'POST', path: '/inventory/adjustments/:id/approve', key: 'inventory_adjustment_approved',
+    category: CATEGORIES.INVENTORY, severity: 'critical',
+    entity: { type: 'INV_ADJUSTMENT', id: P('id') }, scope: SCOPE.detail(),
+    summary: (c) => `${c.actor} approved a stock adjustment${c.entityLabel ? ` ${c.entityLabel}` : ''}`,
+  }),
+  e({
+    method: 'POST', path: '/inventory/adjustments/:id/reject', key: 'inventory_adjustment_rejected',
+    category: CATEGORIES.INVENTORY, severity: 'critical',
+    entity: { type: 'INV_ADJUSTMENT', id: P('id') }, scope: SCOPE.detail(),
+    summary: (c) => `${c.actor} rejected a stock adjustment${c.entityLabel ? ` ${c.entityLabel}` : ''}`,
+  }),
+  e({
+    method: 'POST', path: '/inventory/counts', key: 'inventory_count_started',
+    category: CATEGORIES.INVENTORY, severity: 'notable',
+    entity: { type: 'INV_COUNT', id: R() }, scope: SCOPE.detail(),
+    summary: (c) => `${c.actor} started a stock count${c.entityLabel ? ` ${c.entityLabel}` : ''}`,
+  }),
+  e({
+    method: 'PUT', path: '/inventory/counts/:id/lines', key: 'inventory_count_lines_saved',
+    category: CATEGORIES.INVENTORY, severity: 'routine',
+    entity: { type: 'INV_COUNT', id: P('id') }, scope: SCOPE.detail(),
+    summary: (c) => `${c.actor} saved counted quantities${c.entityLabel ? ` ${c.entityLabel}` : ''}`,
+  }),
+  e({
+    method: 'POST', path: '/inventory/counts/:id/submit', key: 'inventory_count_submitted',
+    category: CATEGORIES.INVENTORY, severity: 'notable',
+    entity: { type: 'INV_COUNT', id: P('id') }, scope: SCOPE.detail(),
+    summary: (c) => `${c.actor} submitted a stock count${c.entityLabel ? ` ${c.entityLabel}` : ''}`,
+  }),
+  e({
+    method: 'POST', path: '/inventory/counts/:id/approve', key: 'inventory_count_approved',
+    category: CATEGORIES.INVENTORY, severity: 'critical',
+    entity: { type: 'INV_COUNT', id: P('id') }, scope: SCOPE.detail(),
+    summary: (c) => `${c.actor} approved a stock count${c.entityLabel ? ` ${c.entityLabel}` : ''}`,
+  }),
+  e({
+    method: 'POST', path: '/inventory/counts/:id/cancel', key: 'inventory_count_cancelled',
+    category: CATEGORIES.INVENTORY, severity: 'notable',
+    entity: { type: 'INV_COUNT', id: P('id') }, scope: SCOPE.detail(),
+    summary: (c) => `${c.actor} cancelled a stock count${c.entityLabel ? ` ${c.entityLabel}` : ''}`,
+  }),
+  e({
+    method: 'POST', path: '/inventory/reorder/mr-draft', key: 'inventory_reorder_mr_drafted',
+    category: CATEGORIES.INVENTORY, severity: 'notable',
+    // A replayed clientEventId changes nothing: no detail, so no second row.
+    entity: { type: 'MR', id: R('data.mrId') }, scope: SCOPE.detail(), requireDetail: true,
+    summary: (c) => `${c.actor} drafted a material requisition from reorder suggestions${c.entityLabel ? ` ${c.entityLabel}` : ''}`,
+  }),
 ];
 
 const norm = (m, p) => `${m.toUpperCase()} ${p}`;
@@ -760,5 +1230,87 @@ const norm = (m, p) => `${m.toUpperCase()} ${p}`;
 const BY_ROUTE = new Map(EVENTS.map((ev) => [norm(ev.method, ev.path), ev]));
 
 export const lookupEvent = (method, path) => BY_ROUTE.get(norm(method, path)) || null;
+
+/**
+ * Mutating routes under the company-administration routers that are known NOT
+ * to be events, so they are neither recorded nor reported as gaps.
+ *
+ * Each one is here on purpose. The route-coverage test fails for any mutating
+ * admin route that is in neither list, which is what stops a new admin
+ * endpoint going unlogged by default.
+ */
+export const NOT_AN_EVENT = [
+  // Queries that use POST for their body. Several fire on every page load.
+  'POST /rbac/me/permissions/bulk',
+  'POST /users/get-dashboard-data',
+  'POST /users/dashboard-search-vendor',
+  // Inventory: file generation and previews (nothing is changed).
+  'POST /inventory/labels/items',
+  'POST /inventory/labels/grn/:grnId',
+  'POST /inventory/opening/:hotelId/preview',
+
+  // Signing in, registering and recovering an account. Sign-ins are already in
+  // the trail from tbl_login_log; the rest happen before there is an account
+  // or a company to file them under.
+  'POST /users/login',
+  'POST /users/social-login',
+  'POST /users/refresh-token',
+  'POST /users/forgot-password-otp-send',
+  'POST /users/forgot-password-otp-authenticate',
+  'POST /users/registration-otp-send',
+  'POST /users/registration-otp-verify',
+  'POST /users/user-registration',
+  'POST /users/company-registration',
+  'POST /users/registration-upload',
+  'POST /users/verify-vendor-token',
+  'POST /users/book-demo',
+
+  // Read receipts and push subscriptions: per-person inbox state.
+  'POST /users/notifications/subscribe',
+  'POST /users/notifications/push-subscribe',
+  'DELETE /users/notifications/push-subscribe',
+  'POST /users/notifications/read-notification/:notification_id',
+  'POST /users/notifications/mark-read/:id',
+  'POST /users/notifications/mark-unread/:id',
+  'POST /users/notifications/mark-all-read',
+  'POST /users/notifications/mark-delivered',
+  'POST /users/notifications/dismiss/:id',
+
+  // File plumbing. The upload is a step inside an action (an RFQ, a quote, a
+  // profile); the action is what gets recorded.
+  'POST /users/upload-file',
+  'POST /users/delete-file',
+  'POST /users/update-profile-image',
+  'POST /users/upload-payment-terms',
+
+  // A vendor's own profile, contacts and subscription — the vendor's business,
+  // not a buyer company's, and no buyer administrator's trail to file it in.
+  'POST /users/add-buyer-vendor-location',
+  'PUT /users/update-buyer-vendor-location',
+  'DELETE /users/delete-buyer-vendor-location/:id',
+  'POST /users/add-spoc',
+  'PUT /users/update-spoc/:spoc_id',
+  'DELETE /users/delete-spoc/:spoc_id',
+  'POST /users/map-spoc-location',
+  'POST /users/create-vendor-review',
+  'POST /users/publish-profile-reviews',
+  'POST /users/enhance-vendor-profile',
+  'POST /hospitality/vendor/join-open-rfqs',
+  'POST /hospitality/vendor/subscription/preview',
+  'POST /hospitality/vendor/subscription/modify',
+  'POST /hospitality/vendor/subscription/extend',
+
+  // Payment-gateway callbacks and the public pay-by-link pages (no session):
+  // the admin action is sending the link, which is catalogued above.
+  'POST /hospitality/subscription-payment',
+  'POST /hospitality/renew-subscription',
+  'POST /hospitality/verify-payment',
+  'POST /hospitality/hotel-payment/create-order',
+  'POST /hospitality/hotel-payment/verify',
+];
+
+const NOT_AN_EVENT_SET = new Set(NOT_AN_EVENT);
+
+export const isNotAnEvent = (method, path) => NOT_AN_EVENT_SET.has(norm(method, path));
 
 export const REGISTRY_SIZE = EVENTS.length;

@@ -9,8 +9,10 @@
 // but failures.
 //
 // The client is `req.ip`, i.e. Express's answer under the app's 'trust proxy' setting
-// (app/util/trustProxy.js, env TRUST_PROXY_HOPS, default 1 hop). Behind one reverse proxy
-// that is the address the proxy saw; a client-supplied X-Forwarded-For prefix is ignored.
+// (app/util/trustProxy.js, env TRUST_PROXY_HOPS, default: no proxy trusted). By default
+// that is the socket address and X-Forwarded-For is ignored, so behind production's proxy
+// every client shares one bucket. With TRUST_PROXY_HOPS=1 behind a proxy that appends the
+// client, it is the address the proxy saw; a client-supplied prefix is ignored.
 //
 // LIMITS (documented in the Task 23 report and the runbook):
 //   - Per process: each Node process keeps its own counts (a shared store such as Redis is

@@ -69,9 +69,19 @@ export async function getPersonalPendingForRFQs(rfqList, userId, lifecycleMap = 
   // 1. Stuck — the bid window closed with no eligible vendors. Only the
   //    creator can extend the deadline, add vendors, or close
   //    (assertEditAllowed in rfqUpdateHelpers.js is creator-only).
+  //    RFQ_STUCK_TECHNICAL means vendors WERE evaluated and nobody passed
+  //    (techEvalStuck.js); extending the deadline reopens the evaluation, so
+  //    the chip says that. RFQ_STUCK_COMMERCIAL means nobody quoted at all.
   for (const rfqId of mine) {
-    if (STUCK_STAGES.has(lifecycleMap[rfqId])) {
-      add(rfqId, { code: 'STUCK_NO_VENDORS', label: 'No eligible vendors — extend or close', count: 1 });
+    const stage = lifecycleMap[rfqId];
+    if (STUCK_STAGES.has(stage)) {
+      add(rfqId, {
+        code: 'STUCK_NO_VENDORS',
+        label: stage === 'RFQ_STUCK_TECHNICAL'
+          ? 'No vendor passed — extend deadline or close'
+          : 'No eligible vendors — extend or close',
+        count: 1,
+      });
     }
   }
 

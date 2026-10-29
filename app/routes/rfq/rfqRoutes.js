@@ -409,9 +409,12 @@ RfqRoutes.post(
   rfqController.sendSelectiveReminder
 );
 
+// Buyer-only, and the controller scope-checks the RFQ (404 when out of scope).
+// It returned any vendor's raw draft POs to any signed-in caller before.
 RfqRoutes.get(
   '/get-existing-po',
   passportSignIn,
+  acl([2, 8]),
   rfqController.getExistingPO
 );
 
@@ -719,6 +722,7 @@ RfqRoutes.post('/add-vendor-response',
 
 RfqRoutes.post('/tech-evaluation-cleared-vendors',
   passportSignIn,
+  acl([2, 8]),
   // validateBody(rfqSchemas.addtechEvaluationClearedVendors),
   rfqController.addtechEvaluationClearedVendors
 )
@@ -896,6 +900,7 @@ RfqRoutes.post(
 RfqRoutes.post(
   '/update-buyer-marks',
   passportSignIn,
+  acl([2, 8]),
   validateBody(rfqSchemas.updateBuyerMarks),
   rfqController.updateBuyerMarks
 );

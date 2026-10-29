@@ -1,6 +1,7 @@
 import config from "../../config/app.config.js";
 import { sendMail, logError } from "../common.js";
 import { generateEmailTemplate, emailButton } from "../notificationEmailLayout.js";
+import { creatorRemarksRowHtml, creatorRemarksPreview } from "../negotiation/roundRemarks.js";
 import { logger } from '../../util/logger.js';
 import { dispatch as dispatchNotification, resolveRecipientUserIds } from "../../services/notificationService.js";
 import {
@@ -144,6 +145,12 @@ export const sendRfqCreationNotification = async ({
  * @param {Array} params.approvers - Array of { user_id, user_name, user_email }
  * @param {Object} params.extraContext - Optional additional context (e.g., { rfq_id })
  */
+// Sentence-case a noun phrase without breaking the ARC acronym ("Unit ARC ...").
+const lowerFirst = (text) => {
+  const s = String(text || '');
+  return /^[A-Z]{2,}/.test(s) ? s : s.charAt(0).toLowerCase() + s.slice(1);
+};
+
 export const sendApprovalStepNotification = async ({
   entityType,
   entityId,
@@ -160,7 +167,7 @@ export const sendApprovalStepNotification = async ({
       return false;
     }
 
-    const label = entityLabel(entityType);
+    const label = entityLabel(entityType, { isGroup: Boolean(extraContext?.is_group) });
     // A null from the registry means the right record cannot be named; send the
     // approver to their own home rather than to the wrong one.
     const linkPath = approvalActionUrl(entityType, entityId, extraContext) || buyerHome();
@@ -170,6 +177,7 @@ export const sendApprovalStepNotification = async ({
     const isNegotiationType = entityType === 'NEGOTIATION' || entityType === 'NEGOTIATION_QUOTE';
     const isNegotiationRound = entityType === 'NEGOTIATION';
     const rfqTitle = extraContext?.rfq_title || '';
+    const hasRemarks = (entityType === 'NEGOTIATION' || entityType === 'ARC_NEGOTIATION') && Boolean(extraContext?.creator_remarks);
     const productName = extraContext?.product_name || '';
     const companyName = extraContext?.company_name || '';
     const hotelName = extraContext?.hotel_name || '';
@@ -232,12 +240,14 @@ export const sendApprovalStepNotification = async ({
             ${isNegotiationRound && negotiationEndDateStr
               ? `<li style="padding:4px 0;"><strong>Negotiation End Date:</strong> ${negotiationEndDateStr} <span style="color:#64748B;">(Vendor to submit the revised quote before the mentioned date/time)</span></li>`
               : ''}
+            ${hasRemarks ? creatorRemarksRowHtml(extraContext.creator_remarks) : ''}
             <li style="padding:4px 0;"><strong>Initiated By:</strong> ${initiatorName || 'N/A'}</li>
           </ul>`
         : `<ul style="list-style:none; padding-left:0; margin-top:16px;">
             <li style="padding:4px 0;"><strong>Type:</strong> ${label}</li>
             <li style="padding:4px 0;"><strong>Identifier:</strong> #${entityIdentifier}</li>
             ${rfqTitle ? `<li style="padding:4px 0;"><strong>RFQ Title:</strong> ${rfqTitle}</li>` : ''}
+            ${hasRemarks ? creatorRemarksRowHtml(extraContext.creator_remarks) : ''}
             <li style="padding:4px 0;"><strong>Initiated By:</strong> ${initiatorName || 'N/A'}</li>
           </ul>`;
 
@@ -291,7 +301,7 @@ export const sendApprovalStepNotification = async ({
         category: 'approval',
         type: 'approval_step_required',
         title: `Action required: Approve ${label} ${entityType === 'NEGOTIATION' || entityType === 'NEGOTIATION_QUOTE' ? `— RFQ #${entityIdentifier}` : `#${entityIdentifier}`}`,
-        body: `Step ${stepOrder} of ${totalSteps} — initiated by ${initiatorName || 'a team member'}.`,
+        body: `Step ${stepOrder} of ${totalSteps} — initiated by ${initiatorName || 'a team member'}.${hasRemarks ? ` Remarks: “${creatorRemarksPreview(extraContext.creator_remarks)}”` : ''}`,
         data: { entity_type: entityType, entity_id: entityId, step_order: stepOrder, total_steps: totalSteps, ...extraContext },
         actionUrl
       });
@@ -946,7 +956,7 @@ export const sendApprovalCancelledNotification = async ({
   try {
     if (!approvers || approvers.length === 0) return false;
 
-    const label = entityLabel(entityType);
+    const label = entityLabel(entityType, { isGroup: Boolean(extraContext?.is_group) });
     // The instance is already gone here, so only the RFQ-level link is safe.
     const linkPath = (extraContext?.rfq_id
       ? approvalActionUrl(entityType, extraContext.rfq_id, extraContext, { idIsRfq: true })
@@ -1046,7 +1056,7 @@ export const sendPolicyChangeNotification = async ({
   try {
     if (!approvers || approvers.length === 0) return false;
 
-    const label = entityLabel(entityType);
+    const label = entityLabel(entityType, { isGroup: Boolean(extraContext?.is_group) });
     // A null from the registry means the right record cannot be named; send the
     // approver to their own home rather than to the wrong one.
     const linkPath = approvalActionUrl(entityType, entityId, extraContext) || buyerHome();
@@ -1151,7 +1161,7 @@ export const sendApproverRemovedNotification = async ({
   try {
     if (!approvers || approvers.length === 0) return false;
 
-    const label = entityLabel(entityType);
+    const label = entityLabel(entityType, { isGroup: Boolean(extraContext?.is_group) });
 
     const reasonLabel = changeReason === 'policy_change' ? 'the approval policy was updated'
       : changeReason === 'role_removed' ? 'your role assignment was changed'
@@ -1179,7 +1189,7 @@ export const sendApproverRemovedNotification = async ({
             </div>
           </div>
 
-          <p>Your approval is no longer needed for this ${label.toLowerCase()}. No further action is required from you.</p>
+          <p>Your approval is no longer needed for this ${lowerFirst(label)}. No further action is required from you.</p>
 
           <p style="text-align:center; margin-top:30px;">
             <strong>— Phileein Hospitality Team</strong>
@@ -1242,7 +1252,7 @@ export const sendApprovalStandsNotification = async ({
   try {
     if (!approvers || approvers.length === 0) return false;
 
-    const label = entityLabel(entityType);
+    const label = entityLabel(entityType, { isGroup: Boolean(extraContext?.is_group) });
 
     const reasonLabel = changeReason === 'policy_change' ? 'the approval policy was updated'
       : changeReason === 'role_removed' ? 'a role assignment was changed'
@@ -1266,7 +1276,7 @@ export const sendApprovalStandsNotification = async ({
           <div style="background-color:#DCFCE7; border-left:4px solid #16A34A; padding:12px 16px; margin:16px 0; border-radius:4px;">
             <span style="color:#166534; font-weight:600;">Your prior approval still counts — no action required</span>
             <div style="color:#15803D; font-size:13px; margin-top:4px;">
-              You already approved this ${label.toLowerCase()} before the policy change, so your decision remains recorded and effective.
+              You already approved this ${lowerFirst(label)} before the policy change, so your decision remains recorded and effective.
             </div>
           </div>
 
@@ -1338,7 +1348,7 @@ export const sendApproverAddedMidFlightNotification = async ({
   try {
     if (!approvers || approvers.length === 0) return false;
 
-    const label = entityLabel(entityType);
+    const label = entityLabel(entityType, { isGroup: Boolean(extraContext?.is_group) });
     // A null from the registry means the right record cannot be named; send the
     // approver to their own home rather than to the wrong one.
     const linkPath = approvalActionUrl(entityType, entityId, extraContext) || buyerHome();

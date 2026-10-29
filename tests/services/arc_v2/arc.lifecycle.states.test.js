@@ -11,6 +11,8 @@
 //                         can_user_approve true ONLY for the approver.
 //   5. approve          → technical complete (immutable), default commercial.
 //   6. all items allocated → commercial partial, awarding opens as preview.
+//  6b. negotiation round → its ARC_NEGOTIATION approvers are the commercial
+//                         stage's approvers (never the committee's).
 //   7. finalize         → ARC_COMMITTEE instance spawned, commercial complete,
 //                         awarding committee_in_review, default awarding.
 //   8. committee approve → awarding complete, active stage live, default active.
@@ -33,6 +35,8 @@ const PROC   = IDS.processes.A_P1;
 const BUYER  = IDS.users.a1_proc_buyer;
 const TECH_APPROVER = IDS.users.a1_proc_techApp;
 const COMMITTEE_APPROVER = IDS.users.a1_proc_finance;
+// Designated approver of the ARC's negotiation rounds (ARC_NEGOTIATION).
+const ROUND_APPROVER = IDS.users.a1_proc_commApp;
 const READER = IDS.users.a1_eng_buyer; // gets a seeded arc-tech.read scope
 // Cross-tenant user: mapped only to Hospitality B (hotels B1/B2), never to A1.
 const CROSS_TENANT = IDS.users.companyB_admin;
@@ -42,6 +46,7 @@ const CATEGORY = TEST_CATEGORIES.beverages;
 
 const TECH_POLICY_ID      = 64910;
 const COMMITTEE_POLICY_ID = 64911;
+const ROUND_POLICY_ID     = 64916;
 // Permission/role/scope fixtures (test seed lacks the arc-tech.read rows).
 const PERM_TECH_READ_ID = 95001;
 const READER_ROLE_ID    = 95001;
@@ -50,13 +55,13 @@ const READER_SCOPE_ID   = 95001;
 const stageOf = (body, key) => body.data.stages.find((s) => s.key === key);
 
 describe("ARC lifecycle — stage state machine end-to-end", () => {
-  let buyerClient, techApproverClient, committeeApproverClient, readerClient, crossTenantClient;
-  let arcId, skipArcId, endedArcId;
+  let buyerClient, techApproverClient, committeeApproverClient, readerClient, crossTenantClient, roundApproverClient;
+  let arcId, skipArcId, endedArcId, roundId;
   let itemIds = [], clauseIds = [], responseIdsA = [], responseIdsB = [];
 
   beforeAll(async () => {
-    await db.none(`UPDATE tbl_users SET user_type = 2 WHERE id IN ($1,$2,$3,$4,$5)`,
-      [BUYER, TECH_APPROVER, COMMITTEE_APPROVER, READER, CROSS_TENANT]);
+    await db.none(`UPDATE tbl_users SET user_type = 2 WHERE id IN ($1,$2,$3,$4,$5,$6)`,
+      [BUYER, TECH_APPROVER, COMMITTEE_APPROVER, READER, CROSS_TENANT, ROUND_APPROVER]);
     // Seed mobile for TECH_APPROVER so contact.mobile is non-null in actors payload.
     await db.none(`UPDATE tbl_users SET mobile = $1 WHERE id = $2`, ['+919812345678', TECH_APPROVER]);
     buyerClient = await httpClient(BUYER);
@@ -64,10 +69,13 @@ describe("ARC lifecycle — stage state machine end-to-end", () => {
     committeeApproverClient = await httpClient(COMMITTEE_APPROVER);
     readerClient = await httpClient(READER);
     crossTenantClient = await httpClient(CROSS_TENANT);
+    roundApproverClient = await httpClient(ROUND_APPROVER);
     // BUYER drives the gated evaluation endpoints (requireArcPermission).
     await seedArcEvalPerms(db, [BUYER]);
 
-    // Policies: 1-step ARC_TECH (tech approver), 1-step ARC_COMMITTEE (finance).
+    // Policies: 1-step ARC_TECH (tech approver), 1-step ARC_COMMITTEE (finance),
+    // 1-step ARC_NEGOTIATION (round approver — not the round's creator, so a
+    // round waits for a real approval).
     // The 4th element is the resource the entity_type maps to. USER-source
     // steps are permission-gated, so each named approver must hold read+approve
     // on exactly that resource — and only that one, so test 11 can still assert
@@ -75,6 +83,7 @@ describe("ARC lifecycle — stage state machine end-to-end", () => {
     for (const [pid, entity, approver, resource] of [
       [TECH_POLICY_ID, 'ARC_TECH', TECH_APPROVER, 'arc-tech'],
       [COMMITTEE_POLICY_ID, 'ARC_COMMITTEE', COMMITTEE_APPROVER, 'arc-committee'],
+      [ROUND_POLICY_ID, 'ARC_NEGOTIATION', ROUND_APPROVER, 'arc-comm'],
     ]) {
       await db.none(
         `INSERT INTO tbl_approval_policies
@@ -193,10 +202,15 @@ describe("ARC lifecycle — stage state machine end-to-end", () => {
 
   afterAll(async () => {
     const arcIds = [arcId, skipArcId, endedArcId];
+    const roundIds = (await db.any(
+      `SELECT id FROM tbl_negotiation_rounds WHERE source_type = 'ARC' AND source_id = ANY($1::int[])`,
+      [arcIds]
+    )).map((r) => r.id);
     const instanceIds = (await db.any(
       `SELECT id FROM tbl_approval_instances
-        WHERE entity_type IN ('ARC_TECH','ARC_COMMITTEE') AND entity_id = ANY($1::bigint[])`,
-      [arcIds]
+        WHERE (entity_type IN ('ARC_TECH','ARC_COMMITTEE') AND entity_id = ANY($1::bigint[]))
+           OR (entity_type = 'ARC_NEGOTIATION' AND entity_id = ANY($2::int[]))`,
+      [arcIds, roundIds]
     )).map((r) => r.id);
     if (instanceIds.length) {
       await db.none(`DELETE FROM tbl_approval_actions WHERE approval_instance_id = ANY($1::int[])`, [instanceIds]);
@@ -206,7 +220,11 @@ describe("ARC lifecycle — stage state machine end-to-end", () => {
       await db.none(`DELETE FROM tbl_approval_instance_steps WHERE approval_instance_id = ANY($1::int[])`, [instanceIds]);
       await db.none(`DELETE FROM tbl_approval_instances WHERE id = ANY($1::int[])`, [instanceIds]);
     }
-    for (const pid of [TECH_POLICY_ID, COMMITTEE_POLICY_ID]) {
+    if (roundIds.length) {
+      await db.none(`DELETE FROM tbl_negotiation_round_quotes WHERE negotiation_round_id = ANY($1::int[])`, [roundIds]);
+      await db.none(`DELETE FROM tbl_negotiation_rounds WHERE id = ANY($1::int[])`, [roundIds]);
+    }
+    for (const pid of [TECH_POLICY_ID, COMMITTEE_POLICY_ID, ROUND_POLICY_ID]) {
       await db.none(`DELETE FROM tbl_approval_policy_steps WHERE approval_policy_id = $1`, [pid]);
       await db.none(`DELETE FROM tbl_approval_policies WHERE id = $1`, [pid]);
     }
@@ -333,7 +351,7 @@ describe("ARC lifecycle — stage state machine end-to-end", () => {
     // flow correctness: next_stage, roles
     expect(techFlow.next_stage).toBe("commercial");
     expect(techFlow.action_taker_role).toBe("Technical evaluator");
-    expect(techFlow.approver_role).toBe("Technical approver");
+    expect(techFlow.approver_role).toBe("ARC Technical Approver");
 
     // approver resolved — PENDING instance, people includes TECH_APPROVER
     expect(techActors.approver.status).toBe("PENDING");
@@ -349,7 +367,7 @@ describe("ARC lifecycle — stage state machine end-to-end", () => {
     expect(techActors.contact.mobile).toBe("+919812345678");
     expect(techActors.contact.name).toBeTruthy();
     expect(techActors.contact.email).toBeTruthy();
-    expect(techActors.contact.role).toBe("Technical approver");
+    expect(techActors.contact.role).toBe("ARC Technical Approver");
 
     // action_taker resolved (BUYER has arc-tech.evaluate in this hotel/dept)
     expect(techActors.action_taker.people.length).toBeGreaterThan(0);
@@ -466,6 +484,37 @@ describe("ARC lifecycle — stage state machine end-to-end", () => {
     expect(res.body.data.default_stage).toBe("commercial");
   });
 
+  test("6b. a negotiation round awaiting approval: the commercial stage names the ROUND's approvers", async () => {
+    // No round yet: nothing awaits approval on the commercial stage.
+    const before = await buyerClient.get(`/api/v1/arc-v2/${arcId}/lifecycle`);
+    expect(stageOf(before.body, "commercial").actors.approver).toMatchObject({
+      role: "ARC Commercial Evaluators (round approval)", status: "NONE", people: [],
+    });
+
+    const created = await buyerClient
+      .post(`/api/v1/arc-v2/evaluation/${arcId}/comm-eval/negotiation/rounds`)
+      .send({
+        end_date: new Date(Date.now() + 2 * 86400_000).toISOString(),
+        products: [{ arc_item_id: itemIds[0], vendor_targets: [{ vendor_id: VENDOR_A, target_rate: 85 }] }],
+      });
+    expect(created.status).toBe(200);
+    roundId = Number(created.body.data.id);
+    expect((await db.one(`SELECT status FROM tbl_negotiation_rounds WHERE id = $1`, [roundId])).status)
+      .toBe("PENDING_APPROVAL");
+
+    // The panel is labelled round approval, so it lists who approves the
+    // round — the round's ARC_NEGOTIATION instance — not the committee.
+    const res = await buyerClient.get(`/api/v1/arc-v2/${arcId}/lifecycle`);
+    const approver = stageOf(res.body, "commercial").actors.approver;
+    expect(approver.role).toBe("ARC Commercial Evaluators (round approval)");
+    expect(approver.status).toBe("PENDING");
+    expect(approver.step_label).toBe("Level 1 of 1 · all must approve");
+    expect(approver.people.map((p) => p.user_id)).toEqual([ROUND_APPROVER]);
+    expect(approver.can_user_approve).toBe(false);
+    const asRoundApprover = await roundApproverClient.get(`/api/v1/arc-v2/${arcId}/lifecycle`);
+    expect(stageOf(asRoundApprover.body, "commercial").actors.approver.can_user_approve).toBe(true);
+  });
+
   test("7. finalize completes commercial and puts awarding in committee review", async () => {
     const fin = await buyerClient.post(`/api/v1/arc-v2/evaluation/${arcId}/comm-eval/finalize`).send({});
     expect(fin.status).toBe(200);
@@ -488,6 +537,13 @@ describe("ARC lifecycle — stage state machine end-to-end", () => {
     // NULL-safe mobile: COMMITTEE_APPROVER has no mobile seeded → contact.mobile null
     expect(awardingActors.contact).not.toBeNull();
     expect(awardingActors.contact.mobile).toBeNull();
+
+    // With a committee instance now PENDING, the commercial (round approval)
+    // panel still lists the round's approver — the committee stays on Awarding.
+    const commercialPeople = stageOf(res.body, "commercial").actors.approver.people.map((p) => p.user_id);
+    expect(commercialPeople).toEqual([ROUND_APPROVER]);
+    expect(commercialPeople).not.toContain(COMMITTEE_APPROVER);
+    expect(awardingActors.approver.people.map((p) => p.user_id)).not.toContain(ROUND_APPROVER);
   });
 
   test("8. committee approval completes awarding and activates the contract stage", async () => {

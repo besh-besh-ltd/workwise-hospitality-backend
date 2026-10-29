@@ -3,11 +3,13 @@ import { logger } from '../util/logger.js';
 import { resolveCurrentPrice } from './arcPricingResolver.js';
 import { logArcEvent, ARC_EVENT_TYPES } from './arcEventLogService.js';
 import { dispatch as dispatchNotification } from './notificationService.js';
-import { buyerMrDetail, buyerMrList } from './notificationLinks.js';
+import { buyerMrDetail, buyerMrList, vendorPoDetail } from './notificationLinks.js';
 import { sendMail } from '../helper/common.js';
+import { buildVendorPoReference } from '../helper/poReference.js';
 import { normalizeArcCharges } from '../models/arc_v2/arcEvaluationModel.js';
 import { effectiveSupplierExpr } from './vendorNetwork/fulfilmentSql.js';
 import { computeCallOffLine } from '../helper/arc_v2/callOffLineTax.js';
+import { InventoryError } from './inventory/errors.js';
 
 // Phase 2 — run the pricing engine for a contract line at a given quantity.
 // Shared by the per-unit landed price (qty=1) and the LINE total (qty=N) so the
@@ -65,7 +67,7 @@ function computeAllInUnitPrice(pricingResult) {
  * FOR UPDATE on the requisition hotel's tbl_arc_contract_line_hotel rows for the
  * MR's contract lines, ascending id. Taken before any tbl_arc_contract_line lock.
  */
-async function lockMrHotelLedgerRows(runner, mrId, hotelId) {
+export async function lockMrHotelLedgerRows(runner, mrId, hotelId) {
   if (hotelId == null) return;
   await runner.any(
     `SELECT clh.id FROM tbl_arc_contract_line_hotel clh
@@ -75,6 +77,23 @@ async function lockMrHotelLedgerRows(runner, mrId, hotelId) {
       ORDER BY clh.id
         FOR UPDATE`,
     [mrId, hotelId]
+  );
+}
+
+/**
+ * FOR UPDATE on tbl_arc_contract_line rows, ascending id. Every path that
+ * draws on or gives back to a contract line takes these before writing any of
+ * them (or inserting a tbl_arc_callof_po row, whose FK takes a key-share lock
+ * on its line), after the hotel ledger rows: so two of them touching the same
+ * lines in different orders wait instead of deadlocking.
+ */
+export async function lockContractLines(runner, ids) {
+  const sorted = [...new Set((ids || []).map(Number).filter((id) => Number.isSafeInteger(id) && id > 0))]
+    .sort((a, b) => a - b);
+  if (!sorted.length) return;
+  await runner.any(
+    `SELECT id FROM tbl_arc_contract_line WHERE id = ANY($1::bigint[]) ORDER BY id FOR UPDATE`,
+    [sorted]
   );
 }
 
@@ -124,6 +143,10 @@ async function buildCallOffBuckets(mrId, txContext) {
   if (items.length === 0) {
     return [];
   }
+  // Then every contract line the release draws on, in id order, before any
+  // is written (recordCallOffAndUpdateConsumption goes item by item, in an
+  // order the planner picks).
+  await lockContractLines(runner, items.map((it) => it.arc_contract_line_id));
 
   const today = new Date();
   const itemsWithPricing = await Promise.all(items.map(async (it) => {
@@ -375,6 +398,18 @@ export async function releaseForMr(mrId, txContext = null) {
     const overShare = await recordCallOffAndUpdateConsumption(po, group, runner);
     released.push({ po, group, overShare });
 
+    // Delivery plan (inventory, spec §5.3): the call-off is born awaiting the
+    // vendor, so its default plan (due the MR's required-by date) exists from
+    // release and the document rendered after commit prints it. In a
+    // savepoint: a plan problem must not stop the release. Lazy import: the
+    // inventory services load the PO model, which loads this module.
+    try {
+      const { ensureCurrentPlan } = await import('./inventory/planService.js');
+      await runner.tx((sp) => ensureCurrentPlan(sp, po.id));
+    } catch (err) {
+      logger.error({ err, mrId, poId: po.id }, '[callOffPo] default delivery plan at release failed');
+    }
+
     // TODO Phase A finish: render the call-off PDF via callOffPoRenderer,
     // upload to S3, set po.po_pdf_url, dispatch vendor notification + email
     // (the email template detects is_call_off=TRUE and links the ARC
@@ -395,6 +430,163 @@ export async function releaseForMr(mrId, txContext = null) {
     [mrId]
   );
   return released;
+}
+
+// ─── Contract consumption: give back / take again ───────────────────────────
+//
+// A call-off PO consumes its rate contract at release: the contract line's
+// consumed_qty (the hard cap for the whole group) and, for a Group ARC, the
+// ordering hotel's tbl_arc_contract_line_hotel row. Three paths return or
+// retake that quantity: the vendor rejecting the PO (handleCallOffRejection),
+// the buyer short-closing an undelivered remainder, and reopening that
+// short-close (inventory shortCloseService). They share these two helpers so
+// the arithmetic and the lock order cannot drift apart.
+//
+// `lines` = [{ arcContractLineId, hotelId, qty }], qty in contract units (a
+// call-off PO line's unit is its contract line's unit). hotelId is the
+// ordering hotel whose ledger row was consumed at release; null skips the
+// hotel ledger (a single-hotel ARC has no rows there anyway).
+
+function consumptionLines(lines) {
+  return (Array.isArray(lines) ? lines : [])
+    .map((l) => ({
+      arcContractLineId: Number(l?.arcContractLineId),
+      hotelId: l?.hotelId == null ? null : Number(l.hotelId),
+      qty: l?.qty,
+    }))
+    .filter((l) => Number.isSafeInteger(l.arcContractLineId) && l.arcContractLineId > 0 && Number(l.qty) > 0);
+}
+
+/**
+ * Lock order of the release (buildCallOffBuckets): the hotel ledger rows first,
+ * in id order, then the contract lines, in id order.
+ */
+async function lockConsumptionRows(runner, lines) {
+  const withHotel = lines.filter((l) => l.hotelId != null);
+  if (withHotel.length) {
+    await runner.any(
+      `SELECT clh.id FROM tbl_arc_contract_line_hotel clh
+        WHERE (clh.arc_contract_line_id, clh.hotel_id) IN
+              (SELECT * FROM unnest($1::bigint[], $2::int[]))
+        ORDER BY clh.id
+          FOR UPDATE`,
+      [withHotel.map((l) => l.arcContractLineId), withHotel.map((l) => l.hotelId)]
+    );
+  }
+  await lockContractLines(runner, lines.map((l) => l.arcContractLineId));
+}
+
+/**
+ * Give consumed quantity back to the rate contract: the contract line and the
+ * ordering hotel's Group-ARC ledger row, each floored at 0. Run inside the
+ * caller's transaction.
+ *
+ * @param {object} runner pg-promise transaction
+ * @param {{poId?:number, lines:Array<{arcContractLineId:number, hotelId:number|null, qty:number|string}>}} args
+ * @returns {Promise<Array<{arcContractLineId:number, hotelId:number|null, qty:number|string}>>} the lines applied
+ */
+export async function giveBackCallOffQty(runner, { poId = null, lines = [] } = {}) {
+  const items = consumptionLines(lines);
+  if (!items.length) return [];
+  await lockConsumptionRows(runner, items);
+  for (const l of items) {
+    await runner.none(
+      `UPDATE tbl_arc_contract_line
+         SET consumed_qty = GREATEST(consumed_qty - $1, 0),
+             updated_at   = NOW()
+       WHERE id = $2`,
+      [l.qty, l.arcContractLineId]
+    );
+    // Group rate contract: give the ordering hotel its usage back too.
+    await runner.none(
+      `UPDATE tbl_arc_contract_line_hotel
+          SET consumed_qty = GREATEST(consumed_qty - $1, 0),
+              updated_at   = NOW()
+        WHERE arc_contract_line_id = $2 AND hotel_id = $3`,
+      [l.qty, l.arcContractLineId, l.hotelId]
+    );
+  }
+  logger.info({ poId, lines: items }, '[callOffPo] contract quantity given back');
+  return items;
+}
+
+/**
+ * Take quantity from the rate contract again (a reopened short-close), by the
+ * release's rules (recordCallOffAndUpdateConsumption): the contract line is the
+ * hard cap (consumed + qty <= committed, else CONFLICT); the ordering hotel's
+ * Group-ARC share is soft: a hotel may go past it, which is logged as the
+ * same CALL_OFF_OVER_HOTEL_SHARE arc event and returned so the caller can
+ * tell head office after commit. Run inside the caller's transaction; a
+ * refusal throws, so the caller's rollback undoes any line already taken.
+ *
+ * @returns {Promise<{lines:Array<{arcContractLineId, hotelId, qty}>,
+ *   overShare:Array<{arcId:number, payload:object}>}>} payload is release's
+ *   over-share entry {arc_contract_line_id, hotel_id, hotel_name,
+ *   committed_qty, consumed_qty, mr_id, po_id}
+ * @throws InventoryError CONFLICT details {poId, arcContractLineId, requested,
+ *   remaining} when the contract line has too little left.
+ */
+export async function reconsumeCallOffQty(runner, { poId = null, lines = [] } = {}) {
+  const items = consumptionLines(lines);
+  if (!items.length) return { lines: [], overShare: [] };
+  await lockConsumptionRows(runner, items);
+  const overShare = [];
+  for (const l of items) {
+    const taken = await runner.result(
+      `UPDATE tbl_arc_contract_line
+          SET consumed_qty = consumed_qty + $1, updated_at = NOW()
+        WHERE id = $2 AND consumed_qty + $1 <= committed_qty`,
+      [l.qty, l.arcContractLineId]
+    );
+    if (taken.rowCount === 0) {
+      const row = await runner.oneOrNone(
+        `SELECT GREATEST(committed_qty - consumed_qty, 0)::float AS remaining FROM tbl_arc_contract_line WHERE id = $1`,
+        [l.arcContractLineId]
+      );
+      throw new InventoryError(
+        'CONFLICT',
+        `The rate contract has only ${row?.remaining ?? 0} left on this item, so ${Number(l.qty)} cannot be reopened`,
+        { poId, arcContractLineId: l.arcContractLineId, requested: Number(l.qty), remaining: row?.remaining ?? 0 }
+      );
+    }
+    if (l.hotelId == null) continue;
+    const hotelRow = await runner.oneOrNone(
+      `UPDATE tbl_arc_contract_line_hotel
+          SET consumed_qty = consumed_qty + $1, updated_at = NOW()
+        WHERE arc_contract_line_id = $2 AND hotel_id = $3
+       RETURNING hotel_id, committed_qty, consumed_qty`,
+      [l.qty, l.arcContractLineId, l.hotelId]
+    );
+    if (!hotelRow || Number(hotelRow.consumed_qty) <= Number(hotelRow.committed_qty)) continue;
+    const ctx = await runner.one(
+      `SELECT ac.arc_id, h.name AS hotel_name, po.source_mr_id
+         FROM tbl_arc_contract_line cl
+         JOIN tbl_arc_contract ac ON ac.id = cl.arc_contract_id
+         LEFT JOIN tbl_hospitality_company_hotels h ON h.id = $2
+         LEFT JOIN tbl_rfq_purchase_order po ON po.id = $3
+        WHERE cl.id = $1`,
+      [l.arcContractLineId, hotelRow.hotel_id, poId]
+    );
+    const payload = {
+      arc_contract_line_id: Number(l.arcContractLineId),
+      hotel_id: Number(hotelRow.hotel_id),
+      hotel_name: ctx.hotel_name || null,
+      committed_qty: Number(hotelRow.committed_qty),
+      consumed_qty: Number(hotelRow.consumed_qty),
+      mr_id: ctx.source_mr_id == null ? null : Number(ctx.source_mr_id),
+      po_id: poId == null ? null : Number(poId),
+    };
+    await logArcEvent({
+      arcId: ctx.arc_id,
+      eventType: ARC_EVENT_TYPES.CALL_OFF_OVER_HOTEL_SHARE,
+      actorId: null,
+      payload,
+      txContext: runner,
+    });
+    overShare.push({ arcId: Number(ctx.arc_id), payload });
+  }
+  logger.info({ poId, lines: items, overShare: overShare.length }, '[callOffPo] contract quantity taken again');
+  return { lines: items, overShare };
 }
 
 /**
@@ -425,23 +617,14 @@ export async function handleCallOffRejection(poId, reason, txContext = null) {
   const mrHotel = (await runner.oneOrNone(`SELECT hotel_id FROM tbl_material_requisition WHERE id = $1`, [mrId]))?.hotel_id;
   // Same lock order as the release: the hotel's ledger rows (id order), then lines.
   await lockMrHotelLedgerRows(runner, mrId, mrHotel ?? null);
-  for (const link of links) {
-    await runner.none(
-      `UPDATE tbl_arc_contract_line
-         SET consumed_qty = GREATEST(consumed_qty - $1, 0),
-             updated_at   = NOW()
-       WHERE id = $2`,
-      [link.quantity, link.arc_contract_line_id]
-    );
-    // Group rate contract: give the ordering hotel its usage back too.
-    await runner.none(
-      `UPDATE tbl_arc_contract_line_hotel
-          SET consumed_qty = GREATEST(consumed_qty - $1, 0),
-              updated_at   = NOW()
-        WHERE arc_contract_line_id = $2 AND hotel_id = $3`,
-      [link.quantity, link.arc_contract_line_id, mrHotel ?? null]
-    );
-  }
+  await giveBackCallOffQty(runner, {
+    poId,
+    lines: links.map((link) => ({
+      arcContractLineId: link.arc_contract_line_id,
+      hotelId: mrHotel ?? null,
+      qty: link.quantity,
+    })),
+  });
   await runner.none(
     `UPDATE tbl_material_requisition SET status = 'approved', updated_at = NOW() WHERE id = $1`,
     [mrId]
@@ -520,4 +703,64 @@ export async function notifyCallOffRejected({ raisedBy, mrId = null, mrNumber, p
     // blip here must not propagate now that the caller awaits this function.
     logger.error({ err, raisedBy }, '[callOffPo.notifyCallOffRejected] raiser lookup failed');
   }
+}
+
+/**
+ * Ask the vendor to accept a released call-off PO: the in-app notice plus the
+ * email. Shared by the release (mrController.notifyCallOffReleased) and the
+ * buyer's send-back of a vendor-rejected PO, so both say the same thing.
+ * Vendor-facing only: nothing buyer-internal (notes, raiser) belongs here.
+ *
+ * Best-effort and total: the in-app step is awaited and swallows its errors;
+ * the email is started and its promise returned as `mail` (already caught), so
+ * a caller can wait for it or ignore it.
+ *
+ * @param {{po: object, mr: {id:number, mr_number:string, raised_by?:number|null}, vendorId: number}} args
+ * @returns {Promise<{mail: Promise<void>}>}
+ */
+export async function notifyVendorCallOffAwaitingAcceptance({ po, mr, vendorId }) {
+  const actionUrl = vendorPoDetail(po.id);
+  if (Number(vendorId) && actionUrl) {
+    try {
+      await dispatchNotification({
+        userIds: [Number(vendorId)],
+        senderUserId: mr?.raised_by || null,
+        category: 'mr',
+        type: 'CALL_OFF_RELEASED',
+        title: 'Released PO awaiting acceptance',
+        body: `Released PO ${po.po_number} (₹${Number(po.total_value).toLocaleString('en-IN')}) was released from requisition ${mr?.mr_number} and is awaiting vendor acceptance.`,
+        data: { po_id: po.id, mr_id: mr?.id, po_number: po.po_number },
+        actionUrl,
+      });
+    } catch (err) {
+      logger.error({ err, poId: po.id }, '[callOffPo.notifyVendorCallOffAwaitingAcceptance] in-app notify failed');
+    }
+  }
+  let mail = Promise.resolve();
+  try {
+    const vendor = await db.oneOrNone(`SELECT email, name FROM tbl_users WHERE id = $1`, [vendorId]);
+    if (vendor?.email) {
+      // Contract + requisition number so the vendor knows what this order is
+      // for. The MR title stays buyer-side.
+      const arcRef = po.arc_contract_id
+        ? await db.oneOrNone(
+            `SELECT a.arc_number, a.title AS arc_title
+               FROM tbl_arc_contract c JOIN tbl_arc a ON a.id = c.arc_id
+              WHERE c.id = $1`,
+            [po.arc_contract_id]
+          ).catch(() => null)
+        : null;
+      const reference = buildVendorPoReference({ ...arcRef, mr_number: mr?.mr_number, is_call_off: true });
+      mail = Promise.resolve(sendMail({
+        to: vendor.email,
+        subject: `New released purchase order ${po.po_number}${reference ? ` (${reference})` : ''} — acceptance required`,
+        html: `<p>Hello ${vendor.name || 'Vendor'},</p>
+               <p>A new released purchase order <strong>${po.po_number}</strong> has been released against your active rate contract and is awaiting your acceptance.</p>
+               <p>Please log in to your vendor portal to review and accept it.</p>`,
+      })).catch((err) => logger.error({ err, poId: po.id }, '[callOffPo.notifyVendorCallOffAwaitingAcceptance] email failed'));
+    }
+  } catch (err) {
+    logger.error({ err, poId: po.id }, '[callOffPo.notifyVendorCallOffAwaitingAcceptance] vendor lookup failed');
+  }
+  return { mail };
 }

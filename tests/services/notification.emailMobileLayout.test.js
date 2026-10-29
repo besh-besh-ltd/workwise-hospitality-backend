@@ -160,7 +160,7 @@ describe("approver action emails", () => {
     const html = lastHtml();
     expectPhoneSafe(html);
     expectBulletproofCta(html, `${BASE}/dashboard/buyer/quote-comparison?rfq=2386&rfq_product_id=8891&focus=approval`, "Review & Approve");
-    for (const v of ["Hello Asha Menon,", "Step 1 of 2", "#536631", "Guest room linen", "Ravi Kumar", "Vendor Finalization"]) {
+    for (const v of ["Hello Asha Menon,", "Step 1 of 2", "#536631", "Guest room linen", "Ravi Kumar", "Final vendor selection"]) {
       expect(html).toContain(v);
     }
   });

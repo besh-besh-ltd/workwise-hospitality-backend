@@ -26,7 +26,9 @@ const VENDOR_HISTORY = [
 //   side lookups parallelised  : 92 statements, 26 waves
 //   + lifecycle summary batched: 62 statements, 16-18 waves, depth 21-22
 //     (fetchStageActors runs the lifecycle summary)
-const BUDGET = { statements: 62, waves: 20, depth: 24 };
+//   + approver labels by step role: 65 (one batched fetchStepRoleLabels per
+//     surface that names an approver: approval trail, approval chain, stage actors)
+const BUDGET = { statements: 65, waves: 20, depth: 24 };
 
 describe("GET /rfq/quote-comparison-view/:id — equivalence + query budget", () => {
   let made;

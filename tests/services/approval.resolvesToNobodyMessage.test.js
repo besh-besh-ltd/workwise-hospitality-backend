@@ -4,7 +4,7 @@
 // has two steps and both dropped:
 //   step 1  ROLE "RFQ Creator"     — holds rfq.read/create/update but NOT
 //                                    rfq.approve, so it can NEVER approve.
-//   step 2  ROLE "Tender Approver" — qualified, but nobody held it for
+//   step 2  ROLE "RFQ Approver" — qualified, but nobody held it for
 //                                    department Housekeeping at that unit.
 //
 // The engine correctly refused (failing closed beats auto-approving), but told
@@ -30,10 +30,10 @@ import { db, withTx, closeDb } from "../setup/db.js";
 import { createApprovalInstance } from "../../app/models/generalModel.js";
 import { IDS } from "../fixtures/ids.js";
 
-// Mirrors prod: role 2 holds rfq read+create but NOT approve; role 5 holds
+// Mirrors prod: role 2 holds rfq read+create but NOT approve; role 4 (RFQ Approver) holds
 // read+approve but (asserted below) nobody holds it in this scope.
 const ROLE_CANNOT_APPROVE = 2;
-const ROLE_QUALIFIED_BUT_UNHELD = 5;
+const ROLE_QUALIFIED_BUT_UNHELD = 4;
 
 let ENTITY_ID = 9_400_000;
 const nextEntityId = () => ++ENTITY_ID;

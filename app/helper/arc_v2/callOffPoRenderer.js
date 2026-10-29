@@ -8,6 +8,7 @@ import { uploadToS3 } from '../../models/generalModel.js';
 import { logger } from '../../util/logger.js';
 import { supplierDetailsFor, stateCodeForHotel, taxSplitFor, taxLabelsFor, summarizeTaxLines } from '../gstState.js';
 import { callOffLineTax } from './callOffLineTax.js';
+import { loadDeliveryPlanForDocument, poQrSvg } from '../../services/inventory/planDocument.js';
 
 /**
  * Call-off Purchase Order document renderer (audit CO10).
@@ -60,10 +61,14 @@ function lineTax(line, split) {
  *     supplier: { name, email, gstin, address, state_name, state_code } | null,
  *     tax_split: 'IGST' | 'CGST_SGST' | 'CGST_UTGST' | null,
  *     arc: { arc_number, arc_title, mr_number },
- *     lines: [{ product_name, quantity, unit, unit_price, gst_pct, charges_meta, total_price }] }
+ *     lines: [{ product_name, quantity, unit, unit_price, gst_pct, charges_meta, total_price }],
+ *     delivery_plan?: planDocument.loadDeliveryPlanForDocument rows,
+ *     qr_svg?: inline SVG of the PO's short link }
  *
  * Back-compat: a supplier with no GSTIN keeps the name + email block, and a null
  * tax_split keeps the single "GST" rate column, byte for byte as before (spec §6.4).
+ * Likewise a context without delivery_plan / qr_svg renders byte for byte as
+ * before (inventory §7.4: the plan and QR are printed only when present).
  */
 export function renderCallOffPoHtml(ctx) {
   const po = ctx.po || {};
@@ -125,6 +130,32 @@ export function renderCallOffPoHtml(ctx) {
       <td class="r">${inr(l.total_price)}</td>
     </tr>`).join('');
 
+  // Inventory §7.4: the delivery plan (hotel × phase) and the PO's QR code.
+  const plan = Array.isArray(ctx.delivery_plan) ? ctx.delivery_plan.filter((d) => d && d.lines && d.lines.length) : [];
+  const qr = typeof ctx.qr_svg === 'string' && ctx.qr_svg.startsWith('<svg') ? ctx.qr_svg : null;
+  const qrBlock = qr
+    ? `
+        <div style="width:72px; height:72px; margin:6px 0 0 auto;">${qr}</div>`
+    : '';
+  const planRows = plan.map((d) => d.lines.map((l, i) => `
+        <tr>${i === 0 ? `
+          <td rowspan="${d.lines.length}">${esc(d.hotelName || '—')}${d.remarks ? `<br/><span style="font-size:10px; color:#666;">${esc(d.remarks)}</span>` : ''}</td>
+          <td class="c" rowspan="${d.lines.length}">${esc(d.phaseNo)}</td>
+          <td rowspan="${d.lines.length}">${esc(d.dueDateDisplay || 'To be scheduled')}</td>` : ''}
+          <td>${esc(l.productName || '—')}</td>
+          <td class="r">${esc(l.plannedQty)} ${esc(l.unit || '')}</td>
+        </tr>`).join('')).join('');
+  const planBlock = plan.length
+    ? `
+    <div style="margin-top:16px;">
+      <div class="tag">Delivery plan</div>
+      <table>
+        <thead><tr><th>Hotel</th><th class="c">Phase</th><th>Due</th><th>Item</th><th class="r">Qty</th></tr></thead>
+        <tbody>${planRows}</tbody>
+      </table>
+    </div>`
+    : '';
+
   return `<!doctype html><html><head><meta charset="utf-8"><style>
     * { box-sizing: border-box; }
     body { font-family: 'Georgia','Times New Roman',serif; color:#1a1a1a; font-size:12px; margin:0; }
@@ -156,7 +187,7 @@ export function renderCallOffPoHtml(ctx) {
         <div><b>${esc(po.po_number || '—')}</b></div>
         <div>Released: ${fmtDate(po.created_at)}</div>
         <div>ARC: ${esc(arc.arc_number || '—')}</div>
-        <div>Req: ${esc(arc.mr_number || '—')}</div>
+        <div>Req: ${esc(arc.mr_number || '—')}</div>${qrBlock}
       </div>
     </div>
     <div class="parties">
@@ -178,7 +209,7 @@ export function renderCallOffPoHtml(ctx) {
     <div class="totals">
       <div><span>Subtotal</span><span>${inr(subtotal)}</span></div>${taxTotals}
       <div class="grand"><span>Total</span><span>${inr(po.total_value != null ? po.total_value : subtotal)}</span></div>
-    </div>
+    </div>${planBlock}
     <div class="note">
       Rates are governed by the referenced Annual Rate Contract. This call-off
       is released on approval of the originating material requisition and is
@@ -230,6 +261,7 @@ export async function loadCallOffPoContext(poId, runner = db) {
   );
   const supplier = await supplierDetailsFor(head.finalized_vendor_id, runner);
   const placeOfSupplyCode = await stateCodeForHotel(head.hotel_id, runner);
+  const deliveryPlan = await loadDeliveryPlanForDocument(runner, poId);
   return {
     po: { po_number: head.po_number, total_value: head.total_value, created_at: head.created_at },
     buyer: {
@@ -242,6 +274,8 @@ export async function loadCallOffPoContext(poId, runner = db) {
     tax_split: taxSplitFor(supplier?.state_code ?? null, placeOfSupplyCode),
     arc: { arc_number: head.arc_number, arc_title: head.arc_title, mr_number: head.mr_number },
     lines,
+    delivery_plan: deliveryPlan,
+    qr_svg: poQrSvg(head.po_id),
   };
 }
 

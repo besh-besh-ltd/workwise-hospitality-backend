@@ -22,6 +22,17 @@ import { supplierDetailsFor, stateCodeForHotel, taxSplitFor } from "../helper/gs
 import { callOffPoTax, callOffLineTax } from "../helper/arc_v2/callOffLineTax.js";
 import { buildScopeExistsClause } from "../services/authorizationService.js";
 import { PO_SCOPE_PERMISSIONS, scopedExistsFor, buildScopeClause } from "./scope/poScope.js";
+import { canInitiateOnTuple, resolvePoScopeTuple } from "./purchaseOrderModel.js";
+import { cleanRefTitle } from "../helper/poReference.js";
+import { getRfqPoCoverage, classifyInitiateKind, getPoApprovalInitiators } from "./po/poInitiateGuide.js";
+import { poHeldSql } from "../services/po/poHold.js";
+
+// Today's calendar day in IST. Prod and CI sessions run in UTC, so a bare
+// CURRENT_DATE is yesterday until 05:30 IST.
+const IST_TODAY = `(CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Kolkata')::date`;
+
+// PO statuses after the vendor accepted: only then can a delivery be late.
+const VENDOR_ACCEPTED_PO_STATUSES = new Set(["approved", "dispatched", "GRN", "invoice_raised"]);
 
 // ---------------------------------------------------------------------------
 // Status bucket mapping (UI bucket -> raw po_status enum value[])
@@ -224,6 +235,8 @@ function initiateExistsFor(userId, alias, values, startIndex) {
 //
 // Mutates `values`; returns { clause, nextIndex }.
 function actionRequiredClause(scope, values, startIndex) {
+  // A PO on hold waits on the person asked for information, not on its
+  // approvers: it leaves their list and is in the asked person's instead.
   const approverExists = `(
     po.approval_instance_id IS NOT NULL AND tai.status = 'PENDING' AND EXISTS (
       SELECT 1
@@ -234,10 +247,19 @@ function actionRequiredClause(scope, values, startIndex) {
         AND st.status = 'PENDING'
         AND sa.status = 'PENDING'
         AND sa.approver_user_id = $1
-    )
+    ) AND NOT ${poHeldSql("po.id")}
+  )`;
+  const askedOfMe = `EXISTS (
+    SELECT 1 FROM tbl_po_send_backs sb_me
+     WHERE sb_me.purchase_order_id = po.id
+       AND sb_me.status = 'OPEN'
+       AND sb_me.target_user_id = $1
   )`;
 
-  const initiatableStatus = `po.status IN ('draft', 'approved')`;
+  // Only a DRAFT is waiting for someone to initiate it. 'approved' used to be
+  // listed too, which kept every vendor-accepted PO in "Pending for me" for
+  // every initiator long after there was anything left for them to do.
+  const initiatableStatus = `po.status = 'draft'`;
 
   // Super admin (hospitalityCompanyIds === null) holds no tbl_user_role_scopes
   // rows at all, exactly as in buildScopeClause above, so any scope-correlated
@@ -245,7 +267,7 @@ function actionRequiredClause(scope, values, startIndex) {
   // for the same reason.
   if (scope.hospitalityCompanyIds === null) {
     return {
-      clause: `(${approverExists} OR ${initiatableStatus})`,
+      clause: `(${approverExists} OR ${askedOfMe} OR ${initiatableStatus})`,
       nextIndex: startIndex,
     };
   }
@@ -255,7 +277,7 @@ function actionRequiredClause(scope, values, startIndex) {
   // company via po.company_id, so the status alone is the honest answer here.
   if (Array.isArray(scope.hospitalityCompanyIds) && scope.hospitalityCompanyIds.length === 0) {
     return {
-      clause: `(${approverExists} OR ${initiatableStatus})`,
+      clause: `(${approverExists} OR ${askedOfMe} OR ${initiatableStatus})`,
       nextIndex: startIndex,
     };
   }
@@ -278,7 +300,7 @@ function actionRequiredClause(scope, values, startIndex) {
     ))
   ))`;
 
-  return { clause: `(${approverExists} OR ${initiatable})`, nextIndex: i };
+  return { clause: `(${approverExists} OR ${askedOfMe} OR ${initiatable})`, nextIndex: i };
 }
 
 // Shared SELECT columns + joins used by list / awaiting / tracking. The query
@@ -336,7 +358,7 @@ function poCoreSelect(userParamIdx) {
             AND st.status = 'PENDING'
             AND sa.status = 'PENDING'
             AND sa.approver_user_id = $${userParamIdx}
-        )
+        ) AND NOT ${poHeldSql("po.id")}
       )
       ELSE FALSE
     END AS awaiting_me,
@@ -648,6 +670,7 @@ export async function getDashboardKpis(scope) {
               AND sa.status = 'PENDING'
               AND sa.approver_user_id = $1
           )
+          AND NOT ${poHeldSql("po.id")}
      ) q`,
     values
   );
@@ -697,7 +720,9 @@ export async function getAwaitingPOs(scope) {
   const values = [scope.userId];
   const scoped = buildScopeClause(scope, values, 2);
 
-  const rows = await db.any(
+  // `data`: POs waiting on this user's approval. A PO on hold is not: it
+  // waits on the person asked (`information_requests`, below).
+  const rowsP = db.any(
     `SELECT ${poCoreSelect(1)}
      ${poCoreJoins()}
      WHERE ${scoped.clause}
@@ -713,11 +738,41 @@ export async function getAwaitingPOs(scope) {
            AND sa.status = 'PENDING'
            AND sa.approver_user_id = $1
        )
+       AND NOT ${poHeldSql("po.id")}
      ORDER BY po.created_at ASC`,
     values
   );
 
+  // `information_requests`: open holds where this user is the person asked,
+  // on POs in their scope. requested_by is a display name (the FE prints it).
+  const asked = [scope.userId];
+  const askedScope = buildScopeClause(scope, asked, 2);
+  const requestsP = db.any(
+    `SELECT sb.id AS send_back_id, po.id AS po_id, po.po_number, rfq.rfq_no,
+            sb.reason_category, REQ.name AS requested_by, sb.created_at AS since
+       FROM tbl_po_send_backs sb
+       JOIN tbl_rfq_purchase_order po ON po.id = sb.purchase_order_id
+       LEFT JOIN tbl_rfq rfq ON rfq.id = po.rfq_id
+       LEFT JOIN tbl_users REQ ON REQ.id = sb.requested_by
+      WHERE sb.status = 'OPEN'
+        AND sb.target_user_id = $1
+        AND ${askedScope.clause}
+      ORDER BY sb.created_at ASC, sb.id ASC`,
+    asked
+  );
+
+  const [rows, requests] = await Promise.all([rowsP, requestsP]);
+
   return {
+    information_requests: requests.map((r) => ({
+      send_back_id: Number(r.send_back_id),
+      po_id: Number(r.po_id),
+      po_number: r.po_number,
+      rfq_no: r.rfq_no != null ? Number(r.rfq_no) : null,
+      reason_category: r.reason_category,
+      requested_by: r.requested_by || "An approver",
+      since: r.since ? new Date(r.since).toISOString() : null,
+    })),
     data: rows.map((r) => {
       const m = mapPoCoreRow(r);
       return {
@@ -736,13 +791,54 @@ export async function getAwaitingPOs(scope) {
   };
 }
 
+/**
+ * The rejected PO a re-awarded PO replaces, with the approver's reason and
+ * comment (from the rejection's closed send-back row; for a rejection recorded
+ * before reasons existed, the REJECT action's comment and a null reason).
+ * Null when the PO replaces nothing or the row is gone.
+ */
+async function loadReplacedPo(replacesPoId) {
+  if (!replacesPoId) return null;
+  const row = await db.oneOrNone(
+    `SELECT prev.id, prev.po_number, sb.reason_category,
+            COALESCE(sb.comment, aa.comment) AS comment
+       FROM tbl_rfq_purchase_order prev
+       LEFT JOIN LATERAL (
+         SELECT s.reason_category, s.comment
+           FROM tbl_po_send_backs s
+          WHERE s.purchase_order_id = prev.id
+            AND s.status = 'CLOSED'
+            AND s.route <> 'INFO_REQUEST'
+          ORDER BY s.id DESC
+          LIMIT 1
+       ) sb ON TRUE
+       LEFT JOIN LATERAL (
+         SELECT a.comment
+           FROM tbl_approval_actions a
+          WHERE a.approval_instance_id = prev.approval_instance_id
+            AND a.action = 'REJECT'
+          ORDER BY a.created_at DESC
+          LIMIT 1
+       ) aa ON TRUE
+      WHERE prev.id = $1`,
+    [replacesPoId]
+  );
+  if (!row) return null;
+  return {
+    po_id: Number(row.id),
+    po_number: row.po_number,
+    reason_category: row.reason_category || null,
+    comment: row.comment || null,
+  };
+}
+
 // ===========================================================================
 // 4) Detail-full augmentation (merged into GET /po/:po_id response)
 // ===========================================================================
 // Loads the structured contract-shaped detail object for the PO Detail page.
 // Returns null if the PO is out of scope (caller maps to 404 to avoid leaking
 // existence). Reuses tbl_approval_instances for the workflow timeline.
-export async function getPODetailFull(po_id, scope) {
+export async function getPODetailFull(po_id, scope, viewer = null) {
   const poId = parseInt(po_id, 10);
   if (!poId) return null;
 
@@ -795,6 +891,7 @@ export async function getPODetailFull(po_id, scope) {
             COALESCE(rfq.hospitality_company_id, arc.hospitality_company_id) AS hospitality_company_id,
             COALESCE(rfq.hotel_id, mr.hotel_id, arc.hotel_id) AS hotel_id,
             COALESCE(rfq.department_id, arc.department_id) AS department_id,
+            COALESCE(rfq.process_id, arc.process_id) AS process_id,
             COALESCE(THC.name, ATHC.name, TC.company_name) AS company_name,
             COALESCE(THCH.name, ATHCH.name) AS business_unit,
             COALESCE(DEPT.title, ADEPT.title) AS department_name,
@@ -991,16 +1088,19 @@ export async function getPODetailFull(po_id, scope) {
     callOffSupplier = { supplier, placeCode, taxSplit };
   }
 
-  // Documents: tbl_purchase_order_document + the PO PDF itself.
+  // Documents: tbl_purchase_order_document + the PO PDF itself. A PO takes
+  // one invoice per delivery, so each is named by its number and amount.
   const docRows = await db.any(
-    `SELECT id, document_type, document_url, created_at
+    `SELECT id, document_type, document_url, created_at,
+            invoice_number, invoice_date::text AS invoice_date,
+            invoice_amount::text AS invoice_amount, dispatch_id
      FROM tbl_purchase_order_document
      WHERE purchase_order_id = $1
      ORDER BY created_at DESC`,
     [poId]
   );
   const docs = docRows.map((d) => ({
-    name: `${d.document_type === "grn" ? "GRN" : "Invoice"} document`,
+    name: documentName(d),
     type: d.document_type,
     size: null, // file size not stored
     kind: d.document_type,
@@ -1298,13 +1398,93 @@ export async function getPODetailFull(po_id, scope) {
     };
   }
 
+  // Initiate guidance. BUYER viewers only. `viewer` is req.user (never a
+  // client-supplied id); the vendor-scoped route passes none, and a vendor
+  // reaching a buyer route (user_type 3) is refused here too, since deriveScope
+  // never sets scope.vendorId.
+  let initiateGuide = {};
+  if (viewer) {
+    if (Number(viewer.user_type) === 3 || viewer.is_token_user || scope.vendorId) {
+      initiateGuide = { can_initiate: false, initiate_kind: null, sibling_drafts: [] };
+    } else {
+      const isDraft = po.status === "draft";
+      const isRfqPo = !po.is_call_off && !!po.rfq_id;
+      // The tuple the gate evaluates; reuse the row's own keys, re-read only
+      // when it could not resolve a company (the gate then falls back to the hotel).
+      const tuple = po.hospitality_company_id
+        ? {
+            hospitality_company_id: po.hospitality_company_id,
+            hotel_id: po.hotel_id,
+            department_id: po.department_id,
+            process_id: po.process_id,
+          }
+        : await resolvePoScopeTuple(poId);
+      const [approvalInitiators, canInitiate, coverage] = await Promise.all([
+        getPoApprovalInitiators([poId]),
+        canInitiateOnTuple(viewer, tuple),
+        isRfqPo && isDraft ? getRfqPoCoverage(po.rfq_id) : null,
+      ]);
+      let siblingDrafts = [];
+      if (isRfqPo && canInitiate) {
+        // Drafts of the SAME RFQ, oldest first: the initiator sees what else is
+        // waiting before choosing between initiating now and merging first.
+        // LEFT JOINs: a draft whose vendor row is gone is still listed.
+        siblingDrafts = (await db.any(
+          `SELECT sib.id, sib.po_number, sib.total_value, sib.created_at,
+                  COALESCE(VC.company_name, VU.organization_name, VU.name) AS vendor_name
+             FROM tbl_rfq_purchase_order sib
+             LEFT JOIN tbl_users VU ON VU.id = sib.finalized_vendor_id
+             LEFT JOIN tbl_company VC ON VC.id = VU.company_id
+            WHERE sib.rfq_id = $1 AND sib.status = 'draft' AND sib.id <> $2
+            ORDER BY sib.created_at ASC, sib.id ASC`,
+          [po.rfq_id, poId]
+        )).map((r) => ({
+          id: r.id,
+          po_number: r.po_number,
+          vendor_name: r.vendor_name || null,
+          total_value: r.total_value != null ? Number(r.total_value) : 0,
+          created_at: r.created_at,
+        }));
+      }
+      initiateGuide = {
+        can_initiate: canInitiate,
+        initiate_kind: coverage ? classifyInitiateKind(coverage.get(poId)) : null,
+        raised_by: po.initiated_by != null ? { id: Number(po.initiated_by), name: po.initiator_name || null } : null,
+        approval_initiated_by: approvalInitiators.get(poId) || null,
+        sibling_drafts: siblingDrafts,
+      };
+    }
+  }
+
+  // Re-award trace: the rejected PO this one replaces, with the approver's
+  // reason, so whoever approves the re-award sees why the first was turned
+  // down. BUYER viewers only, on the same gate as the initiate guidance: a
+  // vendor must never see why another vendor's PO was rejected.
+  let replacesTrace = {};
+  if (viewer && !(Number(viewer.user_type) === 3 || viewer.is_token_user || scope.vendorId)) {
+    replacesTrace = { replaces: await loadReplacedPo(po.replaces_po_id) };
+  }
+
   return {
+    ...initiateGuide,
+    ...replacesTrace,
     id: po.id,
     po_number: po.po_number,
     status: po.status,
     status_label: humanizeStatus(po.status),
     total_value: po.total_value != null ? Number(po.total_value) : 0,
     is_call_off: !!po.is_call_off,
+    // Vendor view only: the same flat reference fields the vendor Orders list
+    // carries. (The MR title is never selected for a vendor.)
+    ...(scope.vendorId
+      ? {
+          rfq_no: po.rfq_no ?? null,
+          rfq_title: cleanRefTitle(po.rfq_title) || null,
+          arc_number: po.arc_number || null,
+          arc_title: cleanRefTitle(po.arc_title) || null,
+          mr_number: po.source_mr_number || null,
+        }
+      : {}),
     // Who created the draft. NOT the same person as whoever pressed Initiate
     // (that is the approval instance's own initiated_by), and the only person
     // handleUpdatePO authorises to edit it — so this is who a rejected PO has
@@ -1343,7 +1523,9 @@ export async function getPODetailFull(po_id, scope) {
       business_unit: po.business_unit || null,
       department: po.department_name || null,
       finalized_by: rfqCreator ? rfqCreator.name : null,
-      finalized_date: po.instance_completed_at ? new Date(po.instance_completed_at).toISOString() : null,
+      // Only an approved PO's approval date stands in here: a rejection or a
+      // cancellation is not when the vendor selection was finalized.
+      finalized_date: approvedAt(po) ? new Date(approvedAt(po)).toISOString() : null,
       vendors_invited: null, // not derivable from PO scope
       vendors_participated: rfqStats ? rfqStats.participated : 0,
       rounds: null, // negotiation round count not derivable cleanly here
@@ -1437,11 +1619,20 @@ function humanizeStatus(status) {
   return map[status] || status;
 }
 
+// The approval's completed_at is when it ENDED, whichever way: approved,
+// rejected by an approver, or cancelled. Name the date by that outcome; a
+// rejected PO used to read "Approved <date>".
+const APPROVAL_OUTCOME_LABEL = Object.freeze({ APPROVED: "Approved", REJECTED: "Rejected", CANCELLED: "Cancelled" });
+
+/** When the PO's approval was APPROVED, or null for any other outcome. */
+const approvedAt = (po) => (po.instance_status === "APPROVED" ? po.instance_completed_at || null : null);
+
 function buildKeyDates(po, milestones) {
   const dates = [];
   if (po.created_at) dates.push({ k: "Created", v: new Date(po.created_at).toISOString(), soon: false });
-  if (po.instance_completed_at)
-    dates.push({ k: "Approved", v: new Date(po.instance_completed_at).toISOString(), soon: false });
+  const outcome = APPROVAL_OUTCOME_LABEL[po.instance_status];
+  if (outcome && po.instance_completed_at)
+    dates.push({ k: outcome, v: new Date(po.instance_completed_at).toISOString(), soon: false });
   if (po.vendor_action_at)
     dates.push({ k: "Vendor Action", v: new Date(po.vendor_action_at).toISOString(), soon: false });
   const nextMilestone = milestones.find((m) => m.due_date && new Date(m.due_date) >= new Date());
@@ -1501,10 +1692,28 @@ export function effectiveApproverStatus(rowStatus, stepStatus, rule) {
 // their designation and department, when each acted, why one was removed, and
 // above all the free-text comment each approver wrote to the next — is none of
 // their business. The vendor still gets the trail's shape (level, status, when)
-// so "where is my PO" keeps working; they simply do not get the people.
+// so "where is my PO" keeps working; they simply do not get the people. A
+// rejected or cancelled level loses its actor and the approver's comment too.
 //
 // This mirrors the `comparison` gate in getPODetailFull, which suppresses
 // competitors' quote amounts on the same path for the same reason.
+/** "₹70,500" / "₹99.90" from a numeric text; null when absent. Display only. */
+function inrAmount(text) {
+  if (text == null || text === "") return null;
+  const n = Number(text);
+  if (!Number.isFinite(n)) return null;
+  const whole = Number.isInteger(n);
+  return `₹${n.toLocaleString("en-IN", { minimumFractionDigits: whole ? 0 : 2, maximumFractionDigits: 2 })}`;
+}
+
+/** A PO document's display name: "Invoice INV-1001 · ₹4,500"; a file-only invoice is "Invoice document". */
+function documentName(d) {
+  if (d.document_type === "grn") return "GRN document";
+  if (d.document_type !== "invoice" || !d.invoice_number) return "Invoice document";
+  const amount = inrAmount(d.invoice_amount);
+  return amount ? `Invoice ${d.invoice_number} · ${amount}` : `Invoice ${d.invoice_number}`;
+}
+
 async function buildAuditTrail(po, docRows = [], { isVendorView = false } = {}) {
   const workflow = [];
   const activity = [];
@@ -1709,6 +1918,11 @@ async function buildAuditTrail(po, docRows = [], { isVendorView = false } = {}) 
           null;
         policy = reason; // surface the rejection reason as the node's sub-note
       }
+      // A vendor reads their own rejected or cancelled PO here: the approver's
+      // comment and who turned it down are the buyer's. The node keeps its
+      // level, status and date.
+      const ended = nodeStatus === "rejected" || nodeStatus === "cancelled";
+      const hideDecision = isVendorView && ended;
 
       // ---- the full per-level roster (additive; everything above is unchanged)
       // Ordered acted-first (by acted_at asc), then still-live PENDING rows in
@@ -1784,10 +1998,10 @@ async function buildAuditTrail(po, docRows = [], { isVendorView = false } = {}) 
         step: ++stepCounter,
         status: nodeStatus,
         title: `L${st.step_order} approval`,
-        by,
+        by: hideDecision ? null : by,
         when: iso(st.completed_at),
-        policy,
-        reason,
+        policy: hideDecision ? null : policy,
+        reason: hideDecision ? null : reason,
         level: st.step_order,
         decision_rule: st.decision_rule || "ANY",
         // Redacted wholesale on the vendor path — see the note on this
@@ -1824,7 +2038,10 @@ async function buildAuditTrail(po, docRows = [], { isVendorView = false } = {}) 
   }
 
   // ---- 3) Vendor + logistics lifecycle ----
-  const invoiceDoc = docRows.find((d) => d.document_type === "invoice");
+  // "Invoice raised" happened with the FIRST invoice; later deliveries add more.
+  const invoiceDoc = docRows
+    .filter((d) => d.document_type === "invoice")
+    .reduce((first, d) => (!first || new Date(d.created_at) < new Date(first.created_at) ? d : first), null);
   const grnDoc = docRows.find((d) => d.document_type === "grn");
   // 'approved' = the vendor has accepted (acceptPO flips acceptance_pending→approved,
   // and call-offs reach 'approved' only via acceptance) — so an accepted PO must
@@ -1839,7 +2056,9 @@ async function buildAuditTrail(po, docRows = [], { isVendorView = false } = {}) 
 
   const lifecycle = [];
   if (!approvalRejected && status !== "rejected" && status !== "cancelled") {
-    lifecycle.push({ title: "Sent to vendor", by: po.vendor_name || null, when: iso(po.instance_completed_at), done: sentDone });
+    // Sent when the approval was approved. A cancelled approval leaves the PO
+    // here too (pending_approval), and its end is not a send.
+    lifecycle.push({ title: "Sent to vendor", by: po.vendor_name || null, when: iso(approvedAt(po)), done: sentDone });
     if (isRejectedVendor) {
       lifecycle.push({
         title: "Vendor rejected the PO",
@@ -2175,6 +2394,19 @@ async function fetchTrackingRows(scope, { search = "", vendorId, dateFrom, dateT
 
   const whereClause = `WHERE ${conditions.join(" AND ")}`;
 
+  // Dates come back as YYYY-MM-DD text: a pg DATE parsed into a JS Date lands
+  // on the Node process's local midnight, a day early once shifted to UTC on
+  // any machine east of Greenwich.
+  //
+  // ETA (spec §7.6) = the next open delivery: a plan row still open or
+  // partial, with a due date, on a PO whose receiving is live (not received /
+  // closed short, not completed). A go-live backlog PO (receipt_legacy with
+  // nothing received) is live too; a legacy-received one is 'received'. The
+  // earliest such date on or after today (IST) wins, so a late phase doesn't
+  // hide the next one due; with only late phases left, the earliest of those.
+  // `overdue_phases` / `overdue_phase_no` count the open phases past their IST
+  // due date (buildTrackingRow turns them into "Phase N overdue"). With no
+  // open dated phase the row falls back to the payment-milestone date.
   const rows = await db.any(
     `SELECT ${poCoreSelect(1)},
         EXISTS (SELECT 1 FROM tbl_purchase_order_document d
@@ -2185,9 +2417,25 @@ async function fetchTrackingRows(scope, { search = "", vendorId, dateFrom, dateT
            WHERE m.po_id = po.id AND m.status <> 'deleted')::int AS milestone_total,
         (SELECT COUNT(*) FROM tbl_payment_milestone m
            WHERE m.po_id = po.id AND m.status = 'achieved')::int AS milestone_done,
-        (SELECT MIN(m.due_date) FROM tbl_payment_milestone m
-           WHERE m.po_id = po.id AND m.status NOT IN ('deleted','achieved')) AS next_due
+        (SELECT MIN(m.due_date)::text FROM tbl_payment_milestone m
+           WHERE m.po_id = po.id AND m.status NOT IN ('deleted','achieved')) AS next_due,
+        dlv.next_delivery_due,
+        dlv.overdue_phases,
+        dlv.overdue_phase_no
      ${poCoreJoins()}
+     LEFT JOIN LATERAL (
+       SELECT COALESCE(MIN(pd.due_date) FILTER (WHERE pd.due_date >= ${IST_TODAY}), MIN(pd.due_date))::text
+                AS next_delivery_due,
+              (COUNT(*) FILTER (WHERE pd.due_date < ${IST_TODAY}))::int AS overdue_phases,
+              (ARRAY_AGG(pd.phase_no ORDER BY pd.due_date, pd.phase_no)
+                 FILTER (WHERE pd.due_date < ${IST_TODAY}))[1] AS overdue_phase_no
+         FROM tbl_po_delivery pd
+        WHERE pd.po_id = po.id
+          AND pd.status IN ('open', 'partial')
+          AND pd.due_date IS NOT NULL
+          AND po.receipt_status NOT IN ('received', 'closed_short')
+          AND po.status <> 'completed'
+     ) dlv ON TRUE
      ${whereClause}
      ORDER BY po.created_at DESC`,
     values
@@ -2274,7 +2522,22 @@ function buildTrackingRow(r) {
   else if (r.next_due && new Date(r.next_due) < new Date()) paymentStatus = "overdue";
 
   const completed = r.status === "completed";
-  const overdue = !!(r.next_due && new Date(r.next_due) < new Date() && !completed);
+  // The ETA column and its overdue colour follow the next open delivery when
+  // there is one, else the payment milestone (see fetchTrackingRows). A
+  // delivery is only late once the vendor has accepted the PO: a PO still
+  // sent / awaiting acceptance shows its ETA but is never overdue. When a
+  // phase is late the date stays the next one due and eta_label (the line
+  // under it) says which phase is late; otherwise eta_label is the date.
+  const etaDay = r.next_delivery_due || r.next_due || null;
+  const lateDeliveries = r.next_delivery_due && VENDOR_ACCEPTED_PO_STATUSES.has(String(r.status))
+    ? Number(r.overdue_phases) || 0
+    : 0;
+  const overdue = r.next_delivery_due
+    ? lateDeliveries > 0
+    : !!(r.next_due && new Date(r.next_due) < new Date() && !completed);
+  let etaLabel = etaDay;
+  if (lateDeliveries === 1) etaLabel = `Phase ${r.overdue_phase_no} overdue`;
+  else if (lateDeliveries > 1) etaLabel = `${lateDeliveries} phases overdue`;
 
   return {
     id: m.id,
@@ -2291,8 +2554,8 @@ function buildTrackingRow(r) {
     grn_status: grnStatus,
     invoice_status: invoiceStatus,
     payment_status: paymentStatus,
-    eta_delivery: r.next_due ? new Date(r.next_due).toISOString() : null,
-    eta_label: r.next_due ? new Date(r.next_due).toISOString().slice(0, 10) : null,
+    eta_delivery: etaDay ? new Date(`${etaDay}T00:00:00Z`).toISOString() : null,
+    eta_label: etaLabel,
     overdue,
     completed,
   };

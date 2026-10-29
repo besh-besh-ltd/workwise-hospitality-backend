@@ -434,4 +434,20 @@ describe("Report 5.1 — Approval Audit Trail", () => {
     expect(labels.sort()).toEqual(["Approved", "Rejected"]);
     expect(bodyValues(ws, "Count")).toEqual([1, 1]);
   });
+
+  it("names a request for information, its answer and its withdrawal, and never flags them", async () => {
+    // A PO put on hold to ask someone for information writes these three
+    // actions. They are not decisions: the answer usually comes from someone
+    // who is not an approver at all, so timing them as approvals would put
+    // false findings in front of an auditor. All three at 23:00 IST.
+    const po = await makePo({ value: 1000, initiatedBy: IDS.users.a1_proc_buyer });
+    await makeDecision(po.id, { actorId: IDS.users.a1_proc_poApp, action: "SEND_BACK", istHour: 23, comment: "Which floor?" });
+    await makeDecision(po.id, { actorId: IDS.users.a1_proc_buyer, action: "SEND_BACK_ANSWERED", istHour: 23, comment: "Third" });
+    await makeDecision(po.id, { actorId: IDS.users.a1_proc_poApp, action: "SEND_BACK_WITHDRAWN", istHour: 23, comment: null });
+
+    const wb = await getReport("approval_audit_trail");
+    const labels = bodyValues(wb.getWorksheet("Event Log"), "Decision").map(String).sort();
+    expect(labels).toEqual(["Asked for information", "Information provided", "Request withdrawn"]);
+    expect(bodyValues(wb.getWorksheet("Anomalies"), "Severity")).toHaveLength(0);
+  });
 });

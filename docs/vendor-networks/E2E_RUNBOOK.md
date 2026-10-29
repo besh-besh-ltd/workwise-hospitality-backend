@@ -242,7 +242,10 @@ Decided, not bugs. Check against these before filing one.
   on vendor routes, one shared counter) in memory, per process: 20 invalid tokens per
   client per 10 minutes, then 429 for the rest of the window; at most 10,000 clients are
   tracked (oldest evicted). The client is `req.ip` under Express `trust proxy`, set from
-  `TRUST_PROXY_HOPS` (default 1 hop; `0` when no reverse proxy). Valid tokens never count.
+  `TRUST_PROXY_HOPS` (default: no proxy trusted, so `req.ip` is the socket address and
+  X-Forwarded-For is ignored; production's proxy does not add that header, so every client
+  shares one bucket there. Set `1` only behind a proxy that appends the client address).
+  Valid tokens never count.
 - **A network entity's GSTIN cannot be changed** from the profile (409
   `NETWORK_GSTIN_LOCKED`); a vendor in no network edits it as before.
 - **Entity cap.** `POST /entities` stops at `NETWORK_MAX_ENTITIES` live entities per org

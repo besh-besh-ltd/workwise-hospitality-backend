@@ -21,18 +21,26 @@ import generalModel, {
   createApprovalProcess,
   getApprovalProcesses,
   updateApprovalProcess,
+  deactivateApprovalProcessIfUnused,
+  getPolicyCoverage,
   deleteApprovalProcess,
   getDepartmentSubGraphPreview,
   checkIfUserIsFinalApprover,
   getApprovalPolicyTenant,
   getApprovalInstanceTenant,
-  getApprovalProcessTenant
+  getApprovalProcessTenant,
+  ENTITY_APPROVE_RESOURCE_MAP
 } from '../../models/generalModel.js';
-import { resolveHospitalityCompanyScope } from '../../helper/arc_v2/resolveHospitalityCompany.js';
 import { executeApprovalAction } from '../../services/approvalActionService.js';
+import { ApprovalInstanceNotFoundError } from '../../services/approvalTargetOwner.js';
+import { PoDecisionError } from '../../services/poApprovalService.js';
+import { stageLabel } from '../../services/notificationLinks.js';
 import {
   snapshotPolicySteps,
+  snapshotPendingInstanceStepLinks,
+  pairPolicySteps,
   computePolicyStepDiff,
+  summarizeDiffEntry,
   propagatePolicyChangeToInstances,
   handleAutoCompletedInstances,
   getPendingInstancesForPolicy,
@@ -41,10 +49,12 @@ import {
   dispatchPropagationEmails,
   roleStepPermissionVerdict
 } from '../../services/approvalPropagationService.js';
+import { lockPosOfInstances } from '../../services/po/poHold.js';
 import { AVAILABLE_HIERARCHY_TYPES } from '../../util/constants.js';
 import { initiatePurchaseOrder } from '../../models/purchaseOrderModel.js';
 import db from '../../config/dbConn.js';
 import { requestIsCompanyAdmin } from '../../middleware/companyAdmin.js';
+import { resolveApprovalCompanyScope, inCompanyScope } from '../../services/approvalTenantScope.js';
 import {
   listDelegations,
   findOverlappingDelegation,
@@ -399,72 +409,11 @@ const generalController = {
 // ===========================================================================
 // Tenant scope for the approval endpoints.
 // ---------------------------------------------------------------------------
-// Every handler below derives its company scope from req.user via these two
-// helpers. A client-supplied `hospitality_company_id` may only NARROW the
-// result; it can never widen it.
+// Every handler below derives its company scope from req.user via
+// resolveApprovalCompanyScope / inCompanyScope (services/approvalTenantScope.js,
+// shared with the RFQ and ARC approval routes). A client-supplied
+// `hospitality_company_id` may only NARROW the result; it can never widen it.
 // ===========================================================================
-
-/**
- * Companies this request may read approval config for.
- *   null      → super admin (user_type 8): every company.
- *   number[]  → exactly these companies ([] = no access).
- *
- * resolveHospitalityCompanyScope() reads tbl_hospitality_user_mappings and
- * already refuses client widening for non-admins. Two active production
- * buyers (358, 407) carry RBAC role scopes but no hospitality mapping row, so
- * we union in tbl_user_role_scopes.company_id — still derived entirely from
- * req.user, and it keeps those users from losing their own tenant's policies.
- */
-async function resolveApprovalCompanyScope(req) {
-  // Memoised per request: several handlers below need the scope more than once
-  // (guard + mutation-target resolution) and it costs two queries to build.
-  if (req.__approvalCompanyScope !== undefined) return req.__approvalCompanyScope;
-
-  const scope = await computeApprovalCompanyScope(req);
-  req.__approvalCompanyScope = scope;
-  return scope;
-}
-
-async function computeApprovalCompanyScope(req) {
-  const mapped = await resolveHospitalityCompanyScope(req);
-  if (mapped === null) return null; // super admin (user_type 8)
-
-  const scoped = (await db.any(
-    `SELECT DISTINCT company_id
-       FROM tbl_user_role_scopes
-      WHERE user_id = $1 AND company_id IS NOT NULL`,
-    [req.user?.id || null]
-  )).map((r) => Number(r.company_id));
-
-  // Company admins own every business unit under their OWN parent buyer
-  // company and may carry NEITHER a hospitality mapping NOR an RBAC role scope
-  // — verified in production: all three legacy user_type-7 users have zero rows
-  // in both tables. Without this union the scope collapses to [] for the only
-  // role that may reach the Approval Wizard, so it could neither list nor save
-  // a single policy.
-  //
-  // Keyed on the capability rather than on user_type 7, or an administrator
-  // promoted the new way — an ordinary buyer holding company.admin — would fall
-  // through to whatever scope they happened to hold as a buyer, which is
-  // precisely the estate they were promoted to see beyond.
-  //
-  // tbl_users.company_id is loaded from the DB by the jwtUsr strategy, so this
-  // is still derived entirely from req.user — never from a header or the body.
-  // It is the same tenancy edge hospitalityController.js enforces everywhere as
-  // `record.buyer_company_id !== company.id`.
-  let administered = [];
-  if ((await requestIsCompanyAdmin(req)) && req.user?.company_id) {
-    administered = (await db.any(
-      `SELECT id
-         FROM tbl_hospitality_companies
-        WHERE buyer_company_id = $1
-          AND COALESCE(is_deleted, 0) = 0`,
-      [Number(req.user.company_id)]
-    )).map((r) => Number(r.id));
-  }
-
-  return [...new Set([...(mapped || []), ...scoped, ...administered])];
-}
 
 /**
  * The companies a stuck-approvals request may read.
@@ -483,12 +432,6 @@ async function resolveStuckScope(req, scopeIds) {
   return rows.map((r) => Number(r.id));
 }
 
-/** True when `companyId` is inside the request's server-derived scope. */
-function inCompanyScope(scopeIds, companyId) {
-  if (scopeIds === null) return true; // super admin
-  if (companyId === null || companyId === undefined) return false;
-  return scopeIds.includes(Number(companyId));
-}
 
 /**
  * Resolve a policy id to its owning company and 404 when it belongs to another
@@ -503,6 +446,25 @@ async function guardPolicyTenant(req, res, policyId) {
   }
   return tenant;
 }
+
+// Entity types POST /hospitality/approval/submit refuses: every instance type
+// the engine accepts (createApprovalInstance rejects anything else).
+//
+// Each one is opened by its own server workflow (RFQ/TENDER publish, TECHNICAL
+// and NEGOTIATION rounds, finalize and submit-for-approval for
+// NEGOTIATION_QUOTE, PO initiate, MR, the ARC v2 stages), and that workflow is
+// what checks the entity belongs to the caller's tenant and writes the metadata
+// the post-approval handler later trusts. This route did neither: an instance
+// could name ANY entity_id with ANY metadata, so a NEGOTIATION_QUOTE forged on
+// another company's product with a self-consistent po_payload, once approved
+// by the caller's own approver, drafted a PO on that company's RFQ priced from
+// its vendor; a forged RFQ instance published another company's RFQ.
+//
+// No screen calls this route (frontend, admin panel and mobile searched for
+// `approval/submit`, 2026-10-25: no caller). A type added to the engine later
+// is refused here by default; opening one through this route would first need
+// an entity-tenant check and handlers that trust no caller-written metadata.
+const SERVER_OWNED_APPROVAL_TYPES = new Set(Object.keys(ENTITY_APPROVE_RESOURCE_MAP));
 
 /** Same as guardPolicyTenant, for approval instances. */
 async function guardInstanceTenant(req, res, instanceId) {
@@ -553,6 +515,15 @@ async function guardInstanceRead(req, res, instanceId) {
  * tenant could rename or deactivate another tenant's procurement process and
  * silently break every policy routed through it.
  */
+function respondProcessInUse(res, blockers) {
+  return res.status(409).json({
+    status: 0,
+    code: 'PROCESS_IN_USE',
+    message: 'This process is still in use',
+    data: { blockers },
+  });
+}
+
 async function guardProcessTenant(req, res, processId) {
   const proc = await getApprovalProcessTenant(processId);
   const notFound = () => {
@@ -617,10 +588,11 @@ async function resolveMutationCompany(req, res, requestedRaw, notFoundMessage) {
  * Pick the ROLE steps a policy save must be validated against.
  *
  * ── WHY THIS DOES NOT USE computePolicyStepDiff ───────────────────────────
- * That diff keys purely on `step_order`, and `step_order` is CLIENT-SUPPLIED,
- * OPTIONAL (`insertPolicySteps` falls back to the array index) and NOT unique in
- * the database. Both holes are exploitable, and both restore exactly the state
- * the guard exists to prevent:
+ * When this guard was written that diff keyed purely on `step_order` (it now
+ * pairs by approver identity first, and only falls back to `step_order`), and
+ * `step_order` is CLIENT-SUPPLIED and OPTIONAL (`insertPolicySteps` falls back
+ * to the array index). An order-keyed delta had two exploitable holes, both
+ * restoring exactly the state the guard exists to prevent:
  *
  *   1. OMIT `step_order` entirely → every proposed step collapses onto the single
  *      `undefined` key, so the map holds only the LAST element. Every stored step
@@ -800,7 +772,7 @@ function unqualifiableRoleStepsResponse(entityType, offenders) {
     status: 3,
     code: 'APPROVER_ROLE_CANNOT_APPROVE',
     message:
-      `This approval step names a role that cannot approve ${entityType}. ` +
+      `This approval step names a role that cannot approve ${stageLabel(entityType)}. ` +
       `${detail}. Grant the missing permission(s) to the role, or pick a role that already holds them ` +
       `— otherwise the step is dropped when the approval is created and the request auto-approves with nobody having approved it.`,
     data: { entity_type: entityType, steps: offenders }
@@ -988,10 +960,16 @@ const hospitalityApprovalController = {
         // Compute diff against the proposed steps BEFORE applying any DB changes,
         // so we can warn the admin if PENDING instances would be affected.
         if (oldSteps.length > 0 && steps && steps.length > 0) {
-          const previewDiff = computePolicyStepDiff(oldSteps, steps);
-          logger.info(`[PolicyUpdate] Pre-flight diff: ${previewDiff.length} changes — ${JSON.stringify(previewDiff.map(d => ({ type: d.type, step_order: d.step_order, sourceChanged: d.sourceChanged, ruleChanged: d.ruleChanged })))}`);
+          // Number the proposed steps exactly as insertPolicySteps will, so the
+          // preview pairs the same levels the save will.
+          const proposedSteps = steps.map((s, i) => ({ ...s, step_order: (s && s.step_order) || (i + 1) }));
+          const previewDiff = computePolicyStepDiff(oldSteps, proposedSteps);
+          logger.info(`[PolicyUpdate] Pre-flight diff: ${previewDiff.length} changes — ${JSON.stringify(previewDiff.map(summarizeDiffEntry))}`);
 
-          if (previewDiff.length > 0 && !confirmed_approval_impact) {
+          // A diff of only STEP_MOVED changes nothing on any pending instance —
+          // propagation just re-points links — so it is not an impact to warn about.
+          const changesPendingApprovals = previewDiff.some(d => d.type !== 'STEP_MOVED');
+          if (changesPendingApprovals && !confirmed_approval_impact) {
             const pendingInstances = await getPendingInstancesForPolicy(id);
             logger.info(`[PolicyUpdate] Pre-flight pending instances for policy ${id}: ${pendingInstances.length}`);
 
@@ -1014,7 +992,10 @@ const hospitalityApprovalController = {
                 steps_removed: previewDiff.filter(d => d.type === 'STEP_REMOVED').map(d => d.step_order),
                 steps_modified: previewDiff
                   .filter(d => d.type === 'STEP_MODIFIED')
-                  .map(d => ({ step_order: d.step_order, sourceChanged: d.sourceChanged, ruleChanged: d.ruleChanged }))
+                  .map(d => ({ step_order: d.step_order, sourceChanged: d.sourceChanged, ruleChanged: d.ruleChanged })),
+                steps_moved: previewDiff
+                  .filter(d => d.type === 'STEP_MOVED')
+                  .map(d => ({ from: d.from, to: d.to }))
               };
 
               logger.info(`[PolicyUpdate] Returning APPROVAL_IMPACT_WARNING for policy ${id} (${pendingInstances.length} pending) — save aborted`);
@@ -1041,6 +1022,15 @@ const hospitalityApprovalController = {
         // - If propagation throws, the policy mutation rolls back too, so we
         //   never leave a half-applied state ("policy saved but propagation failed").
         const txResult = await db.tx(async t => {
+          // The PO rows of this policy's pending approvals come FIRST, in PO id
+          // order, before the policy row and before deletePolicySteps (whose
+          // ON DELETE SET NULL locks the instance step rows). Every PO decision
+          // locks the PO, then its approval; taking either of those here before
+          // the PO would invert that order and can deadlock with an approver
+          // acting on one of these POs. propagatePolicyChangeToInstances takes
+          // the same locks again later; a row lock already held is free.
+          await lockPosOfInstances(t, { policyId: id });
+
           // Acquire row-level lock on the policy. Any concurrent save against
           // the same policy will block here until this tx commits/rolls back.
           await t.oneOrNone('SELECT id FROM tbl_approval_policies WHERE id = $1 FOR UPDATE', [id]);
@@ -1071,29 +1061,44 @@ const hospitalityApprovalController = {
           const updatedPolicy = await updateApprovalPolicy(id, patch, t);
 
           let newSteps = [];
+          let lockedOldSteps = [];
+          let instanceLinks = null;
           if (steps && steps.length > 0) {
+            // Read the steps being replaced and capture every pending instance's
+            // link to them UNDER THE POLICY LOCK, before deletePolicySteps —
+            // the FK is ON DELETE SET NULL, so afterwards no row says which
+            // level any instance step came from. Read here rather than reusing
+            // the Phase 1 snapshot so a save that committed in between (a
+            // double-click) cannot leave the diff and the links describing
+            // different rows.
+            lockedOldSteps = await snapshotPolicySteps(id, t);
+            instanceLinks = await snapshotPendingInstanceStepLinks(id, t);
             await deletePolicySteps(id, t);
             newSteps = await insertPolicySteps(steps, id, t);
           }
 
           // PHASE 4: Compute diff against the steps we just wrote, propagate.
-          logger.info(`[PolicyUpdate] Checking diff: oldSteps=${oldSteps.length}, newSteps=${newSteps.length}`);
+          logger.info(`[PolicyUpdate] Checking diff: oldSteps=${lockedOldSteps.length}, newSteps=${newSteps.length}, capturedLinks=${instanceLinks?.size ?? 0}`);
           let propResult = null;
-          if (oldSteps.length > 0 && newSteps.length > 0) {
-            const diff = computePolicyStepDiff(oldSteps, newSteps);
-            logger.info(`[PolicyUpdate] Diff result: ${diff.length} changes — ${JSON.stringify(diff.map(d => ({ type: d.type, step_order: d.step_order, sourceChanged: d.sourceChanged, ruleChanged: d.ruleChanged })))}`);
+          if (lockedOldSteps.length > 0 && newSteps.length > 0) {
+            const diff = computePolicyStepDiff(lockedOldSteps, newSteps);
+            const stepIdMap = new Map(
+              pairPolicySteps(lockedOldSteps, newSteps).pairs.map(p => [Number(p.oldStep.id), Number(p.newStep.id)])
+            );
+            logger.info(`[PolicyUpdate] Diff result: ${diff.length} changes — ${JSON.stringify(diff.map(summarizeDiffEntry))}`);
 
-            if (diff.length > 0) {
-              // Re-read the policy inside the tx to get the up-to-date row.
-              const fullPolicy = await t.oneOrNone('SELECT * FROM tbl_approval_policies WHERE id = $1', [id]);
+            // Re-read the policy inside the tx to get the up-to-date row.
+            const fullPolicy = await t.oneOrNone('SELECT * FROM tbl_approval_policies WHERE id = $1', [id]);
 
-              propResult = await propagatePolicyChangeToInstances({
-                policyId: id, diff, changedBy: created_by, policy: fullPolicy, t
-              });
-              logger.info(`[PolicyUpdate] Propagation result: ${JSON.stringify({ affected: propResult?.instancesAffected, added: propResult?.totalApproversAdded, removed: propResult?.totalApproversRemoved, autoCompleted: propResult?.instancesAutoCompleted })}`);
-            }
+            // Called even for an empty diff: re-saving unchanged levels still
+            // replaced every policy step row, and propagation restores the
+            // instance links it captured above.
+            propResult = await propagatePolicyChangeToInstances({
+              policyId: id, diff, changedBy: created_by, policy: fullPolicy, t, instanceLinks, stepIdMap
+            });
+            logger.info(`[PolicyUpdate] Propagation result: ${JSON.stringify({ affected: propResult?.instancesAffected, added: propResult?.totalApproversAdded, removed: propResult?.totalApproversRemoved, autoCompleted: propResult?.instancesAutoCompleted, linksRestored: propResult?.linksRestored })}`);
           } else {
-            logger.info(`[PolicyUpdate] Skipped diff — oldSteps.length=${oldSteps.length}, newSteps.length=${newSteps.length}`);
+            logger.info(`[PolicyUpdate] Skipped diff — oldSteps.length=${lockedOldSteps.length}, newSteps.length=${newSteps.length}`);
           }
 
           return { policy: updatedPolicy, propagationResult: propResult };
@@ -1207,6 +1212,41 @@ const hospitalityApprovalController = {
   },
 
   /**
+   * Entity types that have an active matching policy, per process.
+   * GET /hospitality/approval/policy-coverage?hotel_id=
+   * Company is derived server-side from the hotel (or the caller's whole scope).
+   */
+  async getPolicyCoverage(req, res) {
+    try {
+      const scopeIds = await resolveApprovalCompanyScope(req);
+      const raw = req.query.hotel_id;
+      let hotelId = null;
+      let companyArg;
+      if (raw !== undefined && raw !== null && raw !== '') {
+        hotelId = parseInt(raw, 10);
+        const hotel = Number.isFinite(hotelId)
+          ? await db.oneOrNone(
+              `SELECT hospitality_company_id FROM tbl_hospitality_company_hotels
+                WHERE id = $1 AND COALESCE(is_deleted, 0) = 0`,
+              [hotelId]
+            )
+          : null;
+        if (!hotel || !inCompanyScope(scopeIds, hotel.hospitality_company_id)) {
+          return res.status(404).json({ status: 2, message: 'Business unit not found' });
+        }
+        companyArg = Number(hotel.hospitality_company_id);
+      } else {
+        companyArg = scopeIds; // null = super admin, [] = nothing
+      }
+      const data = await getPolicyCoverage({ hospitalityCompanyId: companyArg, hotelId });
+      res.json({ status: 1, data });
+    } catch (e) {
+      logError(e);
+      res.status(400).json({ status: 3, message: e.message });
+    }
+  },
+
+  /**
    * Get approval policies with filtering
    * GET /hospitality/approval/policies
    */
@@ -1311,17 +1351,14 @@ const hospitalityApprovalController = {
         });
       }
 
-      // A purchase requisition's approval is started only by the PR workflow,
-      // which supplies the server-computed value (thresholds), runs strict
-      // step resolution and moves the PR's own status in the same transaction.
-      // Through this generic door an approval could be opened for any PR id —
-      // bypassing technical review, blocking the real submit, and (once
-      // approved) driving the PR's post-approval handler.
-      if (String(entity_type).toUpperCase() === 'PR') {
-        return res.status(400).json({
+      // Server-owned approval types are opened by their own workflow only
+      // (see SERVER_OWNED_APPROVAL_TYPES). Refused before anything is read.
+      const normalizedType = String(entity_type).trim().toUpperCase();
+      if (SERVER_OWNED_APPROVAL_TYPES.has(normalizedType)) {
+        return res.status(403).json({
           status: 3,
-          code: 'APPROVAL_ENTITY_HAS_OWN_WORKFLOW',
-          message: 'Purchase requisitions are submitted for approval from the requisition itself.'
+          code: 'APPROVAL_TYPE_SERVER_OWNED',
+          message: `${normalizedType} approvals are opened by their own workflow, not through this route.`
         });
       }
 
@@ -1383,7 +1420,7 @@ const hospitalityApprovalController = {
    */
   async submitApprovalAction(req, res) {
     try {
-      const { approval_instance_id, approval_instance_step_id, action, comment } = req.body;
+      const { approval_instance_id, approval_instance_step_id, action, comment, reason_category, route } = req.body;
       const approver_user_id = req.user?.id;
 
       if (!approver_user_id) {
@@ -1397,6 +1434,12 @@ const hospitalityApprovalController = {
         });
       }
 
+      // Tenant first: an instance of another company answers exactly like one
+      // that does not exist (404), before the engine says anything about it.
+      // The engine's own answers (already decided, not an approver, an award
+      // that does not bind) are only for callers inside the instance's company.
+      if (!(await guardInstanceTenant(req, res, parseInt(approval_instance_id)))) return;
+
       // executeApprovalAction wraps submitApprovalAction and centrally dispatches
       // entity-specific post-approval handlers (RFQ, TENDER, TECHNICAL, PO, ARC,
       // NEGOTIATION, NEGOTIATION_QUOTE) via the registry in approvalActionService.
@@ -1407,7 +1450,11 @@ const hospitalityApprovalController = {
         approval_instance_step_id: approval_instance_step_id ? parseInt(approval_instance_step_id) : null,
         approver_user_id,
         action,
-        comment
+        comment,
+        // PO rejections only: why, and whether to re-award or cancel. Ignored
+        // for every other entity type.
+        reason_category,
+        route,
       });
 
       // `already_completed`: the instance was no longer PENDING (concluded,
@@ -1418,6 +1465,16 @@ const hospitalityApprovalController = {
 
       res.json({ status: 1, data: result });
     } catch (e) {
+      // An instance whose target is another company's (the engine refuses it
+      // before recording anything): the same answer as an unknown id.
+      if (e instanceof ApprovalInstanceNotFoundError) {
+        return res.status(404).json({ status: 2, message: 'Approval instance not found' });
+      }
+      // A refused PO rejection (unknown reason, a route that is not available,
+      // a stale approval) answers with its own status and code, like the PO page.
+      if (e instanceof PoDecisionError) {
+        return res.status(e.httpStatus || 400).json({ status: 3, message: e.message, code: e.code });
+      }
       logError(e);
       res.status(400).json({ status: 3, message: e.message });
     }
@@ -2231,7 +2288,7 @@ const processController = {
   async updateProcess(req, res) {
     try {
       const { id } = req.params;
-      const { name, description, is_active, process_type } = req.body;
+      const { name, description, is_active } = req.body;
 
       // SECURITY: tbl_approval_processes was mutable by id across tenants.
       if (!(await guardProcessTenant(req, res, parseInt(id)))) return;
@@ -2240,7 +2297,20 @@ const processController = {
       if (name !== undefined) patch.name = name;
       if (description !== undefined) patch.description = description;
       if (is_active !== undefined) patch.is_active = is_active;
-      if (process_type !== undefined) patch.process_type = process_type;
+      // process_type is fixed at creation: a PUT carrying it is ignored.
+
+      // Deactivating via PUT must obey the same in-use guard as DELETE.
+      // Check + deactivate happen atomically in the model; remaining fields
+      // (name/description) are applied by the update below.
+      if (is_active === false || is_active === 'false' || is_active === 0) {
+        const r = await deactivateApprovalProcessIfUnused(parseInt(id));
+        if (!r.deactivated) return respondProcessInUse(res, r.blockers);
+        delete patch.is_active;
+        if (Object.keys(patch).length === 0) {
+          const row = await db.oneOrNone('SELECT * FROM tbl_approval_processes WHERE id = $1', [parseInt(id)]);
+          return res.json({ status: 1, data: row });
+        }
+      }
 
       const data = await updateApprovalProcess(parseInt(id), patch);
 
@@ -2268,6 +2338,7 @@ const processController = {
       await deleteApprovalProcess(parseInt(id));
       res.json({ status: 1, message: 'Process deactivated successfully' });
     } catch (e) {
+      if (e.code === 'PROCESS_IN_USE') return respondProcessInUse(res, e.blockers);
       logError(e);
       res.status(400).json({ status: 3, message: e.message });
     }

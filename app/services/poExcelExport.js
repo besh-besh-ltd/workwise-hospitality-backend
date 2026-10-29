@@ -39,6 +39,7 @@ import {
   sendWorkbook,
   datedFilename,
 } from "./reports/excelKit.js";
+import { buildVendorPoReference } from "../helper/poReference.js";
 
 // These four used to be private to this file. The Reports module needs the
 // same IST mechanics and the same streaming contract, so they now live in
@@ -49,6 +50,7 @@ export { sendWorkbook, datedFilename };
 const MONEY = "#,##0.00";
 const INT = "0";
 const DATE_TIME = "dd-mmm-yyyy hh:mm";
+const DATE = "dd-mmm-yyyy";
 
 // ---------------------------------------------------------------------------
 // Buyer — "All purchase orders" (PO dashboard)
@@ -134,7 +136,7 @@ const TRACKING_COLUMNS = [
   { header: "GRN", key: "grn_status", width: 12 },
   { header: "Invoice", key: "invoice_status", width: 12 },
   { header: "Payment", key: "payment_status", width: 12 },
-  { header: "Next milestone due (IST)", key: "eta", width: 24, numFmt: DATE_TIME },
+  { header: "ETA (IST)", key: "eta", width: 14, numFmt: DATE },
   { header: "Overdue", key: "overdue", width: 10 },
   { header: "Value (₹)", key: "total_value", width: 16, numFmt: MONEY, align: "right" },
 ];
@@ -148,6 +150,11 @@ const STAGE_LABELS = {
   grn: "GRN received",
   invoiced: "Invoiced",
   paid: "Paid",
+};
+
+const etaDay = (v) => {
+  const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(String(v || ""));
+  return m ? new Date(Date.UTC(Number(m[1]), Number(m[2]) - 1, Number(m[3]))) : null;
 };
 
 const titleCase = (s) => (s ? String(s).charAt(0).toUpperCase() + String(s).slice(1) : "");
@@ -168,7 +175,9 @@ export function buildTrackingWorkbook({ rows, filters = [], generatedBy, truncat
       grn_status: titleCase(p.grn_status),
       invoice_status: titleCase(p.invoice_status),
       payment_status: titleCase(p.payment_status),
-      eta: istDate(p.eta_delivery),
+      // eta_delivery is a calendar day (the IST day at 00:00Z): written as
+      // that day, date-only, with no +05:30 shift and no time.
+      eta: etaDay(p.eta_delivery),
       overdue: p.overdue ? "Yes" : "No",
       total_value: p.total_value ?? null,
     }))
@@ -335,6 +344,7 @@ const VENDOR_COLUMNS = [
   { header: "PO #", key: "po_number", width: 20 },
   { header: "Status", key: "status", width: 18 },
   { header: "Order type", key: "type", width: 16 },
+  { header: "RFQ / Contract", key: "reference", width: 46 },
   { header: "Buyer", key: "buyer_name", width: 32 },
   { header: "Hotel", key: "hotel_name", width: 28 },
   { header: "Value (₹)", key: "total_value", width: 16, numFmt: MONEY, align: "right" },
@@ -351,6 +361,7 @@ export function buildVendorOrdersWorkbook({ rows, filters = [], generatedBy, tru
       po_number: p.po_number || `#${p.id}`,
       status: VENDOR_STATUS_LABELS[p.status] || (p.status ? String(p.status) : ""),
       type: p.is_call_off ? "Released Order" : "RFQ",
+      reference: buildVendorPoReference(p),
       buyer_name: p.buyer_name || "",
       hotel_name: p.hotel_name || "",
       total_value: p.total_value ?? null,

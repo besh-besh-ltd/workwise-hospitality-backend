@@ -1058,8 +1058,8 @@ describe("PR approval — admin and generic endpoints", () => {
       department_id: DEPT,
     });
 
-    expect(res.status).toBe(400);
-    expect(res.body.code).toBe("APPROVAL_ENTITY_HAS_OWN_WORKFLOW");
+    expect(res.status).toBe(403);
+    expect(res.body.code).toBe("APPROVAL_TYPE_SERVER_OWNED");
     expect((await stateOf(entityId)).count).toBe(0);
   });
 

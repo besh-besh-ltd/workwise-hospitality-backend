@@ -21,6 +21,7 @@ import {
 } from './dashboard/dashboardMetrics.js';
 import negotiationModel from './negotiationModel.js';
 import rfqModel from './rfqModel.js';
+import { techStuckSql } from './techEvalStuck.js';
 import { isCompanyAdmin } from '../middleware/companyAdmin.js';
 import { buyerPrDetail } from '../services/notificationLinks.js';
 
@@ -1489,9 +1490,11 @@ async function getPendingApprovalsDetail(buyer_company_id, user_id, hotel_ids = 
        ac.arc_number,
        ac.title AS arc_title,
        hch.name AS hotel_name,
+       COALESCE(pol.entity_type LIKE 'ARC\\_GROUP%', false) AS is_group,
        (SELECT COUNT(*) FROM tbl_approval_policy_steps ps
          WHERE ps.approval_policy_id = it.approval_policy_id)::int AS total_steps
      FROM items it
+     LEFT JOIN tbl_approval_policies pol ON pol.id = it.approval_policy_id
      LEFT JOIN tbl_rfq r ON r.id = it.rfq_id
      LEFT JOIN tbl_arc_amendment amd ON it.entity_type = 'ARC_AMENDMENT' AND amd.id = it.entity_id
      LEFT JOIN tbl_arc_contract amdc ON amdc.id = amd.arc_contract_id
@@ -1651,10 +1654,11 @@ const LIFECYCLE_LABELS = Object.freeze({
   RFQ_STUCK_COMMERCIAL: 'Ended · No Quotes',
   COMMERCIAL_EVALUATION: 'Commercial Evaluation',
   NEGOTIATION_ONGOING: 'Negotiation',
-  QUOTATION_APPROVAL: 'Quote Approval',
+  QUOTATION_APPROVAL: 'Final Vendor Approval',
   AWAITING_PO: 'Awaiting PO',
   PO_APPROVAL: 'PO Approval',
   PO_VENDOR_REJECTED: 'PO Vendor Rejected',
+  PO_REJECTED: 'PO rejected by approver',
   APPROVED_COMPLETED: 'Completed',
 });
 const LIFECYCLE_ORDER = Object.keys(LIFECYCLE_LABELS);
@@ -1860,7 +1864,10 @@ async function getMyRfqsBidClosedNoQuotesData(buyer_company_id, user_id, hotel_i
 //   · bid window closed — before that the quotes are sealed;
 //   · at least one real quote — otherwise there is nothing to evaluate;
 //   · no live PO on the product — it was already awarded;
-//   · not already submitted — no PENDING TECHNICAL approval for the product.
+//   · not already submitted — no PENDING TECHNICAL approval for the product;
+//   · not tech-stuck (techEvalStuck.js) — a deadline extension reopens a stuck
+//     evaluation (is_complete back to false), and if bidding then closes with
+//     nobody new to score there is still nothing here to act on.
 // On prod this cut 212 open rows to the ≤78 that are actually actionable.
 async function getMyTechEvalsPendingData(buyer_company_id, user_id, hotel_ids) {
   if (!hotel_ids || hotel_ids.length === 0) {
@@ -1891,6 +1898,7 @@ async function getMyTechEvalsPendingData(buyer_company_id, user_id, hotel_ids) {
              AND ti.status = 'PENDING'
              AND (ti.metadata->>'rfq_product_id') = te.tbl_rfq_product_id::text
         )
+        AND NOT ${techStuckSql({ te: 'te', rfq: 'r' })}
         AND ${rfqMapped('r', 2)}
         ${sc}
       ORDER BY r.bid_end_date::timestamp ASC, te.id
@@ -1935,6 +1943,8 @@ async function getTechEvalsWithDisagreementsData(buyer_company_id, user_id, hote
          JOIN tbl_rfq r ON r.id = te.rfq_id AND ${companyScope()}
         WHERE te.is_complete = false
           AND r.status = 1
+          -- not stuck (techEvalStuck.js): nothing to review on a line nobody can move
+          AND NOT ${techStuckSql({ te: 'te', rfq: 'r' })}
           AND ${DISAGREE_SQL('vr.vendor_response')}
           AND ${rfqMapped('r', 2)}
           ${sc}

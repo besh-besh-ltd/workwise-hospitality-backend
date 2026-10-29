@@ -364,7 +364,17 @@ user_book_demo: async (mobile) => {
         });
     });
   },
+  // Every live row holding this code — trimmed and case-insensitive, exactly as
+  // the unique index uq_users_employee_code_live compares codes. Returns rows,
+  // never one merged row: helper/loginIdentity.js decides which (if any) is the
+  // account. The ORDER BY makes logs and refusals repeatable; correctness never
+  // depends on it.
+  //
+  // A blank code means "no code" and matches nobody: compared trimmed, "   "
+  // would otherwise equal every account whose code is blank (they are legal,
+  // and outside the unique index) — and log in as one of them.
   getUserAuthByEmployeeCode: async (employeeCode) => {
+    if (String(employeeCode ?? '').trim() === '') return [];
     return new Promise(function (resolve, reject) {
       db.any(
         `SELECT
@@ -372,10 +382,11 @@ user_book_demo: async (mobile) => {
             COALESCE(tbl_company.is_hospitality, 0) AS is_hospitality
           FROM tbl_users
           LEFT JOIN tbl_company ON tbl_users.company_id = tbl_company.id
-          WHERE tbl_users.employee_code = $1
+          WHERE upper(btrim(tbl_users.employee_code)) = upper(btrim($1))
             AND tbl_users.user_type != '1'
-            AND tbl_users.is_deleted = '0'`,
-        [employeeCode]
+            AND tbl_users.is_deleted = '0'
+          ORDER BY tbl_users.id`,
+        [String(employeeCode ?? '')]
       )
         .then(function (data) {
           resolve(data);
@@ -386,6 +397,21 @@ user_book_demo: async (mobile) => {
         });
     });
   },
+  // Live accounts other than `excludeUserId` that hold this code, compared the
+  // way uq_users_employee_code_live compares (deactivated accounts included —
+  // they keep their code so reactivating them can never collide).
+  findLiveEmployeeCodeHolders: async (employeeCode, excludeUserId = null) =>
+    String(employeeCode ?? '').trim() === '' ? [] : db.any(
+      `SELECT id, name, status, company_id
+         FROM tbl_users
+        WHERE upper(btrim(employee_code)) = upper(btrim($1))
+          AND is_deleted = 0
+          AND user_type <> 1
+          AND ($2::int IS NULL OR id <> $2::int)
+        ORDER BY id`,
+      [String(employeeCode ?? ''), excludeUserId === null ? null : Number(excludeUserId)]
+    ),
+
   getCompanyDetail: async (user_id) => {
     return new Promise(function (resolve, reject) {
       db.any(`SELECT c.*
@@ -490,6 +516,13 @@ user_book_demo: async (mobile) => {
         });
     });
   },
+
+  // Forgot-password's OTP goes to the one account it resolved, by id.
+  // update_user_otp_resend below writes WHERE email = ..., which stamps every
+  // row sharing the address — a deactivated twin included, whose password the
+  // reset would then change too.
+  setForgotPasswordOtp: async (userId, otp) =>
+    db.none('UPDATE tbl_users SET otp = $2 WHERE id = $1', [userId, otp]),
 
   update_user_otp_resend: async (updateOtp) => {
     return new Promise(function (resolve, reject) {

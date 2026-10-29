@@ -29,7 +29,8 @@ const U = IDS.users;
 //   before: 19 statements in 18 serial waves (2 TECHNICAL + 3 commercial instances)
 //   after : 14 statements in 3 waves; the approval history is 2 statements for
 //           ANY number of instances (it was 1 + 2 per instance).
-const BUDGET = { statements: 14, waves: 4 };
+//   + 1   : the PO's delivery plan (inventory §7.4), read in the same wave.
+const BUDGET = { statements: 15, waves: 4 };
 
 describe("buildPOTemplateData — batched approval history", () => {
   let made;
@@ -94,7 +95,9 @@ describe("buildPOTemplateData — batched approval history", () => {
   it("builds the same template data as before", async () => {
     const data = await buildPOTemplateData(made.poIds[0]);
     expect(data.commercialEvaluations.approvers.length).toBeGreaterThan(0);
-    expect(normalizeForSnapshot(data)).toMatchSnapshot();
+    // The PO QR encodes the PO's id, which differs run to run.
+    expect(data.poQrSvg).toMatch(/^<svg/);
+    expect(normalizeForSnapshot(data, { mask: ["poQrSvg"] })).toMatchSnapshot();
   });
 
   it("does not issue a statement per approval instance", async () => {

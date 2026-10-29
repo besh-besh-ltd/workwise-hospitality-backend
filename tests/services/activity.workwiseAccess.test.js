@@ -181,6 +181,23 @@ describe("Workwise staff working in a customer's account", () => {
     expect(staffEvent.actor_type).toBe("WORKWISE_STAFF");
   });
 
+  it("never files an unnamed console read under the staff account's own company", async () => {
+    // A list of every buyer names no customer. The staff account doing the
+    // looking belongs to a buyer company of its own (production's 150 and 402
+    // do), and filing the read there would tell that client "Workwise looked
+    // at your data" about a look at everyone else's.
+    const since = new Date().toISOString();
+    const client = await internalClient(BOTH_HATS);
+    const res = await client.get(`/api/v1/admin/buyer/buyer-list`);
+    expect(res.status).toBe(200);
+
+    await new Promise((r) => setTimeout(r, 800));
+    const rows = (await eventsSince(since)).filter(
+      (e) => e.route_pattern === "/admin/buyer/buyer-list"
+    );
+    expect(rows).toEqual([]);
+  });
+
   it("still ignores an ordinary customer read", async () => {
     // The inversion applies to one actor only. Recording every buyer's GET
     // would bury the feed under navigation and answer no question anybody

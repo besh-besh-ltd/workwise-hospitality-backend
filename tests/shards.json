@@ -103,6 +103,11 @@
       "name": "arc-mr",
       "pattern": "tests/services/arc_v2/(mr\\.|admin\\.|signatureOtp|negotiationPolymorphic|arcPricingResolver)",
       "description": "Material Requisitions and call-off POs, ARC self-serve admin, signature OTP, pricing resolver"
+    },
+    {
+      "name": "inventory",
+      "pattern": "tests/services/inventory\\.",
+      "description": "Inventory: delivery plans, GRN, ledger, stock ops, counts, reorder, scan, labels"
     }
   ]
 }

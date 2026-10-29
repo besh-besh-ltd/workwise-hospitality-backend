@@ -552,14 +552,14 @@ function buildRoleScopesForRow({ row, awardingRoleId, deptMap, rowNum, userInfo 
 
   // 1. RFQ Creator (col 10) — role 2, always NULL dept
   if (isYes(row[COL.RFQ_CREATOR])) {
-    scopes.push({ role_id: ROLE.TENDER_CREATOR, role_title: 'Tender Creator', department_id: null, source: 'RFQ Creator (col 10)' });
+    scopes.push({ role_id: ROLE.TENDER_CREATOR, role_title: 'RFQ Creator', department_id: null, source: 'RFQ Creator (col 10)' });
   }
 
   // 2. RFQ Publishing (col 11/12) — role 4
   if (isYes(row[COL.RFQ_PUB_APPROVER])) {
     const r = resolveRoleDept(COL.RFQ_PUB_DEPT, 'RFQ Publishing');
     if (r.error) issues.push({ field: 'RFQ Publishing (col 11/12)', value: row[COL.RFQ_PUB_DEPT], reason: r.error });
-    else scopes.push({ role_id: ROLE.TENDER_APPROVER, role_title: 'Tender Approver', department_id: r.dept_id, source: 'RFQ Publishing (col 11/12)' });
+    else scopes.push({ role_id: ROLE.TENDER_APPROVER, role_title: 'RFQ Approver', department_id: r.dept_id, source: 'RFQ Publishing (col 11/12)' });
   }
 
   // 3. Tech Evaluator (col 13/14) — role 6
@@ -580,7 +580,7 @@ function buildRoleScopesForRow({ row, awardingRoleId, deptMap, rowNum, userInfo 
   if (isYes(row[COL.COMM_EVAL_APPROVER])) {
     const r = resolveRoleDept(COL.COMM_EVAL_DEPT, 'Commercial Evaluator');
     if (r.error) issues.push({ field: 'Comm Evaluator (col 17/18)', value: row[COL.COMM_EVAL_DEPT], reason: r.error });
-    else scopes.push({ role_id: ROLE.COMMERCIAL_NEGOTIATOR_N1, role_title: 'Commercial Negotiator N1', department_id: r.dept_id, source: 'Comm Evaluator (col 17/18)' });
+    else scopes.push({ role_id: ROLE.COMMERCIAL_NEGOTIATOR_N1, role_title: 'Commercial Evaluator', department_id: r.dept_id, source: 'Comm Evaluator (col 17/18)' });
   }
 
   // 6. Commercial Approver (col 19/20) — role 12

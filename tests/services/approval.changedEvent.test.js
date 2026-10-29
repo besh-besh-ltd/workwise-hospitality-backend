@@ -25,6 +25,7 @@ jest.unstable_mockModule("../../app/util/socket.js", () => ({
     if (probe && event === "approval:changed") rec.seen = probe(payload);
   },
   emitToCompany: () => {},
+  emitToCompanies: () => {},
   getIo: () => null,
   SocketConfig: () => {},
 }));

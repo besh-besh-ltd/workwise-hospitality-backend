@@ -16,7 +16,7 @@ import { httpLogger } from './logger.js';
 import { trustProxySetting } from './trustProxy.js';
 
 const util = (app) => {
-  // req.ip = the client behind TRUST_PROXY_HOPS reverse proxies (default 1); see trustProxy.js.
+  // req.ip = the client behind TRUST_PROXY_HOPS reverse proxies (default none); see trustProxy.js.
   app.set('trust proxy', trustProxySetting());
   app.use(helmet());
   origin(app);

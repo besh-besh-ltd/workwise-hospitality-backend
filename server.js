@@ -11,8 +11,9 @@ import { pgp } from './app/config/dbConn.js';
 // env config
 dotenv.config();
 
-import { rescheduleAllMilestoneReminders, rescheduleAllRfqPublishJobs, startVendorAcceptanceReminderCron, rescheduleAllNegotiationRoundExpirations, rescheduleAllArcNegotiationRoundExpirations, startRfqStuckPublishWatchdog, startNegotiationRoundClosureSweeper, startPoDocumentWatchdog, startVendorRoutingSweep } from './app/helper/cronManager.js';
+import { rescheduleAllMilestoneReminders, rescheduleAllRfqPublishJobs, startVendorAcceptanceReminderCron, rescheduleAllNegotiationRoundExpirations, rescheduleAllArcNegotiationRoundExpirations, startRfqStuckPublishWatchdog, startNegotiationRoundClosureSweeper, startPoDocumentWatchdog, startVendorRoutingSweep, startPoInitiateReminderCron, startPhaseDueSweeper } from './app/helper/cronManager.js';
 import { startArcAmendmentLifecycleCron } from './app/services/arcAmendmentLifecycleService.js';
+import { startLowStockSweeper } from './app/services/inventory/reorderService.js';
 import { logger } from './app/util/logger.js';
 
 
@@ -24,6 +25,7 @@ const app = createApp();
 rescheduleAllMilestoneReminders();
 rescheduleAllRfqPublishJobs();
 startVendorAcceptanceReminderCron();
+startPoInitiateReminderCron();
 rescheduleAllNegotiationRoundExpirations();
 // Backstop for the one-shot in-memory jobs above, which are lost on any restart.
 startNegotiationRoundClosureSweeper();
@@ -31,6 +33,10 @@ rescheduleAllArcNegotiationRoundExpirations();
 startRfqStuckPublishWatchdog();
 startVendorRoutingSweep();
 startPoDocumentWatchdog();
+// Delivery-phase reminders (replaces the in-memory GRN reminder jobs).
+startPhaseDueSweeper();
+// Daily low-stock digest per hotel (inventory reorder, 07:30 IST).
+startLowStockSweeper();
 startArcAmendmentLifecycleCron();
 
 
