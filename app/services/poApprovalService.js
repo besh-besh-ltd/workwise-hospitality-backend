@@ -330,6 +330,26 @@ async function ownRejection(t, { poId, instanceId, userId }) {
 }
 
 /**
+ * Rewrite a PO's stored document so its approver table shows the rejection
+ * just recorded on `t`. The PDF is a stored file (`po_pdf_url`), so without
+ * this it keeps printing the rejecter as "Invited" from the last approval's
+ * write.
+ *
+ * Never throws: unlike an approval, nobody is sent this document, so a render
+ * or upload failure must not undo the rejection. The write runs in a savepoint,
+ * so even a failed statement inside it rolls back only the document write; the
+ * previous document stays in place and the failure is logged.
+ */
+async function rewriteRejectedPoDocument(t, poId, writeDocument = null) {
+  try {
+    const write = writeDocument || (await import('./poDocumentService.js')).writePoDocument;
+    await t.tx((sp) => write(poId, sp));
+  } catch (err) {
+    logError(`PO ${poId} rejected, but its document could not be rewritten; the stored PDF still shows the approval before the rejection`, err);
+  }
+}
+
+/**
  * A PO rejection as one unit, on the caller's transaction.
  *
  * In order, all on `t`:
@@ -338,13 +358,16 @@ async function ownRejection(t, { poId, instanceId, userId }) {
  *      (STEP_NOT_PENDING) and the PO is pending_approval
  *      (PO_NOT_PENDING_APPROVAL)
  *   1. the decision (REJECT)
+ *   1b. the PO document, rewritten to show the rejection (best effort, in a
+ *      savepoint: a failure keeps the old document and the rejection goes on)
  *   2. PO status 'rejected', or 'cancelled' for the CANCEL route
  *   3. the vendor-scoped de-finalization (handlePORejectionByInstance)
  *   4. a CLOSED tbl_po_send_backs row recording route, reason and comment
  *      (with the REJECT lifecycle row from step 1, the whole record)
  *
- * Any failure throws and the caller's transaction rolls ALL of it back.
- * Nothing is sent from here; see rejectPurchaseOrder for the post-commit side.
+ * Any failure outside 1b throws and the caller's transaction rolls ALL of it
+ * back. Nothing is sent from here; see rejectPurchaseOrder for the post-commit
+ * side.
  *
  * The only non-PENDING instance that answers success is this approver's own
  * earlier rejection of it (a retry): nothing changes, and it comes back with
@@ -362,11 +385,15 @@ async function ownRejection(t, { poId, instanceId, userId }) {
  *   refused unless it is the PO's current one
  * @param {number} [args.approvalInstanceStepId]
  * @param {Object} t - pg-promise transaction
+ * @param {Object} [deps]
+ * @param {Function} [deps.writeDocument] - (poId, conn) => Promise<string>;
+ *   defaults to writePoDocument
  * @returns {Promise<{po:Object, sendBackId:number|null, result:Object, alreadyCompleted:boolean, standing?:Object}>}
  */
 export async function executePoRejectionAtomically(
   { poId, user, comment = '', reasonCategory, route, approvalInstanceId = null, approvalInstanceStepId = null },
-  t
+  t,
+  { writeDocument = null } = {}
 ) {
   if (!t) throw new Error('executePoRejectionAtomically requires a transaction');
   if (!REJECTION_ROUTES.includes(route)) throw new Error(`Unsupported rejection route: ${route}`);
@@ -416,6 +443,11 @@ export async function executePoRejectionAtomically(
   if (result.instance_status !== 'REJECTED') {
     throw new Error(`PO ${poId}: REJECT left the approval ${result.instance_status}`);
   }
+
+  // 1b. The document, as of this decision. Before 3 on purpose: the
+  // de-finalization cancels the award approval the document's Commercial
+  // Evaluation section prints from, so a later rewrite would blank it.
+  await rewriteRejectedPoDocument(t, po.id, writeDocument);
 
   // 2 + 3. Status and the vendor's de-finalization, on this transaction.
   const { handlePORejectionByInstance } = await import('../controllers/po/purchaseOrderController.js');
@@ -473,13 +505,15 @@ export async function executePoRejectionAtomically(
  * @param {number} [args.approvalInstanceStepId]
  * @param {Object} [deps]
  * @param {Object} [deps.conn]
+ * @param {Function} [deps.writeDocument] - (poId, conn) => Promise<string>;
+ *   defaults to writePoDocument
  * @returns {Promise<{po, sendBackId, result, alreadyCompleted, route, reasonCategory}>}
  * @throws PoDecisionError for a refused request; anything else is a failure
  *   that rolled the whole rejection back
  */
 export async function rejectPurchaseOrder(
   { poId, user, comment = '', reason_category, route, approvalInstanceId = null, approvalInstanceStepId = null },
-  { conn = db } = {}
+  { conn = db, writeDocument = null } = {}
 ) {
   const decision = resolveRejectionRoute({ reason_category, route });
 
@@ -489,7 +523,8 @@ export async function rejectPurchaseOrder(
         poId, user, comment, approvalInstanceId, approvalInstanceStepId,
         reasonCategory: decision.reasonCategory, route: decision.route,
       },
-      t
+      t,
+      { writeDocument }
     )
   );
 
