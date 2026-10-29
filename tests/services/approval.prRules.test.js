@@ -806,8 +806,7 @@ describe("PR approval — mid-flight changes", () => {
     expect(s.steps.map((st) => [st.step_order, st.policy_step_order])).toEqual([[1, 1], [2, 3]]);
     expect(activeApproversOf(s, 2)).toEqual([A1, A3].sort((a, b) => a - b));
 
-    // Re-save the policy with IDENTICAL steps: delete + re-insert nulls every
-    // instance step's policy_step_id (and propagation leaves pinned PRs alone).
+    // Re-save the policy with IDENTICAL steps (propagation leaves pinned PRs alone).
     const admin = await httpClient(ADMIN);
     const resave = await admin.post(POLICIES_URL).send({
       id: policyId, entity_type: "PR", hotel_id: HOTEL, is_active: true,
@@ -818,6 +817,12 @@ describe("PR approval — mid-flight changes", () => {
       ],
     });
     expect(resave.status).toBe(200);
+    s = await stateOf(entityId);
+    // The save keeps the ids of unchanged steps, so the links survive. Older
+    // saves (delete + re-insert) nulled them; clear them to probe that path:
+    // resolution must then come from the creation snapshot, never by position.
+    expect(s.steps.map((st) => st.policy_step_order)).toEqual([1, 3]);
+    await db.none(`UPDATE tbl_approval_instance_steps SET policy_step_id = NULL WHERE approval_instance_id = $1`, [s.inst.id]);
     s = await stateOf(entityId);
     expect(s.steps.map((st) => st.policy_step_order)).toEqual([null, null]); // links gone
 
