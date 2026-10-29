@@ -286,6 +286,20 @@ describe("PR submit → approval chain", () => {
     expect((await eventTypes(pr.id)).filter((t) => t === "approved")).toHaveLength(1);
   });
 
+  it("tenant gate: an instance whose PR belongs to another company is refused like a missing one; nothing changes", async () => {
+    const pr = await submitted("1500.00");
+    // The instance stays company A's; its target PR now reads as company B's.
+    await db.none(`UPDATE tbl_purchase_requisition SET hospitality_company_id = $1 WHERE id = $2`, [IDS.hospitality.B, pr.id]);
+    try {
+      const res = await act(ap1C, pr.instanceId, "APPROVE", "ok");
+      expect(res.status).toBe(404);
+      expect((await prRow(pr.id)).status).toBe("pending_approval");
+      expect((await instancesOf(pr.id))[0].status).toBe("PENDING");
+    } finally {
+      await db.none(`UPDATE tbl_purchase_requisition SET hospitality_company_id = $1 WHERE id = $2`, [A, pr.id]);
+    }
+  });
+
   it("reject: AP1 rejects → rejected (terminal: resubmit 409); requester notified; copy still works", async () => {
     const pr = await submitted("2000.00");
     const res = await act(ap1C, pr.instanceId, "REJECT", "Not in budget");
