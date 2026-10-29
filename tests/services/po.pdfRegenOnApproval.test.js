@@ -59,6 +59,8 @@ const fakeTx = {
     : { id: 483, approval_instance_id: 4218, status: "pending_approval", rfq_id: 7, po_number: "483" }),
   one: async (sql) => (/INSERT INTO tbl_po_send_backs/.test(sql) ? { id: 1 } : { approval_instance_step_id: 1, step_order: 1 }),
   none: async () => {},
+  // A savepoint (the rejection's document write) runs on the same transaction.
+  tx: async (fn) => fn(fakeTx),
 };
 jest.unstable_mockModule("../../app/config/dbConn.js", () => ({
   default: { tx: async (fn) => fn(fakeTx) },
@@ -143,12 +145,26 @@ describe("PO document regeneration on approval", () => {
     expect(regenCalls).toEqual([]);
   });
 
-  it("does not regenerate on REJECT", async () => {
+  it("regenerates once on REJECT, inside the rejection and BEFORE the de-finalization", async () => {
+    // REVERSED 2026-10-29. This used to pin "no document on REJECT", which left
+    // a rejected PO's stored PDF printing its rejecter as "Invited". The
+    // rewrite must precede the de-finalization: that cancels the award
+    // approval the document's Commercial Evaluation section prints from.
     actionResult = { status: "REJECTED", instance_status: "REJECTED" };
     await executeApprovalAction({
       approval_instance_id: 4218, approver_user_id: 42, action: "REJECT", comment: "no",
     });
-    expect(regenCalls).toEqual([]);
+    expect(regenCalls).toEqual([483]);
+    expect(dispatchCalls).toEqual([{ after: 1, txContext: fakeTx }]);
+  });
+
+  it("a REJECT still succeeds when its document cannot be rewritten", async () => {
+    actionResult = { status: "REJECTED", instance_status: "REJECTED" };
+    regenImpl = async () => { throw new Error("S3 down"); };
+    const result = await executeApprovalAction({
+      approval_instance_id: 4218, approver_user_id: 42, action: "REJECT", comment: "no",
+    });
+    expect(result.instance_status).toBe("REJECTED");
   });
 
   it("runs a REJECT's de-finalization inside the rejection transaction", async () => {
