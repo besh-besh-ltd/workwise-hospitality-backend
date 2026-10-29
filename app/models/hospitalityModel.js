@@ -1014,8 +1014,11 @@ const hospitalityModel = {
   // hold the same grant more than once (legacy rows from before the unique
   // key was NULLS NOT DISTINCT), and oneOrNone threw on them, which 500'd
   // the RFQ draft save for that user.
-  userHasContext: async (userId, companyId, hotelId = null) => {
-    const row = await db.one(
+  //
+  // `t`: run inside the caller's transaction (PR convert holds row locks and
+  // must not take a second pooled connection); every other caller omits it.
+  userHasContext: async (userId, companyId, hotelId = null, t = db) => {
+    const row = await t.one(
       `SELECT EXISTS (
          SELECT 1
            FROM tbl_hospitality_user_mappings hum
@@ -1145,7 +1148,8 @@ const hospitalityModel = {
  *    falls within the subscription start and end dates.
  * Vendors failing any of the above conditions are excluded.
  */
-getEligibleVendorsForVariant: async (variantId, hotelIds) => {
+// `t`: run inside the caller's transaction (PR convert); every other caller omits it.
+getEligibleVendorsForVariant: async (variantId, hotelIds, t = db) => {
   // Include vendors with active OR expired subscriptions (expired vendors
   // are included in RFQs but blocked from actions until they renew).
   // Must have BOTH a valid hotel subscription AND a valid category
@@ -1159,7 +1163,7 @@ getEligibleVendorsForVariant: async (variantId, hotelIds) => {
   // and the returned vendor_id is the principal. A vendor in no org is its own key,
   // so its answer is unchanged. One statement: this runs once per product on
   // publish/add-to-draft paths whose statement budgets are pinned by tests.
-  return db.any(
+  return t.any(
     `WITH variant_vendors AS (
     SELECT DISTINCT vendor_id
     FROM tbl_product_variant_vendor_mapping

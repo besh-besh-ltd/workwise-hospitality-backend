@@ -52,6 +52,11 @@
     "migrations/20261024100200_po_delivery_receiving.sql",
     "migrations/20261024100300_inventory_stock_ops.sql",
     "migrations/20261024100400_inventory_permissions.sql",
-    "migrations/20261024100500_po_receipt_backfill.sql"
+    "migrations/20261024100500_po_receipt_backfill.sql",
+    "migrations/20261013100000_pr_permissions.sql",
+    "migrations/20261013101000_pr_tables.sql",
+    "migrations/20261013102000_approval_instance_step_source_snapshot.sql",
+    "migrations/20261014100000_pr_clause_type_check.sql",
+    "migrations/20261014110000_pr_indexes.sql"
   ]
 }

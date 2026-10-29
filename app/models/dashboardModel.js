@@ -23,6 +23,7 @@ import negotiationModel from './negotiationModel.js';
 import rfqModel from './rfqModel.js';
 import { techStuckSql } from './techEvalStuck.js';
 import { isCompanyAdmin } from '../middleware/companyAdmin.js';
+import { buyerPrDetail } from '../services/notificationLinks.js';
 
 /**
  * Dashboard queries scope by buyer_company_id (covers ALL hospitality companies
@@ -1423,9 +1424,11 @@ async function getSmartInsightsData(buyer_company_id, user_id, hotel_ids = [], s
 //   NEGOTIATION        entity_id / metadata round_id is the round → its RFQ
 //   PO                 entity_id is the PO → its RFQ
 //   ARC_*              arc id (amendments hop through their contract)
+//   PR                 entity_id is the purchase requisition (pr_id, pr_number,
+//                      its title as entity_title, action_url = PR detail)
 // ─────────────────────────────────────────────────────────────────────
 async function getPendingApprovalsDetail(buyer_company_id, user_id, hotel_ids = []) {
-  return db.any(
+  const rows = await db.any(
     `WITH mine AS (
        SELECT i.*, ${approvalItemKey('i')} AS item_key, s.step_order
        ${myPendingApprovalsFrom(2, 1, 3)}
@@ -1475,7 +1478,9 @@ async function getPendingApprovalsDetail(buyer_company_id, user_id, hotel_ids = 
        it.rfq_id AS rfq_ref_id,
        it.po_id,
        it.po_number,
-       r.title AS entity_title,
+       CASE WHEN it.entity_type = 'PR' THEN prq.id END AS pr_id,
+       prq.pr_number,
+       COALESCE(r.title, prq.title) AS entity_title,
        r.rfq_no AS entity_rfq_no,
        CASE
          WHEN it.entity_type IN ('ARC_TECH', 'ARC_COMMITTEE', 'ARC_PUBLISH') THEN it.entity_id
@@ -1496,10 +1501,14 @@ async function getPendingApprovalsDetail(buyer_company_id, user_id, hotel_ids = 
      LEFT JOIN tbl_arc ac ON
        (it.entity_type IN ('ARC_TECH', 'ARC_COMMITTEE', 'ARC_PUBLISH') AND ac.id = it.entity_id)
        OR (it.entity_type = 'ARC_AMENDMENT' AND ac.id = amdc.arc_id)
+     LEFT JOIN tbl_purchase_requisition prq ON it.entity_type = 'PR' AND prq.id = it.entity_id
      LEFT JOIN tbl_hospitality_company_hotels hch ON hch.id = it.hotel_id
      ORDER BY it.created_at ASC, it.id ASC`,
     [buyer_company_id, user_id, hotel_ids]
   );
+  // PR rows carry their deep link (the RFQ-family rows are linked by the FE
+  // from rfq_id / po_id / arc_id).
+  return rows.map((row) => (row.entity_type === 'PR' ? { ...row, action_url: buyerPrDetail(row.entity_id) } : row));
 }
 
 // ─────────────────────────────────────────────────────────────────────

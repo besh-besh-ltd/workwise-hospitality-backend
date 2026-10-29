@@ -75,6 +75,12 @@ export const ENTITY_APPROVE_RESOURCE_MAP = {
   // instances and 0 material requisitions, so this repoints a latent trap and
   // moves no live approval.
   'MR': 'mr',
+  // PR (purchase requisition) resolves against its own 'pr' resource. The
+  // seeded 'PR Approver' system role holds pr.read + pr.approve
+  // (20261013100000_pr_permissions.sql). PR is also the one entity type with
+  // engine-level rules of its own — amount-gated steps and separation of
+  // duties — see app/services/approval/approvalEntityRules.js.
+  'PR': 'pr',
   // ARC_NEGOTIATION: authorising the LAUNCH of a negotiation round. ROLE-source
   // approver steps resolve against 'arc-comm', which now carries both `read`
   // (20260611100000) and `approve` (20260803110000). The qualifying system role
@@ -173,6 +179,17 @@ import { logError } from '../helper/common.js';
 import { NoApprovalPolicyError } from '../services/authorizationService.js';
 import { applyDelegations } from './approvalDelegationModel.js';
 import { notifyApprovalChanged } from '../services/approvalEvents.js';
+import {
+  excludesInitiator,
+  filterInitiator,
+  stepAppliesAtAmount,
+  toPaise,
+  formatPaise,
+  toMoneyString,
+  sodResolveOptions,
+  MAX_MONEY_PAISE,
+  isPinnedToSubmission,
+} from '../services/approval/approvalEntityRules.js';
 import { refusesForeignTarget } from '../services/approvalTargetOwner.js';
 
 const generalModel = {
@@ -2089,10 +2106,10 @@ export async function getApprovalPolicyTenant(policy_id) {
   );
 }
 
-/** @returns {Promise<{id:number, hospitality_company_id:number|null}|null>} */
+/** @returns {Promise<{id:number, hospitality_company_id:number|null, entity_type:string, entity_id:number}|null>} */
 export async function getApprovalInstanceTenant(instance_id) {
   return db.oneOrNone(
-    `SELECT id, hospitality_company_id FROM tbl_approval_instances WHERE id = $1`,
+    `SELECT id, hospitality_company_id, entity_type, entity_id FROM tbl_approval_instances WHERE id = $1`,
     [instance_id]
   );
 }
@@ -2193,17 +2210,36 @@ export async function insertPolicySteps(steps, approval_policy_id, t = null) {
         throw new Error(`Step ${i + 1}: Invalid decision_rule. Must be ALL or ANY`);
       }
 
+      // Optional value threshold ("only when the amount is ≥ ₹X"). Honoured by
+      // the engine for AMOUNT_GATED entity types only (approvalEntityRules.js);
+      // upsertApprovalPolicy nulls it for every other type before it gets here.
+      // Validated again here because this is the write: never a float, never
+      // negative, at most 2 decimals — stored canonically ('25000.00').
+      let minAmount = null;
+      try {
+        minAmount = toMoneyString(step.min_amount);
+      } catch {
+        throw new Error(`Step ${i + 1}: min_amount must be an amount in rupees with at most 2 decimals`);
+      }
+      if (minAmount !== null && toPaise(minAmount) < 0n) {
+        throw new Error(`Step ${i + 1}: min_amount cannot be negative`);
+      }
+      if (minAmount !== null && toPaise(minAmount) > MAX_MONEY_PAISE) {
+        throw new Error(`Step ${i + 1}: min_amount cannot exceed 9999999999999999.99`);
+      }
+
       const r = await tx.one(`
         INSERT INTO tbl_approval_policy_steps
-        (approval_policy_id, step_order, approval_type, decision_rule, approver_source_type, approver_source_id)
-        VALUES ($1, $2, $3, $4, $5, $6) RETURNING *`,
+        (approval_policy_id, step_order, approval_type, decision_rule, approver_source_type, approver_source_id, min_amount)
+        VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING *`,
         [
           approval_policy_id,
           step.step_order || (i + 1),
           step.approval_type || 'STANDARD',
           step.decision_rule || 'ANY',
           step.approver_source_type,
-          step.approver_source_id
+          step.approver_source_id,
+          minAmount
         ]
       );
       results.push(r);
@@ -2335,7 +2371,11 @@ export async function policyStepApproverEligibility(
   return { eligible: true, reason: null, resource };
 }
 
-export async function resolveApprovers(step, hospitality_company_id, hotel_id = null, department_id = null, t = db, initiatedBy = null, process_id = null) {
+// `options.sodInitiatorId` (separation of duties, see sodResolveOptions in
+// approvalEntityRules.js): delegation never moves authority to or from this
+// user (applyDelegations). Every caller that does not pass it gets exactly the
+// previous behaviour.
+export async function resolveApprovers(step, hospitality_company_id, hotel_id = null, department_id = null, t = db, initiatedBy = null, process_id = null, { sodInitiatorId = null } = {}) {
   const userIds = [];
 
   if (step.approver_source_type === 'USER') {
@@ -2446,7 +2486,7 @@ export async function resolveApprovers(step, hospitality_company_id, hotel_id = 
   // a newly-added step is making a new assignment; simulateApproverImpact and
   // willBeFinalApprover are asking who would be asked, and an answer that
   // ignored cover would disagree with what actually happens.
-  finalApprovers = await applyDelegations(finalApprovers, hospitality_company_id, t);
+  finalApprovers = await applyDelegations(finalApprovers, hospitality_company_id, t, { sodInitiatorId });
 
   return finalApprovers;
 }
@@ -2529,6 +2569,329 @@ async function isUserFinalApprover(userId, policy, policySteps, hospitality_comp
 }
 
 /**
+ * Canonical 2-decimal string for an approval amount, or null when unknown.
+ * Throws `{ code: 'APPROVAL_INVALID_AMOUNT', httpStatus: 400 }` for anything
+ * that is not a rupee amount with at most 2 decimals (never a float).
+ */
+export function normaliseApprovalAmount(amount) {
+  try {
+    return toMoneyString(amount);
+  } catch {
+    const err = new Error(`Approval amount '${amount}' is not an amount in rupees with at most 2 decimals`);
+    err.code = 'APPROVAL_INVALID_AMOUNT';
+    err.httpStatus = 400;
+    throw err;
+  }
+}
+
+// Skip reasons that are a policy working as designed (PR value thresholds and
+// separation of duties), as opposed to a step lost to misconfiguration.
+const ROUTINE_SKIP_REASONS = new Set(['below_threshold', 'sod_self']);
+
+/** The thrown form of an APPROVAL_STEP_UNRESOLVED problem from resolvePolicyChain. */
+function approvalStepUnresolvedError(problem, entity_type) {
+  return Object.assign(
+    new Error(
+      `Approval step ${problem.step_order} resolves to no approver in this scope (${problem.reason}), ` +
+      `so this ${entity_type} cannot be submitted. Fix the approval policy in Settings → Approvals.`
+    ),
+    {
+      code: 'APPROVAL_STEP_UNRESOLVED',
+      httpStatus: 422,
+      step_order: problem.step_order,
+      reason: problem.reason,
+      policy_step_id: problem.policy_step_id,
+      approver_source_type: problem.approver_source_type,
+      approver_source_id: problem.approver_source_id,
+    }
+  );
+}
+
+/**
+ * Resolve a policy's step chain for one entity — WITHOUT writing anything.
+ *
+ * This is the single implementation of "who approves this, step by step":
+ * createApprovalInstance builds instances from it, and read-only previews (the
+ * PR routing preview) must call it too, so a preview can never disagree with
+ * what submit creates. Per policy step, in policy order:
+ *
+ *   1. value threshold  — AMOUNT_GATED entity types (PR): a step whose
+ *                         min_amount exceeds `amount` is skipped
+ *                         `below_threshold` (unknown amount ⇒ applies)
+ *   2. eligibility gate — ROLE: the role must hold <resource>.read+approve;
+ *                         USER: policyStepApproverEligibility
+ *   3. resolveApprovers — scope + delegation (SoD-aware: cover never moves a
+ *                         SoD initiator's authority in or out)
+ *   4. SoD filter       — the initiator is removed (SoD entity types only); a
+ *                         step left with nobody is skipped `sod_self`
+ *
+ * For every entity type that is neither SoD nor amount-gated, steps 1 and 4
+ * are no-ops and the result is exactly what createApprovalInstance has always
+ * computed.
+ *
+ * @param {Object} p
+ * @param {string} p.entity_type
+ * @param {Array}  [p.policySteps] - tbl_approval_policy_steps rows, ordered by
+ *   step_order. Loaded from `p.policy_id` when omitted.
+ * @param {number} [p.policy_id]
+ * @param {number} p.hospitality_company_id
+ * @param {number|null} [p.hotel_id]
+ * @param {number|null} [p.department_id] - the ENTITY's department (steps
+ *   resolve against it)
+ * @param {number|null} [p.process_id]
+ * @param {number|null} [p.initiated_by] - the would-be initiator (requester)
+ * @param {string|number|null} [p.amount] - the entity's value (any money
+ *   input; canonicalised, invalid ⇒ APPROVAL_INVALID_AMOUNT)
+ * @param {Object} [t] - db / task / tx
+ * @returns {Promise<{steps: Array, skipped: Array, problems: Array}>}
+ *   steps    — `[{ policy_step, approverIds }]`, surviving steps in policy
+ *              order; approverIds are final (delegation applied, initiator
+ *              removed under SoD).
+ *   skipped  — `[{ policy_step_id, step_order, approver_source_type,
+ *              approver_source_id, reason, min_amount?, resource?,
+ *              resource_mapped?, missing_permissions? }]`. `step_order` is the
+ *              POLICY step order. reason ∈ below_threshold | sod_self |
+ *              NO_APPROVERS_RESOLVED | ROLE_LACKS_READ_AND_APPROVE |
+ *              USER_LACKS_READ_AND_APPROVE | RESOURCE_CANNOT_SATISFY_GATE |
+ *              RESOURCE_NOT_IN_CATALOGUE | ENTITY_TYPE_NOT_IN_RESOURCE_MAP.
+ *              This is what createApprovalInstance stores as
+ *              `metadata.approval_diagnostics.skipped_steps`.
+ *   problems — what a fail-closed caller refuses on:
+ *              `{ code: 'APPROVAL_STEP_UNRESOLVED', step_order, reason,
+ *              policy_step_id, approver_source_type, approver_source_id }` for
+ *              every APPLICABLE step that resolved to nobody before the SoD
+ *              filter (gate failure or zero holders), in policy order; then
+ *              `{ code: 'APPROVAL_NO_INDEPENDENT_APPROVER' }` when the entity
+ *              type is SoD and no step survives. createApprovalInstance throws
+ *              the first UNRESOLVED only under `strictSteps`, and
+ *              NO_INDEPENDENT always.
+ */
+export async function resolvePolicyChain({
+  entity_type,
+  policySteps = null,
+  policy_id = null,
+  hospitality_company_id,
+  hotel_id = null,
+  department_id = null,
+  process_id = null,
+  initiated_by = null,
+  amount = null,
+}, t = db) {
+  const amountText = normaliseApprovalAmount(amount);
+  const steps = policySteps || await t.any(
+    `SELECT * FROM tbl_approval_policy_steps WHERE approval_policy_id = $1 ORDER BY step_order ASC`,
+    [policy_id]
+  );
+  const resolveOptions = sodResolveOptions(entity_type, initiated_by);
+
+  const surviving = [];
+  const problems = [];
+
+  // ── WHY EVERY SKIP IS RECORDED ────────────────────────────────────────────
+  // Every `continue` below drops a policy step, and dropping EVERY step made
+  // the instance auto-approve (it is now refused). That has two causes which
+  // look identical afterwards but mean opposite things:
+  //   (a) the initiator was the only resolved approver  → by design
+  //   (b) no role qualified / no user resolved          → misconfiguration
+  // Production already holds 51 instances born APPROVED with current_step = 0
+  // (39 TECHNICAL, 10 RFQ, 2 PO) and nothing on the row says which. So the
+  // reason for each skip is captured here and written to the instance's
+  // metadata.
+  const skippedSteps = [];
+  const roleResource = ENTITY_APPROVE_RESOURCE_MAP[entity_type] || String(entity_type).toLowerCase();
+  const resourceIsMapped = Object.prototype.hasOwnProperty.call(ENTITY_APPROVE_RESOURCE_MAP, entity_type);
+
+  // (createApprovalInstance validates entity_type against
+  //  ENTITY_APPROVE_RESOURCE_MAP before calling this, so resourceIsMapped is
+  //  true on that path. It is still threaded into the skip diagnostics because
+  //  a preview may ask about any type.)
+
+  // Probed lazily (only when a ROLE gate actually fails) and at most once, so
+  // the common path pays nothing. It answers a question the bare `hasBoth`
+  // false cannot: was this role NOT GRANTED something, or does the permission
+  // catalogue simply not contain it? Production's `tender` resource holds only
+  // `approve` — no `tender.read` row exists — so no role could ever pass that
+  // gate, and reporting it as "the role lacks permissions" would send whoever
+  // triages this instance looking for an RBAC edit that cannot be made.
+  let gateCatalogue = null;
+  const probeGateCatalogue = async () => {
+    if (gateCatalogue) return gateCatalogue;
+    // DISTINCT because 'arc' and 'tender' each carry a duplicate `approve` row.
+    const rows = await t.any(
+      `SELECT DISTINCT p.action::text AS action
+         FROM tbl_permissions p
+        WHERE p.resource::text = $1 AND p.action IN ('read', 'approve')`,
+      [String(roleResource)]
+    );
+    const present = new Set(rows.map(r => r.action));
+    gateCatalogue = {
+      present,
+      missing: ['read', 'approve'].filter(a => !present.has(a))
+    };
+    return gateCatalogue;
+  };
+
+  const unresolved = (policyStep, reason) => problems.push({
+    code: 'APPROVAL_STEP_UNRESOLVED',
+    step_order: policyStep.step_order,
+    reason,
+    policy_step_id: policyStep.id ?? null,
+    approver_source_type: policyStep.approver_source_type,
+    approver_source_id: policyStep.approver_source_id,
+  });
+
+  // Value thresholds (AMOUNT_GATED entity types only — for every other type
+  // stepAppliesAtAmount is always true and this keeps every step). A step
+  // that does not apply at this amount is not an approval level for this
+  // entity at all, so it never consumes a step number — the same way the
+  // drops below do not.
+  const applicableSteps = [];
+  for (const policyStep of steps) {
+    if (stepAppliesAtAmount(entity_type, policyStep, amountText)) {
+      applicableSteps.push(policyStep);
+      continue;
+    }
+    skippedSteps.push({
+      policy_step_id: policyStep.id,
+      step_order: policyStep.step_order,
+      approver_source_type: policyStep.approver_source_type,
+      approver_source_id: policyStep.approver_source_id,
+      reason: 'below_threshold',
+      min_amount: formatPaise(toPaise(policyStep.min_amount)),
+    });
+  }
+
+  for (const policyStep of applicableSteps) {
+    // For ROLE-based steps, skip if the role lacks BOTH read AND approve permissions
+    // for this entity type. A role with only `approve` cannot meaningfully act since
+    // it has no access to view the entity.
+    if (policyStep.approver_source_type === 'ROLE') {
+      const hasBoth = await roleHasReadAndApprovePermission(policyStep.approver_source_id, roleResource, t);
+      if (!hasBoth) {
+        const { present, missing } = await probeGateCatalogue();
+        // Three genuinely different faults, three different fixes:
+        //   ENTITY_TYPE_NOT_IN_RESOURCE_MAP — add the entity type to the map
+        //   RESOURCE_CANNOT_SATISFY_GATE    — seed the missing permission row
+        //   ROLE_LACKS_READ_AND_APPROVE     — grant the role the permission
+        let reason;
+        if (present.size === 0) {
+          reason = resourceIsMapped ? 'RESOURCE_NOT_IN_CATALOGUE' : 'ENTITY_TYPE_NOT_IN_RESOURCE_MAP';
+        } else if (missing.length > 0) {
+          reason = 'RESOURCE_CANNOT_SATISFY_GATE';
+        } else {
+          reason = 'ROLE_LACKS_READ_AND_APPROVE';
+        }
+        unresolved(policyStep, reason);
+        skippedSteps.push({
+          policy_step_id: policyStep.id,
+          step_order: policyStep.step_order,
+          approver_source_type: policyStep.approver_source_type,
+          approver_source_id: policyStep.approver_source_id,
+          resource: roleResource,
+          resource_mapped: resourceIsMapped,
+          reason,
+          ...(missing.length > 0 && present.size > 0
+            ? { missing_permissions: missing.map(a => `${roleResource}.${a}`) }
+            : {})
+        });
+        continue;
+      }
+    }
+
+    // ── USER-source steps are gated exactly like ROLE-source ones ─────────
+    //
+    // ROLE-source steps have always been dropped when the role lacks
+    // read+approve on the entity's resource. USER-source steps were gated
+    // NOWHERE — not at policy save, not here, not mid-flight (the
+    // reconciler's discovery SQL filters to ROLE/DEPARTMENT), and not at act
+    // time (submitApprovalAction re-checks nothing). Naming a user directly
+    // therefore handed binding approval authority to someone who might hold
+    // no permission on the entity at all, and nothing anywhere said so. That
+    // is what produced the RFQ 791 incident: EMP003 blocked a workflow they
+    // could not see.
+    //
+    // This shipped as observe-only first, deliberately. Enforcing it against
+    // the data as it stood would have stripped authority from 9 of 10 live
+    // USER-source RFQ approver slots and left 7 active policies resolving to
+    // nobody. Those 19 assignments were repaired by
+    // scripts/prod_04_clear_unqualified_user_approvers.sql — audit section E
+    // went 19 -> 0, and "active policies resolving to nobody" stayed at 0 —
+    // so enforcement now costs nothing. Re-run that audit before assuming it
+    // still does.
+    //
+    // A dropped step is recorded in skippedSteps like any other, and a policy
+    // whose every step drops is REFUSED rather than auto-approved.
+    if (policyStep.approver_source_type === 'USER') {
+      // Shared with policy-edit propagation via policyStepApproverEligibility
+      // so the two paths cannot drift apart on WHO may hold authority.
+      const { eligible } = await policyStepApproverEligibility(
+        policyStep, entity_type,
+        { hospitality_company_id, hotel_id, department_id, process_id },
+        t
+      );
+
+      if (!eligible) {
+        unresolved(policyStep, 'USER_LACKS_READ_AND_APPROVE');
+        skippedSteps.push({
+          policy_step_id: policyStep.id,
+          step_order: policyStep.step_order,
+          approver_source_type: 'USER',
+          approver_source_id: policyStep.approver_source_id,
+          resource: roleResource,
+          resource_mapped: resourceIsMapped,
+          reason: 'USER_LACKS_READ_AND_APPROVE'
+        });
+        continue;
+      }
+    }
+
+    // Resolve approvers for this step (pass process_id so the user's process
+    // scope is honored when picking who qualifies). resolveOptions is a no-op
+    // except under separation of duties (see sodResolveOptions).
+    const resolvedApproverIds = await resolveApprovers(policyStep, hospitality_company_id, hotel_id, department_id, t, initiated_by, process_id, resolveOptions);
+
+    // Skip step if no approvers were resolved at all
+    if (resolvedApproverIds.length === 0) {
+      unresolved(policyStep, 'NO_APPROVERS_RESOLVED');
+      skippedSteps.push({
+        policy_step_id: policyStep.id,
+        step_order: policyStep.step_order,
+        approver_source_type: policyStep.approver_source_type,
+        approver_source_id: policyStep.approver_source_id,
+        reason: 'NO_APPROVERS_RESOLVED'
+      });
+      continue;
+    }
+
+    // Separation of duties: the initiator is never one of the approvers.
+    // filterInitiator returns the list untouched for every other entity type.
+    const approverIds = filterInitiator(entity_type, resolvedApproverIds, initiated_by);
+    if (approverIds.length === 0) {
+      // Resolved to the initiator and nobody else. Not a misconfiguration —
+      // the level simply has nobody independent to ask — so it is skipped
+      // (never an UNRESOLVED problem) and recorded; if no level is left at
+      // all, NO_INDEPENDENT_APPROVER below covers it.
+      skippedSteps.push({
+        policy_step_id: policyStep.id,
+        step_order: policyStep.step_order,
+        approver_source_type: policyStep.approver_source_type,
+        approver_source_id: policyStep.approver_source_id,
+        reason: 'sod_self'
+      });
+      continue;
+    }
+
+    surviving.push({ policy_step: policyStep, approverIds });
+  }
+
+  if (excludesInitiator(entity_type) && surviving.length === 0) {
+    problems.push({ code: 'APPROVAL_NO_INDEPENDENT_APPROVER' });
+  }
+
+  return { steps: surviving, skipped: skippedSteps, problems };
+}
+
+/**
  * Create an approval instance for an entity
  * Automatically finds the best matching policy if approval_policy_id is not provided
  *
@@ -2542,6 +2905,26 @@ async function isUserFinalApprover(userId, policy, policySteps, hospitality_comp
  * @param {number|null} params.approval_policy_id - Specific policy to use (optional, auto-detected if not provided)
  * @param {number} params.initiated_by - User ID who initiated the approval
  * @param {Object} params.metadata - Additional metadata to store with the instance
+ * @param {string|number|null} params.amount - The entity's value. Stored as
+ *   `metadata.amount` (2-decimal string) when given; for AMOUNT_GATED entity
+ *   types (PR) a policy step whose min_amount exceeds it is not created and is
+ *   recorded in `metadata.approval_diagnostics.skipped_steps` as
+ *   `{ step_order, reason: 'below_threshold', min_amount }`. Unknown (null) =
+ *   every step applies.
+ * @param {boolean} params.strictSteps - Fail closed: an applicable step that
+ *   resolves to nobody (before the separation-of-duties filter) throws
+ *   `{ code: 'APPROVAL_STEP_UNRESOLVED', httpStatus: 422, step_order }` instead
+ *   of being dropped.
+ *
+ * Separation of duties (SOD_EXCLUDE_INITIATOR entity types, i.e. PR): the
+ * initiator is removed from every step, is never inserted as an approver and is
+ * never auto-approved; a step that resolved only to them is skipped and recorded
+ * as `{ step_order, reason: 'sod_self' }`; if no step is left the call throws
+ * `{ code: 'APPROVAL_NO_INDEPENDENT_APPROVER', httpStatus: 422 }` before any row
+ * is written. Every other entity type behaves exactly as before.
+ *
+ * @param {Object} [txArg] - Same as `params.txContext`, accepted positionally
+ *   too: `createApprovalInstance(params, t)`.
  */
 export async function createApprovalInstance({
   entity_type,
@@ -2553,8 +2936,10 @@ export async function createApprovalInstance({
   approval_policy_id = null,
   initiated_by,
   metadata = {},
+  amount = null,
+  strictSteps = false,
   txContext = null  // Optional transaction context for participating in outer transaction
-}) {
+}, txArg = null) {
   if (!entity_type || !entity_id || !hospitality_company_id || !initiated_by) {
     throw new Error('entity_type, entity_id, hospitality_company_id, and initiated_by are required');
   }
@@ -2582,6 +2967,12 @@ export async function createApprovalInstance({
     err.httpStatus = 400;
     throw err;
   }
+
+  // Normalised once, before any read: thresholds compare in paise and the
+  // instance records exactly the value they were compared against.
+  const amountText = normaliseApprovalAmount(amount);
+  const sod = excludesInitiator(entity_type);
+  const pinned = isPinnedToSubmission(entity_type);
 
   // If a transaction context is provided, use it; otherwise create a new transaction
   const executor = async (t) => {
@@ -2643,167 +3034,41 @@ export async function createApprovalInstance({
       throw new Error('Policy has no approval steps configured');
     }
 
-    // 4. Resolve approvers before writing instance data so approval creation
-    // never leaves a half-built pending instance behind.
-    const resolvedSteps = [];
-    let stepNumber = 0; // Track sequential step numbering
-
-    // ── WHY EVERY SKIP IS RECORDED ────────────────────────────────────────────
-    // Both `continue`s below drop a policy step, and dropping EVERY step makes
-    // the instance auto-approve at section 6. That has two causes which look
-    // identical afterwards but mean opposite things:
-    //   (a) the initiator was the only resolved approver  → by design (section 8)
-    //   (b) no role qualified / no user resolved          → misconfiguration
-    // Production already holds 51 instances born APPROVED with current_step = 0
-    // (39 TECHNICAL, 10 RFQ, 2 PO) and nothing on the row says which. So the
-    // reason for each skip is captured here and written to the instance's
-    // metadata; the auto-approve BEHAVIOUR is unchanged (that has live blast
-    // radius and needs its own decision) — only its legibility is.
-    const skippedSteps = [];
-    const roleResource = ENTITY_APPROVE_RESOURCE_MAP[entity_type] || String(entity_type).toLowerCase();
-    const resourceIsMapped = Object.prototype.hasOwnProperty.call(ENTITY_APPROVE_RESOURCE_MAP, entity_type);
-
-    // (entity_type is validated against ENTITY_APPROVE_RESOURCE_MAP at the top
-    //  of createApprovalInstance, before any policy lookup, so resourceIsMapped
-    //  is always true here. It is still threaded into the skip diagnostics
-    //  because roleStepPermissionVerdict reports on policies from other paths.)
-
-    // Probed lazily (only when a ROLE gate actually fails) and at most once, so
-    // the common path pays nothing. It answers a question the bare `hasBoth`
-    // false cannot: was this role NOT GRANTED something, or does the permission
-    // catalogue simply not contain it? Production's `tender` resource holds only
-    // `approve` — no `tender.read` row exists — so no role could ever pass that
-    // gate, and reporting it as "the role lacks permissions" would send whoever
-    // triages this instance looking for an RBAC edit that cannot be made.
-    let gateCatalogue = null;
-    const probeGateCatalogue = async () => {
-      if (gateCatalogue) return gateCatalogue;
-      // DISTINCT because 'arc' and 'tender' each carry a duplicate `approve` row.
-      const rows = await t.any(
-        `SELECT DISTINCT p.action::text AS action
-           FROM tbl_permissions p
-          WHERE p.resource::text = $1 AND p.action IN ('read', 'approve')`,
-        [String(roleResource)]
-      );
-      const present = new Set(rows.map(r => r.action));
-      gateCatalogue = {
-        present,
-        missing: ['read', 'approve'].filter(a => !present.has(a))
-      };
-      return gateCatalogue;
-    };
-
+    // 4. Resolve the whole chain before writing instance data so approval
+    // creation never leaves a half-built pending instance behind. The chain
+    // resolution is resolvePolicyChain — the ONE implementation shared with
+    // read-only previews, so a preview can never disagree with what this
+    // creates. It writes nothing; it reports drops in `skipped` and fail-closed
+    // conditions in `problems`, and the decision to refuse is taken here.
     // All entities are department-scoped. The department_id is always used for filtering.
     const resolveDeptId = department_id;
+    const chain = await resolvePolicyChain({
+      entity_type,
+      policySteps,
+      hospitality_company_id,
+      hotel_id,
+      department_id: resolveDeptId,
+      process_id,
+      initiated_by,
+      amount: amountText,
+    }, t);
 
-    for (const policyStep of policySteps) {
-      // For ROLE-based steps, skip if the role lacks BOTH read AND approve permissions
-      // for this entity type. A role with only `approve` cannot meaningfully act since
-      // it has no access to view the entity.
-      if (policyStep.approver_source_type === 'ROLE') {
-        const hasBoth = await roleHasReadAndApprovePermission(policyStep.approver_source_id, roleResource, t);
-        if (!hasBoth) {
-          const { present, missing } = await probeGateCatalogue();
-          // Three genuinely different faults, three different fixes:
-          //   ENTITY_TYPE_NOT_IN_RESOURCE_MAP — add the entity type to the map
-          //   RESOURCE_CANNOT_SATISFY_GATE    — seed the missing permission row
-          //   ROLE_LACKS_READ_AND_APPROVE     — grant the role the permission
-          let reason;
-          if (present.size === 0) {
-            reason = resourceIsMapped ? 'RESOURCE_NOT_IN_CATALOGUE' : 'ENTITY_TYPE_NOT_IN_RESOURCE_MAP';
-          } else if (missing.length > 0) {
-            reason = 'RESOURCE_CANNOT_SATISFY_GATE';
-          } else {
-            reason = 'ROLE_LACKS_READ_AND_APPROVE';
-          }
-          skippedSteps.push({
-            policy_step_id: policyStep.id,
-            step_order: policyStep.step_order,
-            approver_source_type: policyStep.approver_source_type,
-            approver_source_id: policyStep.approver_source_id,
-            resource: roleResource,
-            resource_mapped: resourceIsMapped,
-            reason,
-            ...(missing.length > 0 && present.size > 0
-              ? { missing_permissions: missing.map(a => `${roleResource}.${a}`) }
-              : {})
-          });
-          continue;
-        }
-      }
-
-      // ── USER-source steps are gated exactly like ROLE-source ones ─────────
-      //
-      // ROLE-source steps have always been dropped when the role lacks
-      // read+approve on the entity's resource. USER-source steps were gated
-      // NOWHERE — not at policy save, not here, not mid-flight (the
-      // reconciler's discovery SQL filters to ROLE/DEPARTMENT), and not at act
-      // time (submitApprovalAction re-checks nothing). Naming a user directly
-      // therefore handed binding approval authority to someone who might hold
-      // no permission on the entity at all, and nothing anywhere said so. That
-      // is what produced the RFQ 791 incident: EMP003 blocked a workflow they
-      // could not see.
-      //
-      // This shipped as observe-only first, deliberately. Enforcing it against
-      // the data as it stood would have stripped authority from 9 of 10 live
-      // USER-source RFQ approver slots and left 7 active policies resolving to
-      // nobody. Those 19 assignments were repaired by
-      // scripts/prod_04_clear_unqualified_user_approvers.sql — audit section E
-      // went 19 -> 0, and "active policies resolving to nobody" stayed at 0 —
-      // so enforcement now costs nothing. Re-run that audit before assuming it
-      // still does.
-      //
-      // A dropped step is recorded in skippedSteps like any other, and a policy
-      // whose every step drops is REFUSED rather than auto-approved.
-      if (policyStep.approver_source_type === 'USER') {
-        // Shared with policy-edit propagation via policyStepApproverEligibility
-        // so the two paths cannot drift apart on WHO may hold authority.
-        const { eligible } = await policyStepApproverEligibility(
-          policyStep, entity_type,
-          { hospitality_company_id, hotel_id, department_id: resolveDeptId, process_id },
-          t
-        );
-        const qualified = eligible;
-
-        if (!qualified) {
-          skippedSteps.push({
-            policy_step_id: policyStep.id,
-            step_order: policyStep.step_order,
-            approver_source_type: 'USER',
-            approver_source_id: policyStep.approver_source_id,
-            resource: roleResource,
-            resource_mapped: resourceIsMapped,
-            reason: 'USER_LACKS_READ_AND_APPROVE'
-          });
-          continue;
-        }
-      }
-
-      // Resolve approvers for this step (pass process_id so the user's process
-      // scope is honored when picking who qualifies).
-      const approverUserIds = await resolveApprovers(policyStep, hospitality_company_id, hotel_id, resolveDeptId, t, initiated_by, process_id);
-
-      // Skip step if no approvers were resolved at all
-      if (approverUserIds.length === 0) {
-        skippedSteps.push({
-          policy_step_id: policyStep.id,
-          step_order: policyStep.step_order,
-          approver_source_type: policyStep.approver_source_type,
-          approver_source_id: policyStep.approver_source_id,
-          reason: 'NO_APPROVERS_RESOLVED'
-        });
-        continue;
-      }
-
-      stepNumber++; // Increment sequential step number
-
-      resolvedSteps.push({
-        policyStep,
-        approverUserIds,
-        stepOrder: stepNumber,
-        isInitiatorInStep: approverUserIds.includes(initiated_by)
-      });
+    // strictSteps: an applicable step that resolved to nobody is refused
+    // rather than dropped (the first one, in policy order).
+    if (strictSteps) {
+      const unresolved = chain.problems.find(pr => pr.code === 'APPROVAL_STEP_UNRESOLVED');
+      if (unresolved) throw approvalStepUnresolvedError(unresolved, entity_type);
     }
+
+    const skippedSteps = chain.skipped;
+    // Instance steps are numbered 1..n over the SURVIVING steps only — a
+    // dropped policy step never consumes a number (unchanged behaviour).
+    const resolvedSteps = chain.steps.map(({ policy_step, approverIds }, idx) => ({
+      policyStep: policy_step,
+      approverUserIds: approverIds,
+      stepOrder: idx + 1,
+      isInitiatorInStep: !sod && approverIds.includes(initiated_by)
+    }));
 
     // Diagnostics travel on the instance itself so anyone reading an
     // auto-approved row later can tell case (a) from case (b) without
@@ -2817,8 +3082,32 @@ export async function createApprovalInstance({
       recorded_at: new Date().toISOString()
     };
     const instanceMetadata = { ...(metadata || {}) };
+    if (amountText !== null) {
+      instanceMetadata.amount = amountText;
+    }
     if (skippedSteps.length > 0) {
       instanceMetadata.approval_diagnostics = diagnostics;
+    }
+
+    // Separation of duties, fail-closed: nobody independent of the initiator
+    // is left to approve (every level resolved only to them, fell below the
+    // value threshold, or both). Refused before the instance INSERT below, so
+    // no row is written — the same shape as APPROVAL_POLICY_RESOLVES_TO_NOBODY,
+    // but with the cause the caller can actually explain to the requester.
+    if (chain.problems.some(pr => pr.code === 'APPROVAL_NO_INDEPENDENT_APPROVER')) {
+      logger.warn(
+        `[ApprovalEngine] REFUSED ${entity_type}/${entity_id}: no approver independent of initiator ` +
+        `${initiated_by} under policy ${policy.id}. Skipped: ${JSON.stringify(skippedSteps)}`
+      );
+      const err = new Error(
+        `Nobody other than the person who raised this ${entity_type} can approve it under ` +
+        `approval policy ${policy.id}, so it cannot be submitted yet. Add an approval step ` +
+        `with an independent approver in Settings → Approvals.`
+      );
+      err.code = 'APPROVAL_NO_INDEPENDENT_APPROVER';
+      err.httpStatus = 422;
+      err.diagnostics = diagnostics;
+      throw err;
     }
 
     // EVERY step was dropped. Refuse — do not create the instance.
@@ -2933,6 +3222,8 @@ export async function createApprovalInstance({
         }
       }
 
+      // Same resource the chain resolver gated ROLE steps against.
+      const roleResource = ENTITY_APPROVE_RESOURCE_MAP[entity_type] || String(entity_type).toLowerCase();
       const err = new Error(
         `Nobody can approve this ${stageLabel(entity_type, { isGroup: isGroupArcPolicy(policy) })} step${whereText}, so it cannot be submitted yet — ` +
         `approval policy ${policy.id} resolved to zero usable approval steps. ` +
@@ -2968,15 +3259,32 @@ export async function createApprovalInstance({
     for (const resolvedStep of resolvedSteps) {
       const { policyStep, approverUserIds, stepOrder, isInitiatorInStep } = resolvedStep;
 
-      const instanceStep = await t.one(`
-        INSERT INTO tbl_approval_instance_steps
-        (approval_instance_id, step_order, decision_rule, status, policy_step_id)
-        VALUES ($1, $2, $3, 'PENDING', $4) RETURNING *
-      `, [instance.id, stepOrder, policyStep.decision_rule, policyStep.id]);
+      // PINNED entity types (PR) also record WHERE the step came from. A policy
+      // save deletes and re-inserts every policy step (the FK nulls
+      // policy_step_id), and these instances are never re-pointed (they skip
+      // propagation), so this snapshot is what membership revalidation resolves
+      // them against — never the live policy, never by position. Every other
+      // entity type writes exactly the row it always did.
+      const instanceStep = pinned
+        ? await t.one(`
+            INSERT INTO tbl_approval_instance_steps
+            (approval_instance_id, step_order, decision_rule, status, policy_step_id,
+             source_approver_type, source_approver_id, source_policy_step_order, source_min_amount)
+            VALUES ($1, $2, $3, 'PENDING', $4, $5, $6, $7, $8) RETURNING *
+          `, [instance.id, stepOrder, policyStep.decision_rule, policyStep.id,
+              policyStep.approver_source_type, policyStep.approver_source_id,
+              policyStep.step_order, policyStep.min_amount ?? null])
+        : await t.one(`
+            INSERT INTO tbl_approval_instance_steps
+            (approval_instance_id, step_order, decision_rule, status, policy_step_id)
+            VALUES ($1, $2, $3, 'PENDING', $4) RETURNING *
+          `, [instance.id, stepOrder, policyStep.decision_rule, policyStep.id]);
 
-      // Insert approvers for this step
+      // Insert approvers for this step. Under separation of duties the
+      // initiator was filtered out above; `!sod` keeps this auto-approval
+      // unreachable for those entity types even if that ever regressed.
       for (const userId of approverUserIds) {
-        if (userId === initiated_by) {
+        if (!sod && userId === initiated_by) {
           // Initiator: insert as already APPROVED with no comment
           await t.none(`
             INSERT INTO tbl_approval_step_approvers
@@ -3130,11 +3438,14 @@ export async function createApprovalInstance({
 
     // A PENDING instance can still have lost steps to the ROLE gate or to
     // zero-resolution; surface them so callers/tests can see a partially
-    // dropped policy, not only a fully dropped one.
-    if (skippedSteps.length > 0) {
+    // dropped policy, not only a fully dropped one. `below_threshold` and
+    // `sod_self` (PR) are the policy working as designed, not a lost step, so
+    // they are recorded in the diagnostics but do not raise this warning.
+    const unexpectedSkips = skippedSteps.filter(sk => !ROUTINE_SKIP_REASONS.has(sk.reason));
+    if (unexpectedSkips.length > 0) {
       logger.warn(
         `[ApprovalAutoApprove] instance ${instance.id} (${entity_type}/${entity_id}, policy ${policy.id}) is PENDING but ` +
-        `${skippedSteps.length} of ${policySteps.length} policy step(s) were dropped at creation: ${JSON.stringify(skippedSteps)}`
+        `${unexpectedSkips.length} of ${policySteps.length} policy step(s) were dropped at creation: ${JSON.stringify(unexpectedSkips)}`
       );
     }
 
@@ -3148,10 +3459,11 @@ export async function createApprovalInstance({
   };
 
   // If transaction context provided, use it; otherwise create new transaction
-  if (txContext) {
-    return typeof txContext.tx === 'function'
-      ? txContext.tx(executor)
-      : executor(txContext);
+  const outerTx = txContext || txArg;
+  if (outerTx) {
+    return typeof outerTx.tx === 'function'
+      ? outerTx.tx(executor)
+      : executor(outerTx);
   }
   return db.tx(executor);
 }
@@ -3189,6 +3501,11 @@ export async function findBestMatchingPolicyTx({ entity_type, hospitality_compan
 // Passing `null` matches process-agnostic policies only (no cross-process
 // fall-through).
 export async function checkIfUserIsFinalApprover(userId, entity_type, hospitality_company_id, hotel_id, department_id, txContext = null, process_id = null) {
+  // The question is asked by the would-be initiator ("will submitting this
+  // auto-approve?"). Under separation of duties the initiator is never an
+  // approver and is never auto-recorded as approving, so the answer is no.
+  if (excludesInitiator(entity_type)) return false;
+
   const t = txContext || db;
 
   // Find the best matching master policy — process-scoped.
@@ -3637,11 +3954,67 @@ export async function getApprovalWorkflowUsers(entity_type, entity_id, txContext
 // ============= APPROVAL ACTIONS =============
 
 /**
- * Submit an approval action (APPROVE or REJECT)
- * Validates user permission and handles step progression
+ * May `userId` still decide on `instance` at all — the actor-scope half of
+ * submitApprovalAction's gate (step 4), exported so every other decision door
+ * applies the very same rule:
+ *   - hospitality access: a company-level mapping, or a hotel-level one for
+ *     the instance's hotel (userHasHospitalityAccess);
+ *   - when the instance is department-scoped, a role scope row covering
+ *     (company, hotel, department) — any role (the step's own eligibility is
+ *     approvalStepSourceCanApprove's question).
+ * An approver row alone is not enough: rows are not revalidated when a user is
+ * unmapped or a USER-source approver loses their scope.
+ * @param {number} userId
+ * @param {{hospitality_company_id, hotel_id, department_id}} instance
+ * @returns {Promise<boolean>}
  */
+export async function approvalActorInScope(userId, instance, t = db) {
+  const hasHospAccess = await userHasHospitalityAccess(userId, instance.hospitality_company_id, instance.hotel_id, t);
+  if (!hasHospAccess) return false;
+  // All entities are department-scoped — validate user has role scope covering this department
+  if (instance.department_id) {
+    const hasDeptScope = await t.oneOrNone(`
+      SELECT 1 FROM tbl_user_role_scopes urs
+      WHERE urs.user_id = $1
+        AND urs.company_id = $2
+        AND (urs.hotel_id IS NULL OR urs.hotel_id = $3)
+        AND (urs.department_id IS NULL OR urs.department_id = $4)
+      LIMIT 1
+    `, [userId, instance.hospitality_company_id, instance.hotel_id, instance.department_id]);
+    if (!hasDeptScope) return false;
+  }
+  return true;
+}
+
 /**
- * Record an approval decision.
+ * Can an APPROVE count on `step` as far as its SOURCE is concerned? Only
+ * separation-of-duties entity types (PR) are gated: a ROLE-source step whose
+ * role no longer holds <resource>.read + <resource>.approve cannot be approved
+ * (it can still be rejected / sent back). Source = the creation snapshot
+ * (pinned types), else the still-linked policy step. Every other entity type,
+ * and every non-ROLE source, is `{ ok: true }` without a query.
+ * @returns {Promise<{ok: boolean, resource?: string}>}
+ */
+export async function approvalStepSourceCanApprove(instance, step, t = db) {
+  if (!excludesInitiator(instance.entity_type)) return { ok: true };
+  let sourceType = step.source_approver_type || null;
+  let sourceId = step.source_approver_id || null;
+  if (!sourceType && step.policy_step_id) {
+    const linked = await t.oneOrNone(
+      'SELECT approver_source_type, approver_source_id FROM tbl_approval_policy_steps WHERE id = $1',
+      [step.policy_step_id]
+    );
+    sourceType = linked?.approver_source_type || null;
+    sourceId = linked?.approver_source_id || null;
+  }
+  if (sourceType !== 'ROLE') return { ok: true };
+  const resource = ENTITY_APPROVE_RESOURCE_MAP[instance.entity_type] || String(instance.entity_type).toLowerCase();
+  return { ok: await roleHasReadAndApprovePermission(sourceId, resource, t), resource };
+}
+
+/**
+ * Record an approval decision (APPROVE or REJECT).
+ * Validates user permission and handles step progression.
  *
  * @param {Object} args
  * @param {Object} [txContext] - An open transaction to record the decision in.
@@ -3734,6 +4107,17 @@ export async function submitApprovalAction({
       }
     }
 
+    // 1c. Separation of duties (PR): the initiator never decides their own
+    // instance. The engine never gives them an approver row on these types, so
+    // this only matters if one was written some other way — it must still not
+    // count.
+    if (excludesInitiator(instance.entity_type) && Number(approver_user_id) === Number(instance.initiated_by)) {
+      const err = new Error('The person who raised this request cannot approve or reject it');
+      err.code = 'APPROVAL_INITIATOR_CANNOT_ACT';
+      err.httpStatus = 403;
+      throw err;
+    }
+
     // 2. Get the current step
     const currentStep = await t.oneOrNone(`
       SELECT * FROM tbl_approval_instance_steps
@@ -3746,6 +4130,24 @@ export async function submitApprovalAction({
     // If step_id was provided, validate it matches the current step
     if (approval_instance_step_id && approval_instance_step_id !== currentStep.id) {
       throw new Error('Provided step is not the current pending step');
+    }
+
+    // 2b. Separation of duties (PR), defence in depth: an APPROVE only counts
+    // while the step's source ROLE can still approve this entity type. The
+    // reconcilers already block such a step and refuse to refill it; this
+    // refuses an approver row that reached it any other way. Source = the
+    // creation snapshot (pinned types), else the still-linked policy step.
+    // (approvalStepSourceCanApprove — shared with the PR detail's can_approve.)
+    if (normalizedAction === 'APPROVE') {
+      const source = await approvalStepSourceCanApprove(instance, currentStep, t);
+      if (!source.ok) {
+        const err = new Error(
+          `This approval level's role no longer holds ${source.resource}.read and ${source.resource}.approve, so it cannot be approved until that is restored`
+        );
+        err.code = 'APPROVAL_SOURCE_INELIGIBLE';
+        err.httpStatus = 403;
+        throw err;
+      }
     }
 
     const stepId = approval_instance_step_id || currentStep.id;
@@ -3777,25 +4179,11 @@ export async function submitApprovalAction({
       throw new Error(`User has already acted on this step with status: ${approverRecord.status}`);
     }
 
-    // 4. Validate user belongs to the policy scope
-    // Check hospitality access
-    const hasHospAccess = await userHasHospitalityAccess(approver_user_id, instance.hospitality_company_id, instance.hotel_id, t);
-    if (!hasHospAccess) {
+    // 4. Validate user belongs to the policy scope (hospitality access, then a
+    // role scope covering the instance's department — approvalActorInScope,
+    // shared with the PR send-back gate and the PR detail's capabilities).
+    if (!(await approvalActorInScope(approver_user_id, instance, t))) {
       throw new Error('User does not belong to the approval policy scope');
-    }
-    // All entities are department-scoped — validate user has role scope covering this department
-    if (instance.department_id) {
-      const hasDeptScope = await t.oneOrNone(`
-        SELECT 1 FROM tbl_user_role_scopes urs
-        WHERE urs.user_id = $1
-          AND urs.company_id = $2
-          AND (urs.hotel_id IS NULL OR urs.hotel_id = $3)
-          AND (urs.department_id IS NULL OR urs.department_id = $4)
-        LIMIT 1
-      `, [approver_user_id, instance.hospitality_company_id, instance.hotel_id, instance.department_id]);
-      if (!hasDeptScope) {
-        throw new Error('User does not belong to the approval policy scope');
-      }
     }
 
     // 5. Record the action in audit log
@@ -4034,14 +4422,23 @@ export async function notifyNextApprovalStep(approval_instance_id, result) {
 }
 
 /**
- * Cancel a pending approval instance
+ * Cancel a pending approval instance.
+ *
+ * Default (no 4th argument): runs in its own transaction and notifies the
+ * approvers who still held it once that commits — unchanged for every caller.
+ *
+ * `{ t }`: joins the caller's transaction instead (as a savepoint, `t.tx`), so
+ * the cancellation commits or rolls back with the caller's own writes (the PR
+ * withdraw / send-back flip the PR in the same transaction). Nothing is sent
+ * then: the result carries a `notify()` thunk the caller runs AFTER its commit
+ * (never throws, like the default path).
  */
-export async function cancelApprovalInstance(instance_id, cancelled_by, reason = null) {
+export async function cancelApprovalInstance(instance_id, cancelled_by, reason = null, { t: outerT = null } = {}) {
   // Approvers still holding this as a live task need to be told it is moot.
   // Without it the item sits in "pending for me" forever, and the only call
   // site that notified was closeRFQ — the ARC publish-withdrawal, the generic
   // cancel endpoint and the four sendback cascades all went silent.
-  const outcome = await db.tx(async t => {
+  const work = async t => {
     // A PO's approval: lock the PO row before the instance, the order every
     // PO decision and hold uses, so a hold cannot open or close under us.
     //
@@ -4067,7 +4464,10 @@ export async function cancelApprovalInstance(instance_id, cancelled_by, reason =
 
     if (!instance) throw new Error('Approval instance not found');
     if (instance.status !== 'PENDING') {
-      throw new Error(`Cannot cancel instance with status: ${instance.status}`);
+      throw Object.assign(new Error(`Cannot cancel instance with status: ${instance.status}`), {
+        code: 'APPROVAL_INSTANCE_NOT_PENDING',
+        instance_status: instance.status,
+      });
     }
 
     // Update instance
@@ -4124,7 +4524,18 @@ export async function cancelApprovalInstance(instance_id, cancelled_by, reason =
       __instance: instance,
       __approvers: pendingApprovers.map(a => Number(a.id)).filter(Boolean),
     };
-  });
+  };
+
+  if (outerT) {
+    const outcome = await outerT.tx(work);
+    return {
+      status: outcome.status,
+      message: outcome.message,
+      notify: () => notifyApprovalCancelled(outcome, cancelled_by, reason),
+    };
+  }
+
+  const outcome = await db.tx(work);
 
   await notifyApprovalCancelled(outcome, cancelled_by, reason);
 
@@ -4146,7 +4557,7 @@ async function notifyApprovalCancelled(outcome, cancelledBy, reason) {
     const metadata = instance.metadata || {};
     const label = entityLabel(instance.entity_type, { isGroup: await isGroupInstance(instance) });
     const identifier =
-      metadata.rfq_no || metadata.po_number || metadata.mr_number || instance.entity_id;
+      metadata.rfq_no || metadata.po_number || metadata.mr_number || metadata.pr_number || instance.entity_id;
 
     const { dispatch } = await import('../services/notificationService.js');
     await dispatch({
@@ -4443,7 +4854,10 @@ export const uploadToS3 = async (filePath, s3Key) => {
  * @param {Object} metadata - Additional metadata (optional, defaults to {})
  * @param {string} remarks - Remarks/notes (optional)
  * @param {Object} txContext - Optional transaction context for atomicity
- * @returns {Promise<Object>} Created lifecycle history record
+ * @returns {Promise<Object|null>} The created lifecycle history record, or null
+ *   when `entity_type` has no lifecycle trail (anything outside the
+ *   lifecycle_entity_type enum — MR, PR, the ARC v2 stage types…), which is
+ *   skipped without writing.
  */
 export async function recordLifecycleEvent({
   entity_type,
@@ -4459,10 +4873,14 @@ export async function recordLifecycleEvent({
     throw new Error('entity_type, entity_id, stage, action, and performed_by are required');
   }
 
-  // Validate entity_type is in enum
+  // Only the lifecycle_entity_type enum's values have a lifecycle trail. Any
+  // other type (MR, PR, the ARC v2 stage types…) keeps its own audit trail
+  // (PR: tbl_pr_event), so the engine's generic APPROVED/REJECT call is skipped
+  // quietly rather than thrown and logged as an error on every decision.
   const validTypes = ['RFQ', 'TENDER', 'NEGOTIATION', 'PO', 'INDENT', 'TECHNICAL', 'ARC'];
   if (!validTypes.includes(entity_type)) {
-    throw new Error(`Invalid entity_type. Must be one of: ${validTypes.join(', ')}`);
+    logger.debug({ entity_type, entity_id, stage, action }, '[lifecycle] entity type has no lifecycle trail — skipped');
+    return null;
   }
 
   const dbContext = txContext || db;

@@ -42,12 +42,17 @@ const extractEntityId = (spec, { req, responseBody, actorUserId }) => {
       : spec.from === 'body' ? req.body
       : spec.from === 'response' ? responseBody
       : null;
-  const raw = source ? dig(source, spec.path) : null;
+  if (source) {
+    for (const path of [spec.path, ...(spec.fallbacks || [])]) {
+      const raw = dig(source, path);
+      if (raw == null || raw === '') continue;
+      const n = Number(raw);
+      return Number.isFinite(n) ? n : null;
+    }
+  }
   // `orActor`: the route acts on the caller when the field is absent — a
   // self-edit — so the subject is the caller, not "nobody".
-  if (raw == null || raw === '') return spec.orActor && actorUserId ? Number(actorUserId) : null;
-  const n = Number(raw);
-  return Number.isFinite(n) ? n : null;
+  return spec.orActor && actorUserId ? Number(actorUserId) : null;
 };
 
 /**
@@ -414,6 +419,11 @@ const activityCapture = (req, res, next) => {
     // only for the ones that actually happened.
     if (mutating && !lookupEvent(req.method, routePattern(req) || '')) noteUncatalogued(req);
     if (res.statusCode >= 400) return;
+    // A handler that answered 200 for something that did NOT happen — an
+    // idempotent no-op such as a late decision on an approval that was already
+    // concluded or withdrawn — sets res.locals.skipActivityCapture, so the trail
+    // never claims it did. The HTTP answer itself is the handler's business.
+    if (res.locals?.skipActivityCapture === true) return;
     captureEvent(req, res, responseBody).catch((err) =>
       logger.error({ err: err.message }, 'Activity capture failed')
     );

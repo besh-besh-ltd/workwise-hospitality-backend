@@ -36,7 +36,7 @@ WITH res AS (
   SELECT * FROM (VALUES
     ('RFQ','rfq'), ('TENDER','boq'), ('TECHNICAL','te'),
     ('NEGOTIATION','negotiation'), ('NEGOTIATION_QUOTE','quote-compare'),
-    ('PO','awarding'), ('MR','mr'),
+    ('PO','awarding'), ('MR','mr'), ('PR','pr'),
     ('ARC','arc'), ('ARC_PUBLISH','arc'), ('ARC_TECH','arc-tech'),
     ('ARC_NEGOTIATION','arc-comm'), ('ARC_COMMITTEE','arc-committee'),
     ('ARC_AMENDMENT','arc'),
@@ -97,7 +97,7 @@ SELECT 'B. UNSATISFIABLE RESOURCE' AS finding,
   FROM (VALUES
     ('RFQ','rfq'), ('TENDER','boq'), ('TECHNICAL','te'),
     ('NEGOTIATION','negotiation'), ('NEGOTIATION_QUOTE','quote-compare'),
-    ('PO','awarding'), ('MR','mr'),
+    ('PO','awarding'), ('MR','mr'), ('PR','pr'),
     ('ARC','arc'), ('ARC_PUBLISH','arc'), ('ARC_TECH','arc-tech'),
     ('ARC_NEGOTIATION','arc-comm'), ('ARC_COMMITTEE','arc-committee'),
     ('ARC_AMENDMENT','arc'),
@@ -131,7 +131,7 @@ WITH map AS (
   SELECT * FROM (VALUES
     ('RFQ','rfq'), ('TENDER','boq'), ('TECHNICAL','te'),
     ('NEGOTIATION','negotiation'), ('NEGOTIATION_QUOTE','quote-compare'),
-    ('PO','awarding'), ('MR','mr'),
+    ('PO','awarding'), ('MR','mr'), ('PR','pr'),
     ('ARC','arc'), ('ARC_PUBLISH','arc'), ('ARC_TECH','arc-tech'),
     ('ARC_NEGOTIATION','arc-comm'), ('ARC_COMMITTEE','arc-committee'),
     ('ARC_AMENDMENT','arc'),
@@ -218,7 +218,7 @@ WITH map AS (
   SELECT * FROM (VALUES
     ('RFQ','rfq'), ('TENDER','boq'), ('TECHNICAL','te'),
     ('NEGOTIATION','negotiation'), ('NEGOTIATION_QUOTE','quote-compare'),
-    ('PO','awarding'), ('MR','mr'),
+    ('PO','awarding'), ('MR','mr'), ('PR','pr'),
     ('ARC','arc'), ('ARC_PUBLISH','arc'), ('ARC_TECH','arc-tech'),
     ('ARC_NEGOTIATION','arc-comm'), ('ARC_COMMITTEE','arc-committee'),
     ('ARC_AMENDMENT','arc'),
@@ -287,7 +287,7 @@ WITH map AS (
   SELECT * FROM (VALUES
     ('RFQ','rfq'), ('TENDER','boq'), ('TECHNICAL','te'),
     ('NEGOTIATION','negotiation'), ('NEGOTIATION_QUOTE','quote-compare'),
-    ('PO','awarding'), ('MR','mr'),
+    ('PO','awarding'), ('MR','mr'), ('PR','pr'),
     ('ARC','arc'), ('ARC_PUBLISH','arc'), ('ARC_TECH','arc-tech'),
     ('ARC_NEGOTIATION','arc-comm'), ('ARC_COMMITTEE','arc-committee'),
     ('ARC_AMENDMENT','arc'),

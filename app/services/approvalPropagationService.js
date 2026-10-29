@@ -24,6 +24,14 @@ import {
 } from '../models/generalModel.js';
 import { logger } from '../util/logger.js';
 import { notifyApprovalChanged } from './approvalEvents.js';
+import {
+  excludesInitiator,
+  filterInitiator,
+  isPinnedToSubmission,
+  PINNED_TO_SUBMISSION,
+  sodResolveOptions,
+  toPaise,
+} from './approval/approvalEntityRules.js';
 import { closeHoldsThatOutlivedTheirStep, lockPosOfInstances } from './po/poHold.js';
 import { logError } from '../helper/common.js';
 import {
@@ -117,21 +125,56 @@ const SKIP_PUBLISHED_RFQ_SQL = `
  * policy has fewer steps than the instance) and callers must decide explicitly
  * what to do about it rather than letting a join quietly drop the row.
  *
+ * ── PINNED ENTITY TYPES (PR) ──
+ * Instances of PINNED_TO_SUBMISSION types are never re-pointed by policy
+ * propagation, so after the first policy save their `policy_step_id` is NULL
+ * for good and rule (2) would match by POSITION — and a PR's positions are
+ * routinely shifted by value-threshold / separation-of-duties drops. Their
+ * steps instead carry the source snapshotted at creation
+ * (`ais.source_approver_type` / `source_approver_id`), which is the ONLY
+ * answer for them: rule (0) below, reported as `matched_by_id = true`. A
+ * pinned step without a snapshot is UNRESOLVABLE (no row) — never resolved
+ * against the live policy. Every other entity type has NULL snapshot columns
+ * and resolves through rules (1)/(2) exactly as before.
+ *
  * Assumes the calling SQL aliases the instance table `ai` and instance steps `ais`.
  */
+// Pinned entity types as a SQL array literal. Built from the code constant —
+// never from input — and checked to be bare identifiers, so it is inlined.
+const PINNED_TYPES_SQL = (() => {
+  const types = [...PINNED_TO_SUBMISSION];
+  if (!types.length || !types.every((ty) => /^[A-Z_]+$/.test(ty))) {
+    throw new Error('PINNED_TO_SUBMISSION must hold bare upper-case entity-type identifiers');
+  }
+  return `ARRAY[${types.map((ty) => `'${ty}'`).join(', ')}]::text[]`;
+})();
+
 export const POLICY_STEP_RESOLUTION_SQL = `
   LEFT JOIN LATERAL (
-    SELECT
-      p.id                AS matched_policy_step_id,
-      p.approver_source_type,
-      p.approver_source_id,
-      (p.id IS NOT DISTINCT FROM ais.policy_step_id) AS matched_by_id
-    FROM tbl_approval_policy_steps p
-    WHERE p.approval_policy_id = ai.approval_policy_id
-      AND (p.id = ais.policy_step_id OR p.step_order = ais.step_order)
-    ORDER BY (p.id IS NOT DISTINCT FROM ais.policy_step_id) DESC,
-             p.step_order ASC, p.id ASC
-    LIMIT 1
+    SELECT src.matched_policy_step_id, src.approver_source_type,
+           src.approver_source_id, src.matched_by_id
+      FROM (
+        -- (0) pinned step: the creation-time snapshot is authoritative
+        SELECT ais.policy_step_id         AS matched_policy_step_id,
+               ais.source_approver_type   AS approver_source_type,
+               ais.source_approver_id     AS approver_source_id,
+               TRUE                       AS matched_by_id,
+               0 AS precedence, 0 AS policy_step_order, 0 AS policy_step_row_id
+         WHERE ais.source_approver_type IS NOT NULL
+        UNION ALL
+        -- (1) live link, (2) ordinal fallback — non-pinned entity types only
+        SELECT p.id, p.approver_source_type, p.approver_source_id,
+               (p.id IS NOT DISTINCT FROM ais.policy_step_id),
+               CASE WHEN p.id IS NOT DISTINCT FROM ais.policy_step_id THEN 1 ELSE 2 END,
+               p.step_order, p.id
+          FROM tbl_approval_policy_steps p
+         WHERE ais.source_approver_type IS NULL
+           AND ai.entity_type <> ALL(${PINNED_TYPES_SQL})
+           AND p.approval_policy_id = ai.approval_policy_id
+           AND (p.id = ais.policy_step_id OR p.step_order = ais.step_order)
+      ) src
+     ORDER BY src.precedence ASC, src.policy_step_order ASC, src.policy_step_row_id ASC
+     LIMIT 1
   ) ps ON TRUE`;
 
 /**
@@ -213,6 +256,7 @@ function buildChangedScopeFilterSql(changedScopes, changedDeptIds, params) {
 const IDENTIFIER_KEYS_BY_ENTITY = {
   PO: ['po_number', 'po_no'],
   MR: ['mr_number', 'mr_no'],
+  PR: ['pr_number'],
   RFQ: ['rfq_number', 'rfq_no'],
   TENDER: ['tender_number', 'rfq_number', 'rfq_no'],
   TECHNICAL: ['rfq_number', 'rfq_no'],
@@ -380,7 +424,13 @@ export function computePolicyStepDiff(oldSteps, newSteps) {
     const newRule = newStep.decision_rule || 'ANY';
     const ruleChanged = oldRule !== newRule;
 
-    if (kind === 'position' || ruleChanged) {
+    // Value threshold (PR). Compared as paise so '1000' and '1000.00' — a
+    // request body vs the NUMERIC(18,2) column — are the same threshold.
+    // Absent and null are both "no threshold". For every other entity type
+    // both sides are always null, so this never fires for them.
+    const minAmountChanged = toPaise(oldStep.min_amount ?? null) !== toPaise(newStep.min_amount ?? null);
+
+    if (kind === 'position' || ruleChanged || minAmountChanged) {
       diffs.push({
         type: 'STEP_MODIFIED',
         step_order: stepOrderOf(oldStep),
@@ -388,6 +438,7 @@ export function computePolicyStepDiff(oldSteps, newSteps) {
         newStep,
         sourceChanged: kind === 'position',
         ruleChanged,
+        minAmountChanged,
         oldRule,
         newRule
       });
@@ -425,15 +476,22 @@ export function summarizeDiffEntry(d) {
  */
 export async function reEvaluateInstanceStep(instanceStepId, t) {
   const step = await t.oneOrNone(
-    'SELECT * FROM tbl_approval_instance_steps WHERE id = $1',
+    `SELECT s.*, ai.entity_type AS instance_entity_type, ai.initiated_by AS instance_initiated_by
+       FROM tbl_approval_instance_steps s
+       JOIN tbl_approval_instances ai ON ai.id = s.approval_instance_id
+      WHERE s.id = $1`,
     [instanceStepId]
   );
   if (!step || step.status !== 'PENDING') {
     return { completed: false, status: step?.status || 'UNKNOWN' };
   }
+  // Separation of duties (PR): a step never completes — automatically or
+  // otherwise — without at least one APPROVED approver who is not the
+  // initiator. An emptied step is BLOCKED instead (see below).
+  const sod = excludesInitiator(step.instance_entity_type);
 
   const approvers = await t.any(
-    `SELECT status FROM tbl_approval_step_approvers
+    `SELECT status, approver_user_id FROM tbl_approval_step_approvers
      WHERE approval_instance_step_id = $1 AND status != 'REMOVED'`,
     [instanceStepId]
   );
@@ -488,6 +546,20 @@ export async function reEvaluateInstanceStep(instanceStepId, t) {
       return { completed: false, status: 'PENDING', blocked: true };
     }
 
+    if (sod) {
+      // Every approver was removed mid-flight (role revoked, user
+      // deactivated, …). For other entity types the step auto-completes; under
+      // separation of duties that would be an approval nobody independent
+      // gave. It stays PENDING with nobody on it until somebody eligible is
+      // granted the role (revalidation PART 2 then fills it) — visible in the
+      // stuck-approvals oversight screen as blocked.
+      logger.warn(
+        { instance_step_id: instanceStepId, entity_type: step.instance_entity_type },
+        '[ApprovalPropagation] separation of duties: every approver was removed — leaving the step PENDING (blocked), not auto-completing it'
+      );
+      return { completed: false, status: 'PENDING', blocked: true };
+    }
+
     await t.none(
       `UPDATE tbl_approval_instance_steps SET status = 'APPROVED', completed_at = NOW() WHERE id = $1`,
       [instanceStepId]
@@ -497,10 +569,16 @@ export async function reEvaluateInstanceStep(instanceStepId, t) {
 
   const allApproved = approvers.every(a => a.status === 'APPROVED');
   const anyApproved = approvers.some(a => a.status === 'APPROVED');
+  // Under SoD an initiator's APPROVED row (which the engine never writes for
+  // these types) must not be what completes a step.
+  const independentApproved = !sod || approvers.some(a =>
+    a.status === 'APPROVED' && Number(a.approver_user_id) !== Number(step.instance_initiated_by)
+  );
 
-  const stepComplete =
+  const stepComplete = independentApproved && (
     (step.decision_rule === 'ALL' && allApproved) ||
-    (step.decision_rule === 'ANY' && anyApproved);
+    (step.decision_rule === 'ANY' && anyApproved)
+  );
 
   if (stepComplete) {
     await t.none(
@@ -740,10 +818,46 @@ async function retireIneligibleRoleStep({ instanceId, stepId, roleId, resource, 
   // discovery snapshot: one instance can hold several steps backed by the same
   // role, and an earlier iteration may already have advanced past this one.
   const step = await t.oneOrNone(
-    'SELECT id, step_order, status FROM tbl_approval_instance_steps WHERE id = $1',
+    `SELECT s.id, s.step_order, s.status, ai.entity_type AS instance_entity_type
+       FROM tbl_approval_instance_steps s
+       JOIN tbl_approval_instances ai ON ai.id = s.approval_instance_id
+      WHERE s.id = $1`,
     [stepId]
   );
   if (!step || step.status !== 'PENDING') return null;
+
+  // Separation of duties (PR): retiring the step would let the instance move
+  // past — or complete without — an approval level nobody independent gave.
+  // The role's holders lose their authority (their PENDING rows are
+  // tombstoned) but the step itself stays PENDING and BLOCKED until a role
+  // that can approve is in place; nothing advances.
+  if (excludesInitiator(step.instance_entity_type)) {
+    const pendingApprovers = await t.any(
+      `UPDATE tbl_approval_step_approvers
+          SET status = 'REMOVED', removed_at = NOW(), removal_reason = $2
+        WHERE approval_instance_step_id = $1 AND status = 'PENDING'
+        RETURNING approver_user_id`,
+      [step.id, changeType]
+    );
+    for (const ap of pendingApprovers) {
+      await t.none(
+        `INSERT INTO tbl_approval_actions
+           (approval_instance_id, approval_instance_step_id, approver_user_id, action, comment)
+         VALUES ($1, $2, $3, 'APPROVER_REMOVED', $4)`,
+        [instanceId, step.id, ap.approver_user_id,
+          `Approver removed: role ${roleId} no longer holds both ${resource}.read and ${resource}.approve — step left blocked (separation of duties)`]
+      );
+    }
+    notifyApprovalChanged({ instanceIds: instanceId }, t);
+    logger.warn(`[RolePermGate] instance ${instanceId} step ${step.id} (step_order=${step.step_order}) BLOCKED, not removed — role ${roleId} lost ${resource}.read/${resource}.approve on a separation-of-duties entity; ${pendingApprovers.length} pending approver row(s) revoked`);
+    return {
+      step_id: step.id,
+      step_order: step.step_order,
+      approver_user_ids: pendingApprovers.map((a) => a.approver_user_id),
+      instanceCompleted: false,
+      blocked: true,
+    };
+  }
 
   await t.none(
     `UPDATE tbl_approval_instance_steps
@@ -845,6 +959,18 @@ async function retireIneligibleRoleStep({ instanceId, stepId, roleId, resource, 
  */
 export async function applyDiffToInstance(instance, diff, policy, changedBy, t, mapping = {}) {
   const { instanceLinks = null, oldStepIdByOrder = null, stepIdMap = null, newOrderById = null } = mapping;
+  // PINNED (PR): the instance keeps the steps resolved at submission; a policy
+  // edit is never applied to it. propagatePolicyChangeToInstances already
+  // leaves these instances out — this is the guard for any direct caller.
+  if (isPinnedToSubmission(instance.entity_type)) {
+    logger.info(`[Propagate] instance ${instance.id} (${instance.entity_type}/${instance.entity_id}) is pinned to the steps resolved at submission — policy change NOT applied`);
+    return {
+      approversAdded: [], approversRemoved: [], approversKeptApproved: [],
+      stepsAdded: [], stepsRemoved: [], stepsModified: [], unmatchedDiffEntries: [],
+      rulesChanged: [], autoCompleted: false, pinned: true
+    };
+  }
+
   // Steps / approvers of this live instance are about to change — announce
   // after commit (de-duplicated per transaction, dropped on rollback).
   notifyApprovalChanged({ instanceIds: instance.id }, t);
@@ -1717,13 +1843,28 @@ export async function propagatePolicyChangeToInstances({ policyId, diff, changed
   // Lock all PENDING instances for this policy (ascending ID to prevent deadlocks).
   // Published RFQs are excluded — their approval has already served its purpose.
   logger.info(`[Propagate] Querying PENDING instances for policy ${policyId}`);
+  // Instances of PINNED entity types (PR) keep the steps resolved at
+  // submission: they are neither locked nor touched here (no step, approver,
+  // version or change-log write). entity_type is NOT NULL, so `<> ALL` is a
+  // plain exclusion.
+  const pinnedTypes = [...PINNED_TO_SUBMISSION];
+  const pinnedInstances = await t.any(
+    `SELECT ai.id, ai.entity_type, ai.entity_id FROM tbl_approval_instances ai
+     WHERE ai.approval_policy_id = $1 AND ai.status = 'PENDING'
+       AND ai.entity_type = ANY($2::text[])`,
+    [policyId, pinnedTypes]
+  );
+  if (pinnedInstances.length > 0) {
+    logger.info(`[Propagate] policy ${policyId}: ${pinnedInstances.length} PENDING instance(s) pinned to their submitted steps, left untouched: [${pinnedInstances.map(i => `id=${i.id},entity=${i.entity_type}/${i.entity_id}`).join(' | ')}]`);
+  }
   const pendingInstances = await t.any(
     `SELECT ai.* FROM tbl_approval_instances ai
      WHERE ai.approval_policy_id = $1 AND ai.status = 'PENDING'
+       AND ai.entity_type <> ALL($2::text[])
      ${SKIP_PUBLISHED_RFQ_SQL}
      ORDER BY ai.id ASC
      FOR UPDATE`,
-    [policyId]
+    [policyId, pinnedTypes]
   );
 
   logger.info(`[Propagate] Found ${pendingInstances.length} PENDING instances for policy ${policyId}: [${pendingInstances.map(i => `id=${i.id},entity=${i.entity_type}/${i.entity_id},status=${i.status}`).join(' | ')}]`);
@@ -2023,7 +2164,15 @@ export async function simulateApproverImpact(userId, changeType, options = {}) {
 
     // Would the step auto-complete if this user is removed?
     let wouldAutoCompleteStep = false;
-    if (stepRetiredByPermissionGate) {
+    // Separation of duties (PR): the mutation path never completes or retires
+    // a step that is left with no independent approver — it BLOCKS it (see
+    // reEvaluateInstanceStep / retireIneligibleRoleStep). Say so instead of
+    // predicting an auto-completion that will not happen.
+    const sodBlocks = excludesInitiator(row.entity_type) &&
+      (stepRetiredByPermissionGate || otherApprovers.length === 0);
+    if (sodBlocks) {
+      wouldAutoCompleteStep = false;
+    } else if (stepRetiredByPermissionGate) {
       wouldAutoCompleteStep = true;
     } else if (otherApprovers.length === 0) {
       // No other approvers — step auto-completes (empty)
@@ -2062,9 +2211,10 @@ export async function simulateApproverImpact(userId, changeType, options = {}) {
       entity_identifier: resolveEntityIdentifier(row.entity_type, metadata, row.entity_id),
       step_order: row.step_order,
       current_step: row.current_step,
-      impact: stepRetiredByPermissionGate ? 'REMOVE_STEP' : 'REMOVE_APPROVER',
+      impact: sodBlocks ? 'BLOCK_STEP' : (stepRetiredByPermissionGate ? 'REMOVE_STEP' : 'REMOVE_APPROVER'),
       wouldAutoCompleteStep,
-      wouldAutoCompleteInstance
+      wouldAutoCompleteInstance,
+      ...(sodBlocks ? { wouldBlockStep: true } : {})
     });
   }
 
@@ -2388,7 +2538,8 @@ export async function revalidateApproverMembership({
           result.stepsRemoved.push({
             instance_id: row.instance_id, step_id: retired.step_id,
             step_order: retired.step_order, role_id: row.approver_source_id,
-            resource: verdict.resource, reason: verdict.reason
+            resource: verdict.resource, reason: verdict.reason,
+            ...(retired.blocked ? { blocked: true } : {})
           });
           for (const removedUserId of retired.approver_user_ids) {
             result.approversRemoved.push({
@@ -2411,10 +2562,17 @@ export async function revalidateApproverMembership({
     // process scope was narrowed away from this instance's process is
     // correctly excluded from the resolved set (and therefore marked REMOVED
     // below).
+    // Separation of duties: the initiator never "still qualifies" (no-op for
+    // other entity types).
     const policyStep = { approver_source_type: row.approver_source_type, approver_source_id: row.approver_source_id };
-    const resolvedIds = await resolveApprovers(
-      policyStep, row.hospitality_company_id, row.hotel_id,
-      resolveDeptId, t, null, row.process_id || null
+    const resolvedIds = filterInitiator(
+      row.entity_type,
+      await resolveApprovers(
+        policyStep, row.hospitality_company_id, row.hotel_id,
+        resolveDeptId, t, null, row.process_id || null,
+        sodResolveOptions(row.entity_type, row.initiated_by)
+      ),
+      row.initiated_by
     );
 
     if (!resolvedIds.includes(userId)) {
@@ -2541,6 +2699,34 @@ export async function revalidateApproverMembership({
       // not interchangeable. If the add path should be gated, the right fix is
       // to gate applyDiffToInstance at the point steps are created, not to
       // filter their approvers afterwards.
+      //
+      // ── EXCEPT pinned / separation-of-duties entity types (PR) ──
+      // None of the reasons above applies to them: applyDiffToInstance never
+      // touches a pinned instance, so every one of their steps was built
+      // through the creation gate. And for them an unchecked add is not an
+      // under/over-population trade-off but a bypass — a step BLOCKED because
+      // its role lost <resource>.approve (retireIneligibleRoleStep) would be
+      // refilled by the next person granted that same, still-stripped role,
+      // who could then approve the level alone. So the step's (snapshot)
+      // source must pass the very gate creation applies —
+      // policyStepApproverEligibility — before anyone is added to it.
+      if (isPinnedToSubmission(row.entity_type) || excludesInitiator(row.entity_type)) {
+        const { eligible, reason, resource } = await policyStepApproverEligibility(
+          { approver_source_type: row.approver_source_type, approver_source_id: row.approver_source_id },
+          row.entity_type,
+          {
+            hospitality_company_id: row.hospitality_company_id,
+            hotel_id: row.hotel_id,
+            department_id: row.department_id,
+            process_id: row.process_id || null,
+          },
+          t
+        );
+        if (!eligible) {
+          logger.warn(`[Revalidate] instance ${row.instance_id} step ${row.step_id}: source ${row.approver_source_type}/${row.approver_source_id} cannot approve ${row.entity_type} (${reason}, resource '${resource}') — user ${userId} NOT added; the step stays blocked`);
+          continue;
+        }
+      }
 
       // Lock the instance
       await t.oneOrNone('SELECT id FROM tbl_approval_instances WHERE id = $1 FOR UPDATE', [row.instance_id]);
@@ -2554,10 +2740,17 @@ export async function revalidateApproverMembership({
 
       // Re-resolve all approvers for this step to confirm user should be
       // included (process-scope-aware via row.process_id).
+      // Separation of duties: a requester who gains the step's role is still
+      // never added to their own instance (no-op for other entity types).
       const policyStep = { approver_source_type: row.approver_source_type, approver_source_id: row.approver_source_id };
-      const resolvedIds = await resolveApprovers(
-        policyStep, row.hospitality_company_id, row.hotel_id,
-        resolveDeptId, t, null, row.process_id || null
+      const resolvedIds = filterInitiator(
+        row.entity_type,
+        await resolveApprovers(
+          policyStep, row.hospitality_company_id, row.hotel_id,
+          resolveDeptId, t, null, row.process_id || null,
+          sodResolveOptions(row.entity_type, row.initiated_by)
+        ),
+        row.initiated_by
       );
 
       if (resolvedIds.includes(userId)) {
@@ -2797,7 +2990,8 @@ export async function revalidateRolePermissionChange({
     stepsRemoved.push({
       instance_id: row.instance_id, step_id: retired.step_id,
       step_order: retired.step_order, entity_type: row.entity_type,
-      entity_id: row.entity_id, resource: verdict.resource, reason: verdict.reason
+      entity_id: row.entity_id, resource: verdict.resource, reason: verdict.reason,
+      ...(retired.blocked ? { blocked: true } : {})
     });
     for (const removedUserId of retired.approver_user_ids) {
       approversRemoved.push({
@@ -2890,9 +3084,11 @@ export async function getPendingInstancesForPolicy(policyId) {
       (SELECT COUNT(*) FROM tbl_approval_instance_steps WHERE approval_instance_id = ai.id) as total_steps
     FROM tbl_approval_instances ai
     WHERE ai.approval_policy_id = $1 AND ai.status = 'PENDING'
+      -- Pinned entity types (PR) are never affected by a policy change.
+      AND ai.entity_type <> ALL($2::text[])
     ${SKIP_PUBLISHED_RFQ_SQL}
     ORDER BY ai.created_at DESC
-  `, [policyId]);
+  `, [policyId, [...PINNED_TO_SUBMISSION]]);
 }
 
 /**

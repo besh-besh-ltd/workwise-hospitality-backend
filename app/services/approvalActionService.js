@@ -104,6 +104,12 @@ const postActionRegistry = {
     APPROVED: () => import('../controllers/mr/mrController.js').then(m => m.handleMrPostApproval),
     REJECTED: () => import('../controllers/mr/mrController.js').then(m => m.handleMrRejection),
   },
+  // Purchase requisitions. Both handlers row-lock the PR and are idempotent;
+  // they also notify (prNotify), so notifyApprovalOutcome skips PR.
+  PR: {
+    APPROVED: () => import('../controllers/pr/prController.js').then(m => m.handlePrPostApproval),
+    REJECTED: () => import('../controllers/pr/prController.js').then(m => m.handlePrRejection),
+  },
   NEGOTIATION: {
     APPROVED: () => import('../controllers/negotiation/negotiationController.js').then(m => m.handleNegotiationPostApproval),
     REJECTED: () => import('../controllers/negotiation/negotiationController.js').then(m => m.handleNegotiationRejection),
@@ -333,11 +339,14 @@ export async function notifyApprovalOutcome(approvalInstanceId, actorUserId, { s
     // which knows about stages, committees and vendor audiences. Notifying here
     // too would double up.
     if (String(instance.entity_type || '').startsWith('ARC')) return;
+    // PR likewise: handlePrPostApproval / handlePrRejection tell the requester
+    // (and, on approval, the hotel's buyers) through prNotify, with an email.
+    if (instance.entity_type === 'PR') return;
 
     const label = entityLabel(instance.entity_type);
     const metadata = instance.metadata || {};
     const identifier =
-      metadata.rfq_no || metadata.po_number || metadata.mr_number || instance.entity_id;
+      metadata.rfq_no || metadata.po_number || metadata.mr_number || metadata.pr_number || instance.entity_id;
 
     const rejected = status === 'REJECTED';
 

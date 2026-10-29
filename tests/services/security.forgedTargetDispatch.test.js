@@ -63,7 +63,7 @@ const future = (days) => new Date(Date.now() + days * 86_400_000).toISOString().
 // ---- company B's world: one actionable target per engine type ---------------
 
 const B = {};
-const made = { rfq: [], product: [], round: [], te: [], teRound: [], po: [], mr: [], arc: [], contract: [], amendment: [] };
+const made = { rfq: [], product: [], round: [], te: [], teRound: [], po: [], mr: [], pr: [], arc: [], contract: [], amendment: [] };
 const instanceIds = [];
 let savedUsers = [];
 
@@ -134,6 +134,13 @@ async function seedCompanyB() {
      VALUES ($1, 'Forged target MR', $2, $3, $4, $5, 'pending_approval') RETURNING id`,
     [`MR-FORGED-${Date.now()}`, HC_B, HOTEL_B, DEPT, B_ADMIN])).id);
   made.mr.push(B.mr);
+  B.pr = Number((await db.one(
+    `INSERT INTO tbl_purchase_requisition (pr_number, title, hospitality_company_id, hotel_id, department_id,
+                                           required_by_date, justification, status, raised_by, estimated_total)
+     VALUES ($1, 'Forged target PR', $2, $3, $4, CURRENT_DATE + 14, 'forged target', 'pending_approval', $5, 1000)
+     RETURNING id`,
+    [`PR-FORGED-${Date.now()}`, HC_B, HOTEL_B, DEPT, B_ADMIN])).id);
+  made.pr.push(B.pr);
   B.arcTech = await arcB("tech_eval_in_progress", "TECH");
   B.arcCommittee = await arcB("committee_review", "COMMITTEE");
   B.arcPublish = await arcB("pending_publish_approval", "PUBLISH");
@@ -174,6 +181,8 @@ async function worldB() {
     techEvals: await rows(`SELECT to_jsonb(x) AS j FROM tbl_rfq_product_tech_evaluation x WHERE rfq_id = ANY($1::int[]) ORDER BY id`, [made.rfq]),
     techRounds: await rows(`SELECT to_jsonb(x) AS j FROM tbl_tech_evaluation_rounds x WHERE tbl_rfq_product_tech_evaluation_id = ANY($1::int[]) ORDER BY id`, [made.te]),
     mr: await rows(`SELECT to_jsonb(x) AS j FROM tbl_material_requisition x WHERE id = ANY($1::int[]) ORDER BY id`, [made.mr]),
+    pr: await rows(`SELECT to_jsonb(x) AS j FROM tbl_purchase_requisition x WHERE id = ANY($1::int[]) ORDER BY id`, [made.pr]),
+    prEvents: await rows(`SELECT to_jsonb(x) AS j FROM tbl_pr_event x WHERE pr_id = ANY($1::int[]) ORDER BY id`, [made.pr]),
     arcs: await rows(`SELECT to_jsonb(x) AS j FROM tbl_arc x WHERE id = ANY($1::int[]) ORDER BY id`, [made.arc]),
     arcEvents: await rows(`SELECT to_jsonb(x) AS j FROM tbl_arc_event_log x WHERE arc_id = ANY($1::bigint[]) ORDER BY id`, [made.arc]),
     contracts: await rows(`SELECT to_jsonb(x) AS j FROM tbl_arc_contract x WHERE arc_id = ANY($1::bigint[]) ORDER BY id`, [made.arc]),
@@ -200,6 +209,12 @@ const FORGERIES = {
   ARC_NEGOTIATION:   () => ({ entityId: B.arcRound, metadata: { round_id: B.arcRound, arc_id: B.arcNeg } }),
   NEGOTIATION_QUOTE: () => ({ entityId: B.product, metadata: { rfq_id: String(B.work), rfq_product_id: B.product } }),
 };
+// PR is resolved by instanceTargetCompany outside the shared CTEs (they are
+// also the inventory pre-deploy gate, which runs where the PR tables don't
+// exist yet), so its forgery joins the action-route cases but not the gate's.
+const APP_ONLY_FORGERIES = {
+  PR:                () => ({ entityId: B.pr, metadata: { pr_id: B.pr } }),
+};
 // Variants of a type whose handler reads metadata rather than entity_id.
 const VARIANTS = {
   "ARC_NEGOTIATION (entity_id names no round, metadata names B's)": {
@@ -209,6 +224,7 @@ const VARIANTS = {
 };
 const CASES = [
   ...Object.keys(FORGERIES).map((type) => [type, { type, forgery: FORGERIES[type] }]),
+  ...Object.keys(APP_ONLY_FORGERIES).map((type) => [type, { type, forgery: APP_ONLY_FORGERIES[type] }]),
   ...Object.entries(VARIANTS),
 ];
 
@@ -281,6 +297,8 @@ afterAll(async () => {
   await db.none(`DELETE FROM tbl_negotiation_rounds WHERE id = ANY($1::int[])`, [made.round]);
   await db.none(`DELETE FROM tbl_arc WHERE id = ANY($1::int[])`, [made.arc]);
   await db.none(`DELETE FROM tbl_material_requisition WHERE id = ANY($1::int[])`, [made.mr]);
+  await db.none(`DELETE FROM tbl_pr_event WHERE pr_id = ANY($1::int[])`, [made.pr]);
+  await db.none(`DELETE FROM tbl_purchase_requisition WHERE id = ANY($1::int[])`, [made.pr]);
   await db.none(`DELETE FROM tbl_rfq_purchase_order WHERE id = ANY($1::int[])`, [made.po]);
   await db.none(`DELETE FROM tbl_tech_evaluation_rounds WHERE id = ANY($1::int[])`, [made.teRound]);
   await db.none(`DELETE FROM tbl_rfq_product_tech_evaluation WHERE id = ANY($1::int[])`, [made.te]);
@@ -295,7 +313,7 @@ afterAll(async () => {
 
 describe("a forged instance acts on nobody else's target, for every registered type", () => {
   it("the table covers every type the dispatcher has a handler for", () => {
-    expect(Object.keys(FORGERIES).sort()).toEqual([...REGISTERED_APPROVAL_TYPES].sort());
+    expect([...Object.keys(FORGERIES), ...Object.keys(APP_ONLY_FORGERIES)].sort()).toEqual([...REGISTERED_APPROVAL_TYPES].sort());
   });
 
   describe.each(CASES)("%s", (label, { type, forgery }) => {
@@ -327,6 +345,14 @@ describe("a forged instance acts on nobody else's target, for every registered t
         .post("/api/v1/general/hospitality/approval/cancel")
         .send({ instance_id: forged.id, reason: "forged" });
       expect(await worldB()).toEqual(before);
+      if (type === "PR") {
+        // A PR's approval is withdrawn or sent back from the PR itself; the
+        // generic route refuses it outright and leaves the instance as it was.
+        expect(res.status).toBe(400);
+        expect(res.body.code).toBe("APPROVAL_ENTITY_HAS_OWN_WORKFLOW");
+        expect((await instanceRow(forged.id)).status).toBe("PENDING");
+        return;
+      }
       expect(res.status).toBe(200);
       expect((await instanceRow(forged.id)).status).toBe("CANCELLED");
     });

@@ -38,6 +38,10 @@
 //   ARC (legacy)     metadata.rfq_id (entity_id is that RFQ or one of its
 //                    products), else entity_id as the RFQ. No handler runs for
 //                    it; resolved so the gate does not flag live rows.
+//   PR               entity_id is the purchase requisition. Resolved in
+//                    instanceTargetCompany, NOT in the CTEs below: they are
+//                    also the inventory pre-deploy gate, which runs on
+//                    databases that do not have the PR tables yet.
 //   anything else    no target (null).
 
 import db from '../config/dbConn.js';
@@ -165,6 +169,13 @@ SELECT target_company FROM resolved`;
  */
 export async function instanceTargetCompany(dbCtx, instance) {
   if (!instance?.id || !instance.entity_type || instance.entity_id == null) return null;
+  if (instance.entity_type === 'PR') {
+    const pr = await (dbCtx || db).oneOrNone(
+      `SELECT hospitality_company_id FROM tbl_purchase_requisition WHERE id = $1`,
+      [Number(instance.entity_id)]
+    );
+    return pr?.hospitality_company_id == null ? null : Number(pr.hospitality_company_id);
+  }
   const metadata = typeof instance.metadata === 'string'
     ? instance.metadata
     : JSON.stringify(instance.metadata || {});
