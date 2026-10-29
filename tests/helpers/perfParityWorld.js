@@ -553,6 +553,15 @@ export async function seedPerfWorld(db, { seed = 20261003, rfqCount = 72 } = {})
     }
   });
 
+  // Pin the planner's view of the world before any suite compares two plans.
+  // The test DB is built fresh and never ANALYZEd, so autovacuum analyzes these
+  // tables whenever it gets to them, typically about a minute after this insert,
+  // i.e. mid-suite. The listing's products / vendors arrays have no ORDER BY:
+  // a plan change between the oracle's call and the new code's call reorders
+  // them, and the parity check that straddles it fails (seen on CI in
+  // rfq.listViewParity "every user x tab x sort"). Under a second.
+  await db.none(`ANALYZE`);
+
   return {
     users: WORLD_USERS,
     vendors: WORLD_VENDORS,
