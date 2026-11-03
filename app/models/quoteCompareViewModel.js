@@ -555,7 +555,9 @@ export async function getQuoteComparisonView(rfqId, scope, { excludeDelivery = f
     quotesReceived,
     quotesInvited,
     techClauses,
-    rounds
+    rounds,
+    // Items the buyer closed without award (rfqItemClosure.js).
+    closureByProduct
   ] = await Promise.all([
     fetchCategories(id, rfqProductIds),
     fetchQuoteApprovals(rfqProductIds),
@@ -571,7 +573,8 @@ export async function getQuoteComparisonView(rfqId, scope, { excludeDelivery = f
     countDistinctQuoters(id),
     countInvitedVendors(id),
     rfqHasTechClauses(id),
-    countRounds(id)
+    countRounds(id),
+    fetchItemClosures(id)
   ]);
 
   // Second wave: everything that needs a first-wave result.
@@ -874,7 +877,11 @@ export async function getQuoteComparisonView(rfqId, scope, { excludeDelivery = f
     // State + finalized vendor + reject_info.
     const fin = finalizationByRfqProduct.get(rfqProductId) || null;
     const appr = approvalByRfqProduct.get(rfqProductId) || null;
-    const { state, reject_info } = deriveState(fin, appr);
+    const closure = closureByProduct.get(rfqProductId) || null;
+    const derived = deriveState(fin, appr);
+    // A closed item is settled: nothing on it can be awarded or negotiated.
+    const state = closure ? "closed" : derived.state;
+    const reject_info = closure ? null : derived.reject_info;
     const finalized_vendor = fin ? fin.vendor_id : null;
 
     // ---- Negotiation for this product's row. ----
@@ -995,6 +1002,9 @@ export async function getQuoteComparisonView(rfqId, scope, { excludeDelivery = f
         when: round ? iso(round.end_date || round.closed_at) : null,
       },
       state,
+      // Set when the buyer closed the item without award: {closed_at,
+      // closed_by:{id,name}, reason_code, remarks}. Null otherwise.
+      closure,
       finalized_vendor,
       // Who awarded it, and when. Null when the product is not finalized.
       finalized_by: fin ? (fin.finalized_by || null) : null,
@@ -1058,7 +1068,8 @@ export async function getQuoteComparisonView(rfqId, scope, { excludeDelivery = f
       p.negotiation = null;
       p.awaiting_me = false;
       p.reject_info = null;
-      p.state = "open";
+      // A closure is the buyer's own decision about the item, not vendor data.
+      p.state = p.closure ? "closed" : "open";
       p.target = null;
       p.tech = { configured: !!p.tech?.configured, scores: {} };
       // Same class of data as `tech.scores`, which is redacted one line up: it
@@ -1113,6 +1124,8 @@ export async function getQuoteComparisonView(rfqId, scope, { excludeDelivery = f
 
 // ---------------------------------------------------------------------------
 // State derivation per product.
+//   closed   : the buyer closed the item without award (set by the caller,
+//              from fetchItemClosures; it overrides everything below)
 //   open     : no finalization, OR finalization with no quote-approval instance
 //   pending  : finalized AND its NEGOTIATION_QUOTE instance is PENDING
 //   approved : that instance is APPROVED
@@ -1593,6 +1606,33 @@ async function fetchAwaitingInstanceIds(instanceIds, userId) {
 
 // rfq_product_id -> { vendor_id } latest finalization. Finalization is keyed by
 // (rfq_id, product_variant_id, variant); map each back to its rfq_product row.
+// rfq_product_id -> {closed_at, closed_by:{id,name}|null, reason_code, remarks}
+// for the RFQ's items closed without award.
+async function fetchItemClosures(rfqId) {
+  const out = new Map();
+  try {
+    const rows = await db.any(
+      `SELECT rp.id, rp.closed_at, rp.close_reason_code, rp.close_remarks,
+              rp.closed_by, u.name AS closed_by_name
+         FROM tbl_rfq_products rp
+         LEFT JOIN tbl_users u ON u.id = rp.closed_by
+        WHERE rp.rfq_id = $1 AND rp.closed_at IS NOT NULL`,
+      [rfqId]
+    );
+    for (const r of rows) {
+      out.set(Number(r.id), {
+        closed_at: iso(r.closed_at),
+        closed_by: r.closed_by == null ? null : { id: Number(r.closed_by), name: r.closed_by_name || null },
+        reason_code: r.close_reason_code,
+        remarks: r.close_remarks || null,
+      });
+    }
+  } catch (err) {
+    logError("[quoteCompareView] fetchItemClosures failed", err);
+  }
+  return out;
+}
+
 async function fetchFinalizations(rfqId, products) {
   const map = new Map();
   try {

@@ -22,13 +22,17 @@ const DEAD_PO_STATUSES = ["rejected", "cancelled", "rejected_by_vendor"];
 /**
  * Per PO of one RFQ, in one statement.
  *
+ * Products closed without award (tbl_rfq_products.closed_at) are out of the
+ * count: nothing will ever be awarded on them, so they never make a draft
+ * "partial". products_closed reports how many there are, for the copy.
+ *
  * @returns {Promise<Map<number, {rfq_product_count:number, po_product_count:number,
- *   products_on_other_pos:number, products_unawarded:number}>>}
+ *   products_on_other_pos:number, products_unawarded:number, products_closed:number}>>}
  */
 export async function getRfqPoCoverage(rfqId, dbCtx = db) {
   const rows = await dbCtx.any(
     `WITH rp AS (
-       SELECT id FROM tbl_rfq_products WHERE rfq_id = $1
+       SELECT id FROM tbl_rfq_products WHERE rfq_id = $1 AND closed_at IS NULL
      ),
      pp AS (
        SELECT po.id AS po_id, po.status::text AS status, pop.rfq_product_id
@@ -47,7 +51,9 @@ export async function getRfqPoCoverage(rfqId, dbCtx = db) {
                 AND o.status <> ALL($2::text[])
                 AND NOT EXISTS (SELECT 1 FROM pp m
                                  WHERE m.po_id = po.id AND m.rfq_product_id = o.rfq_product_id)
-            )::int AS products_on_other_pos
+            )::int AS products_on_other_pos,
+            (SELECT count(*) FROM tbl_rfq_products c
+              WHERE c.rfq_id = $1 AND c.closed_at IS NOT NULL)::int AS products_closed
        FROM tbl_rfq_purchase_order po
       WHERE po.rfq_id = $1`,
     [rfqId, DEAD_PO_STATUSES]
@@ -60,13 +66,15 @@ export async function getRfqPoCoverage(rfqId, dbCtx = db) {
       po_product_count: r.po_product_count,
       products_on_other_pos: r.products_on_other_pos,
       products_unawarded: unawarded,
+      products_closed: r.products_closed,
     });
   }
   return out;
 }
 
 /**
- * complete: this PO carries every RFQ product.
+ * complete: this PO carries every RFQ product (products closed without award
+ *           are not counted — see getRfqPoCoverage).
  * split:    not complete, but every other product is on another live PO.
  * partial:  otherwise (something is still unawarded).
  * Meaningful for drafts only — callers pass null for anything else.

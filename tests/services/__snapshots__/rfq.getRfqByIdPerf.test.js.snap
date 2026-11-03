@@ -20,6 +20,7 @@ exports[`GET /rfq/getRfqById/:id — equivalence + query budget buyer: same body
         },
       ],
     },
+    "award_outcome": "in_progress",
     "bid_end_date": "<ts>",
     "comment": "Test RFQ comment",
     "commercial_evaluators": [
@@ -56,6 +57,13 @@ exports[`GET /rfq/getRfqById/:id — equivalence + query budget buyer: same body
     "is_published": 1,
     "is_quotes_present": true,
     "is_tender": 0,
+    "items_summary": {
+      "award_pending": 1,
+      "awarded": 1,
+      "closed_no_award": 0,
+      "open": 0,
+      "total": 2,
+    },
     "lifecycle_stage": "PO_APPROVAL",
     "location": "Test Location",
     "po_initiators": [
@@ -80,6 +88,10 @@ exports[`GET /rfq/getRfqById/:id — equivalence + query budget buyer: same body
     "products": [
       {
         "?column?": null,
+        "close_reason_code": null,
+        "close_remarks": null,
+        "closed_at": null,
+        "closed_by": null,
         "comment": "",
         "datasheet_file": null,
         "finalization_status": "Another vendor is finalized",
@@ -138,6 +150,10 @@ exports[`GET /rfq/getRfqById/:id — equivalence + query budget buyer: same body
       },
       {
         "?column?": null,
+        "close_reason_code": null,
+        "close_remarks": null,
+        "closed_at": null,
+        "closed_by": null,
         "comment": "",
         "datasheet_file": null,
         "finalization_status": "No vendor finalized yet",
@@ -228,6 +244,7 @@ exports[`GET /rfq/getRfqById/:id — equivalence + query budget closed RFQ: clos
   "data": {
     "TERM_files": null,
     "action_holders": null,
+    "award_outcome": "in_progress",
     "bid_end_date": "<ts>",
     "close_comment": "Reason: budget cut",
     "comment": "Test RFQ comment",
@@ -265,6 +282,13 @@ exports[`GET /rfq/getRfqById/:id — equivalence + query budget closed RFQ: clos
     "is_published": 1,
     "is_quotes_present": true,
     "is_tender": 0,
+    "items_summary": {
+      "award_pending": 1,
+      "awarded": 1,
+      "closed_no_award": 0,
+      "open": 0,
+      "total": 2,
+    },
     "lifecycle_stage": "PO_APPROVAL",
     "location": "Test Location",
     "po_initiators": [
@@ -289,6 +313,10 @@ exports[`GET /rfq/getRfqById/:id — equivalence + query budget closed RFQ: clos
     "products": [
       {
         "?column?": null,
+        "close_reason_code": null,
+        "close_remarks": null,
+        "closed_at": null,
+        "closed_by": null,
         "comment": "",
         "datasheet_file": null,
         "finalization_status": "Another vendor is finalized",
@@ -347,6 +375,10 @@ exports[`GET /rfq/getRfqById/:id — equivalence + query budget closed RFQ: clos
       },
       {
         "?column?": null,
+        "close_reason_code": null,
+        "close_remarks": null,
+        "closed_at": null,
+        "closed_by": null,
         "comment": "",
         "datasheet_file": null,
         "finalization_status": "No vendor finalized yet",
@@ -512,6 +544,10 @@ exports[`GET /rfq/getRfqById/:id — equivalence + query budget vendor (active s
     "products": [
       {
         "?column?": "latest_target_price",
+        "close_reason_code": null,
+        "close_remarks": null,
+        "closed_at": null,
+        "closed_by": null,
         "comment": "",
         "datasheet_file": null,
         "finalization_status": "You are finalized",
@@ -569,6 +605,10 @@ exports[`GET /rfq/getRfqById/:id — equivalence + query budget vendor (active s
       },
       {
         "?column?": "latest_target_price",
+        "close_reason_code": null,
+        "close_remarks": null,
+        "closed_at": null,
+        "closed_by": null,
         "comment": "",
         "datasheet_file": null,
         "finalization_status": "No vendor finalized yet",

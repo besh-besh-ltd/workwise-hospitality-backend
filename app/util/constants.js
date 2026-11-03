@@ -37,6 +37,11 @@ export const RFQ_STATUSES = {
   WITHDRAWN: 5              // Publish request withdrawn by creator
 }
 
+// user_type values that act as a vendor (3 vendor entity, 4 legacy vendor-like,
+// 11 vendor-network person): never shown buyer-internal text such as the reason
+// an RFQ item was closed without award.
+export const VENDOR_LIKE_USER_TYPES = Object.freeze([3, 4, 11]);
+
 export const INVALID_PO_STATUSES_FOR_VENDOR = ['draft', 'pending_approval', 'cancelled', 'rejected']
 
 // For Now Hard Coded Tender Summaries

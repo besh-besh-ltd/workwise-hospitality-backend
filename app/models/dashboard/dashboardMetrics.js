@@ -16,7 +16,7 @@
 // ============================================================================
 
 import { SPEND_STATUSES, LEAF_CATEGORY_JOIN, lineVariant as reportsLineVariant } from '../reportsModel.js';
-import { techStuckSql } from '../techEvalStuck.js';
+import { techStuckSql, itemClosedSql } from '../techEvalStuck.js';
 import { instanceNotHeldSql } from '../../services/po/poHold.js';
 
 export { SPEND_STATUSES, LEAF_CATEGORY_JOIN };
@@ -301,4 +301,5 @@ export const hasOpenVendorDisagreement = (alias = 'r') => `EXISTS (
    WHERE te_d.rfq_id = ${alias}.id
      AND te_d.is_complete = false
      AND NOT ${techStuckSql({ te: 'te_d', rfq: alias })}
+     AND NOT ${itemClosedSql({ te: 'te_d' })}
      AND ${DISAGREE_SQL('vr_d.vendor_response')})`;

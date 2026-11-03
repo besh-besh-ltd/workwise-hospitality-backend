@@ -106,6 +106,7 @@ exports[`GET /rfq/quote-comparison-view/:id — equivalence + query budget retur
       },
       "awaiting_me": false,
       "category": 215,
+      "closure": null,
       "finalized_by": {
         "at": "<ts>",
         "comment": null,
@@ -307,6 +308,7 @@ exports[`GET /rfq/quote-comparison-view/:id — equivalence + query budget retur
       },
       "awaiting_me": true,
       "category": 215,
+      "closure": null,
       "finalized_by": null,
       "finalized_vendor": null,
       "id": "<products.id#2>",

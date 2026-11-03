@@ -133,10 +133,21 @@ export function techBlockedNoPassSql({ te }) {
 }
 
 /**
+ * The item behind evaluation `te` was closed without award by the buyer
+ * (tbl_rfq_products.closed_at): it is settled, so it is never stuck.
+ */
+export function itemClosedSql({ te }) {
+  const t = ident(te, 'te');
+  return `EXISTS (SELECT 1 FROM tbl_rfq_products _cl_rp
+                   WHERE _cl_rp.id = ${t}.tbl_rfq_product_id AND _cl_rp.closed_at IS NOT NULL)`;
+}
+
+/**
  * The line behind evaluation `te` is technically stuck right now: blocked for
  * want of vendors, nobody passed, bidding closed, and nobody left to evaluate.
  * The only way forward is to extend the bid deadline (which reopens it — see
- * reopenStuckTechEvals in rfqController) or to close the RFQ.
+ * reopenStuckTechEvals in rfqController), close the item without award, or
+ * close the RFQ. A closed item is never stuck.
  *
  * @param {{ te: string, rfq: string }} aliases
  *   te  alias of a tbl_rfq_product_tech_evaluation row
@@ -149,6 +160,7 @@ export function techStuckSql({ te, rfq }) {
     ${techBlockedNoPassSql({ te: t })}
     AND NOT ${bidWindowOpenSql({ rfq })}
     AND NOT ${eligibleUnscoredResponderSql({ te: t })}
+    AND NOT ${itemClosedSql({ te: t })}
   )`;
 }
 
@@ -197,6 +209,7 @@ export function techReopenedSql({ te }) {
 }
 
 export default {
+  itemClosedSql,
   bidWindowOpenSql,
   eligibleUnscoredResponderSql,
   techBlockedNoPassSql,
