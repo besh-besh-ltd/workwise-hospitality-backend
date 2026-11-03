@@ -9836,8 +9836,10 @@ const rfqController = {
         }
 
         // Items the buyer closed without award take no quote lines (a regret
-        // is RFQ-level and is still allowed).
-        if (!is_regret && Array.isArray(products)) {
+        // is RFQ-level and is still allowed). Only a real regret (1 / true)
+        // skips the check: a truthy "0" is stored as a quote, not a regret.
+        const isRegretQuote = is_regret === true || Number(is_regret) === 1;
+        if (!isRegretQuote && Array.isArray(products)) {
           const closedLines = await findClosedItems(
             db,
             rfq_id,

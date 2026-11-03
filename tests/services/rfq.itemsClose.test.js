@@ -599,6 +599,10 @@ describe("a closed item takes no further work", () => {
     expect(refused.status).toBe(409);
     expect(refused.body.code).toBe("ITEM_CLOSED");
     expect(refused.body.details.rfq_product_ids).toEqual([B]);
+    // A truthy-but-not-regret flag ("0") is stored as a quote, so it is checked too.
+    const sneaky = await vendor.post("/api/v1/rfq/quote/create").send({ ...quoteBody(rfq, [A, B]), is_regret: "0" });
+    expect(sneaky.status).toBe(409);
+    expect(sneaky.body.code).toBe("ITEM_CLOSED");
     expect((await db.one(`SELECT count(*)::int AS n FROM tbl_quotes WHERE rfq_id = $1`, [rfq.rfq_id])).n).toBe(0);
 
     const ok = await vendor.post("/api/v1/rfq/quote/create").send(quoteBody(rfq, [A]));
