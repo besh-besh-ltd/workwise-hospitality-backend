@@ -66,6 +66,7 @@ import {
   screenVendorsForTechnicalQualification,
 } from '../../services/technicalQualificationService.js';
 import { roundWindowError } from '../../helper/negotiation/roundWindow.js';
+import { RfqItemClosureError, sendItemClosureError } from '../../services/rfq/rfqItemClosure.js';
 
 // Server-derived id for the RBAC read matrix. NEVER read from the body/query/
 // headers. Returns null for super admins (user_type 8), which the model treats
@@ -1073,6 +1074,22 @@ const NegotiationController = {
       }
 
       const rfqData = rfq[0];
+      // Items the buyer closed without award take no further negotiation.
+      if (entryProductIds.length) {
+        const closedItems = await db.any(
+          `SELECT id FROM tbl_rfq_products
+            WHERE rfq_id = $1 AND id = ANY($2::int[]) AND closed_at IS NOT NULL`,
+          [rfq_id, entryProductIds]
+        );
+        if (closedItems.length) {
+          return res.status(409).json({
+            status: 0,
+            code: 'ITEM_CLOSED',
+            message: 'A negotiation round cannot include items closed without award. Reopen them first.',
+            details: { rfq_product_ids: closedItems.map(r => Number(r.id)) }
+          });
+        }
+      }
       if (!rfqData.hospitality_company_id) {
         return res.status(400).json({
           status: 2,
@@ -2753,6 +2770,15 @@ const NegotiationController = {
           message: 'Product not found in this RFQ'
         });
       }
+      // An item the buyer closed without award takes no award (re-checked
+      // under a row lock in the transaction below).
+      if (product.closed_at) {
+        return res.status(409).json({
+          status: 0,
+          code: 'ITEM_CLOSED',
+          message: 'This item was closed without award. Reopen it before awarding it.'
+        });
+      }
 
       // 4. Check for existing pending approval for this product
       const existingApprovals = await getApprovalInstancesByEntity('NEGOTIATION_QUOTE', rfq_product_id);
@@ -2827,6 +2853,19 @@ const NegotiationController = {
 
       // 6. Execute in transaction
       const result = await db.tx(async (t) => {
+        // Serialises with POST /rfq/:id/items/close (FOR UPDATE on the item).
+        const lockedItem = await t.one(
+          `SELECT closed_at FROM tbl_rfq_products WHERE id = $1 FOR SHARE`,
+          [rfq_product_id]
+        );
+        if (lockedItem.closed_at) {
+          throw new RfqItemClosureError(
+            'CONFLICT',
+            'This item was closed without award. Reopen it before awarding it.',
+            { rfq_product_id: Number(rfq_product_id) }
+          );
+        }
+
         // Create approval instance
         const approvalResult = await startApprovalForNegotiationQuotes(
           rfq_product_id,
@@ -2990,6 +3029,7 @@ const NegotiationController = {
         message: 'Quotes submitted for approval successfully'
       });
     } catch (error) {
+      if (sendItemClosureError(res, error)) return;
       logError(error);
       return formatErrorResponse(res, error);
     }

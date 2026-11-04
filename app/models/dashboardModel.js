@@ -21,7 +21,7 @@ import {
 } from './dashboard/dashboardMetrics.js';
 import negotiationModel from './negotiationModel.js';
 import rfqModel from './rfqModel.js';
-import { techStuckSql } from './techEvalStuck.js';
+import { techStuckSql, itemClosedSql } from './techEvalStuck.js';
 import { isCompanyAdmin } from '../middleware/companyAdmin.js';
 import { buyerPrDetail } from '../services/notificationLinks.js';
 
@@ -1899,6 +1899,7 @@ async function getMyTechEvalsPendingData(buyer_company_id, user_id, hotel_ids) {
              AND (ti.metadata->>'rfq_product_id') = te.tbl_rfq_product_id::text
         )
         AND NOT ${techStuckSql({ te: 'te', rfq: 'r' })}
+        AND rp.closed_at IS NULL -- closed without award: nothing to evaluate
         AND ${rfqMapped('r', 2)}
         ${sc}
       ORDER BY r.bid_end_date::timestamp ASC, te.id
@@ -1945,6 +1946,7 @@ async function getTechEvalsWithDisagreementsData(buyer_company_id, user_id, hote
           AND r.status = 1
           -- not stuck (techEvalStuck.js): nothing to review on a line nobody can move
           AND NOT ${techStuckSql({ te: 'te', rfq: 'r' })}
+          AND NOT ${itemClosedSql({ te: 'te' })}
           AND ${DISAGREE_SQL('vr.vendor_response')}
           AND ${rfqMapped('r', 2)}
           ${sc}

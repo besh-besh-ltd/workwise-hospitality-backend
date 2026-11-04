@@ -152,6 +152,18 @@ export const EVENTS = [
     summary: (c) => `${c.actor} closed bidding on RFQ ${c.entityLabel}`,
   }),
   e({
+    method: 'POST', path: '/rfq/:id/items/close', key: 'rfq_items_closed',
+    category: CATEGORIES.SOURCING, severity: 'notable',
+    entity: { type: 'RFQ', id: P('id') }, scope: SCOPE.entity('RFQ'),
+    summary: (c) => `${c.actor} closed items on RFQ ${c.entityLabel} without award`,
+  }),
+  e({
+    method: 'POST', path: '/rfq/:id/items/reopen', key: 'rfq_items_reopened',
+    category: CATEGORIES.SOURCING, severity: 'notable',
+    entity: { type: 'RFQ', id: P('id') }, scope: SCOPE.entity('RFQ'),
+    summary: (c) => `${c.actor} reopened items on RFQ ${c.entityLabel}`,
+  }),
+  e({
     method: 'POST', path: '/rfq/withdraw-publish/:id', key: 'rfq_publish_withdrawn',
     category: CATEGORIES.SOURCING, severity: 'notable',
     entity: { type: 'RFQ', id: P('id') }, scope: SCOPE.entity('RFQ'),

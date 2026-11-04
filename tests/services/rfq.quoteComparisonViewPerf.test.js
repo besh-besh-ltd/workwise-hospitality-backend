@@ -28,7 +28,8 @@ const VENDOR_HISTORY = [
 //     (fetchStageActors runs the lifecycle summary)
 //   + approver labels by step role: 65 (one batched fetchStepRoleLabels per
 //     surface that names an approver: approval trail, approval chain, stage actors)
-const BUDGET = { statements: 65, waves: 20, depth: 24 };
+//   + items closed without award: 66 (fetchItemClosures, first wave)
+const BUDGET = { statements: 66, waves: 20, depth: 24 };
 
 describe("GET /rfq/quote-comparison-view/:id — equivalence + query budget", () => {
   let made;
