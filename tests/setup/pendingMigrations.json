@@ -58,6 +58,7 @@
     "migrations/20261013102000_approval_instance_step_source_snapshot.sql",
     "migrations/20261014100000_pr_clause_type_check.sql",
     "migrations/20261014110000_pr_indexes.sql",
-    "migrations/20261103100000_rfq_item_closure.sql"
+    "migrations/20261103100000_rfq_item_closure.sql",
+    "migrations/20261104100000_drop_stale_arc_policy_global_scope.sql"
   ]
 }
