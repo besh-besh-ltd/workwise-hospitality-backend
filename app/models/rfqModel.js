@@ -5,10 +5,10 @@ import userModel from './userModel.js';
 import { logError, PERSISTENCE_STATUSES } from '../helper/common.js';
 import { logger } from '../util/logger.js';
 import { notifyBuyerOnPersistenceViaEmail } from '../controllers/rfq/rfqController.js';
-import { PO_STATUSES } from '../util/constants.js';
+import { PO_STATUSES, VENDOR_LIKE_USER_TYPES } from '../util/constants.js';
 import rbacModel from './rbacModel.js';
 import { hasOpenVendorDisagreement } from './dashboard/dashboardMetrics.js';
-import { techStuckSql, bidWindowOpenSql, eligibleUnscoredResponderSql, techReopenedSql, techBlockedNoPassSql } from './techEvalStuck.js';
+import { techStuckSql, bidWindowOpenSql, eligibleUnscoredResponderSql, techReopenedSql, techBlockedNoPassSql, itemClosedSql } from './techEvalStuck.js';
 import { buildApproverReadExemption } from '../services/authorizationService.js';
 import { collapsePickerRowsToPrincipals } from '../services/vendorNetwork/directInvites.js';
 import { lockLiveRfqAssignments, propagateRoutedCopies } from '../services/vendorNetwork/subjects/rfqRoutedCopies.js';
@@ -1658,10 +1658,13 @@ WHERE NOT EXISTS (
 
   checkAllProductsFinalized: async (rfq_id, user_id) => {
     // This function checks if all products in an RFQ are finalized
-    // Returns true if all products are finalized, false otherwise
+    // Returns true if all products are finalized, false otherwise.
+    // An item the buyer closed without award (closed_at) counts as settled:
+    // nothing more can be quoted or awarded on it.
     const query = `
       SELECT COUNT(*) AS total_products,
              SUM(CASE
+                  WHEN RP.closed_at IS NOT NULL THEN 1
                   WHEN EXISTS (
                     SELECT 1 FROM tbl_quote_finalization TQF
                     WHERE TQF.rfq_id = RP.rfq_id
@@ -2826,6 +2829,7 @@ WHERE NOT EXISTS (
         SELECT EXISTS (
           SELECT 1 FROM tbl_rfq_products _rp_de
           WHERE _rp_de.rfq_id = RFQ.id
+            AND _rp_de.closed_at IS NULL -- closed without award: never a dead end
             AND NOT EXISTS (
               SELECT 1 FROM tbl_quote_finalization _qf_de
               WHERE _qf_de.rfq_id = RFQ.id
@@ -2907,6 +2911,7 @@ WHERE NOT EXISTS (
         SELECT EXISTS (
           SELECT 1 FROM tbl_rfq_product_tech_evaluation _te_unstart
           WHERE _te_unstart.rfq_id = RFQ.id
+            AND NOT ${itemClosedSql({ te: '_te_unstart' })} -- closed without award: settled
             -- bid_end_date is naive-IST *text*: compare it through Asia/Kolkata, never
             -- against bare CURRENT_TIMESTAMP (production's session zone is UTC, so that
             -- comparison is wrong by 5h30m and changes sign east of IST). See CLAUDE.md.
@@ -3170,6 +3175,7 @@ LIMIT 1;`;
             JOIN tbl_product T_P ON T_P.id = T_V.product_id
             WHERE RFQ_P.product_variant_id = T_V.id
         ) AS product_details,
+        CASE WHEN RFQ_P.closed_at IS NOT NULL THEN 'Closed without award' ELSE
         COALESCE(
           (
             SELECT
@@ -3184,7 +3190,17 @@ LIMIT 1;`;
             LIMIT 1
           ),
           'No vendor finalized yet'
-        ) AS finalization_status,
+        ) END AS finalization_status,
+        -- Closed without award (rfqItemClosure.js). Vendors (3, legacy 4,
+        -- network person 11) see that the item closed, never the buyer's
+        -- reason, remarks or name.
+        RFQ_P.closed_at,
+        ${VENDOR_LIKE_USER_TYPES.includes(Number(user_type)) ? `NULL::text` : `RFQ_P.close_reason_code`} AS close_reason_code,
+        ${VENDOR_LIKE_USER_TYPES.includes(Number(user_type)) ? `NULL::text` : `RFQ_P.close_remarks`} AS close_remarks,
+        ${VENDOR_LIKE_USER_TYPES.includes(Number(user_type)) ? `NULL::json` : `(
+          SELECT json_build_object('id', TU_CL.id, 'name', TU_CL.name)
+          FROM tbl_users TU_CL WHERE TU_CL.id = RFQ_P.closed_by
+        )`} AS closed_by,
         -- finalized_vendor: additive buyer-facing object naming the WINNING vendor
         -- for this product/variant (display name + id + finalized ₹ amount), or
         -- NULL when no finalization exists. Does NOT replace finalization_status
@@ -3525,8 +3541,10 @@ LIMIT 1;`;
               AND _po.status IN ('approved','acceptance_pending','sent','dispatched','GRN','completed','invoice_raised')
         ) AS has_approved_po
         -- is_dead_end: this product has all eligible vendors' POs rejected with no replacement
+        -- (never for an item closed without award)
         ,(
-          NOT EXISTS (
+          RFQ_P.closed_at IS NULL
+          AND NOT EXISTS (
             SELECT 1 FROM tbl_quote_finalization _qf_de2
             WHERE _qf_de2.rfq_id = RFQ_P.rfq_id
               AND _qf_de2.product_variant_id = RFQ_P.product_variant_id
@@ -4120,6 +4138,7 @@ LIMIT 2;
                     SELECT COUNT(*)
                       FROM tbl_rfq_products _rpv
                       WHERE _rpv.rfq_id = RFQ.id
+                        AND _rpv.closed_at IS NULL
                   ) = (
                     SELECT COUNT(*)
                       FROM tbl_quote_finalization tqf2
@@ -4161,7 +4180,7 @@ LIMIT 2;
                     WHERE _po2.rfq_id = RFQ.id AND _pop2.rfq_product_id = _rp2.id
                       AND _po2.status IN ('approved','acceptance_pending','sent','dispatched','GRN','completed','invoice_raised')
                   ) AS has_approved
-                  FROM tbl_rfq_products _rp2 WHERE _rp2.rfq_id = RFQ.id
+                  FROM tbl_rfq_products _rp2 WHERE _rp2.rfq_id = RFQ.id AND _rp2.closed_at IS NULL
                 ) _chk
               )
             END
@@ -4180,7 +4199,7 @@ LIMIT 2;
                     WHERE _po3.rfq_id = RFQ.id AND _pop3.rfq_product_id = _rp3.id
                       AND _po3.status IN ('approved','acceptance_pending','sent','dispatched','GRN','completed','invoice_raised')
                   ) AS has_approved
-                  FROM tbl_rfq_products _rp3 WHERE _rp3.rfq_id = RFQ.id
+                  FROM tbl_rfq_products _rp3 WHERE _rp3.rfq_id = RFQ.id AND _rp3.closed_at IS NULL
                 ) _chk2
               )
             END
@@ -4190,6 +4209,7 @@ LIMIT 2;
             SELECT EXISTS (
               SELECT 1 FROM tbl_rfq_products _rp_de
               WHERE _rp_de.rfq_id = RFQ.id
+                AND _rp_de.closed_at IS NULL -- closed without award: never a dead end
                 AND NOT EXISTS (
                   SELECT 1 FROM tbl_quote_finalization _qf_de
                   WHERE _qf_de.rfq_id = RFQ.id
@@ -4296,6 +4316,7 @@ LIMIT 2;
             SELECT EXISTS (
               SELECT 1 FROM tbl_rfq_product_tech_evaluation _te_unstart
               WHERE _te_unstart.rfq_id = RFQ.id
+                AND NOT ${itemClosedSql({ te: '_te_unstart' })} -- closed without award: settled
                 -- bid_end_date is naive-IST *text*: compare it through Asia/Kolkata, never
                 -- against bare CURRENT_TIMESTAMP (production's session zone is UTC, so that
                 -- comparison is wrong by 5h30m and changes sign east of IST). See CLAUDE.md.
@@ -4527,7 +4548,7 @@ LIMIT 2;
               JOIN tbl_purchase_order_product _pop2 ON _pop2.purchase_order_id = _po2.id
               WHERE _po2.rfq_id = RFQ.id AND _pop2.rfq_product_id = _rp2.id
                 AND _po2.status IN ('approved','acceptance_pending','sent','dispatched','GRN','completed','invoice_raised')
-            ) AS _has_appr FROM tbl_rfq_products _rp2 WHERE _rp2.rfq_id = RFQ.id) _c)
+            ) AS _has_appr FROM tbl_rfq_products _rp2 WHERE _rp2.rfq_id = RFQ.id AND _rp2.closed_at IS NULL) _c)
         END) = true
         OR (SELECT CASE
           WHEN NOT EXISTS (SELECT 1 FROM tbl_rfq_purchase_order _po WHERE _po.rfq_id = RFQ.id) THEN false
@@ -4537,7 +4558,7 @@ LIMIT 2;
               JOIN tbl_purchase_order_product _pop3 ON _pop3.purchase_order_id = _po3.id
               WHERE _po3.rfq_id = RFQ.id AND _pop3.rfq_product_id = _rp3.id
                 AND _po3.status IN ('approved','acceptance_pending','sent','dispatched','GRN','completed','invoice_raised')
-            ) AS _has_appr FROM tbl_rfq_products _rp3 WHERE _rp3.rfq_id = RFQ.id) _c2)
+            ) AS _has_appr FROM tbl_rfq_products _rp3 WHERE _rp3.rfq_id = RFQ.id AND _rp3.closed_at IS NULL) _c2)
         END) = true
       )` : ''}
       ${completed_status === 'closed' ? `AND RFQ.status = 2` : ''}
@@ -4550,7 +4571,7 @@ LIMIT 2;
               JOIN tbl_purchase_order_product _pop2 ON _pop2.purchase_order_id = _po2.id
               WHERE _po2.rfq_id = RFQ.id AND _pop2.rfq_product_id = _rp2.id
                 AND _po2.status IN ('approved','acceptance_pending','sent','dispatched','GRN','completed','invoice_raised')
-            ) AS _has_appr FROM tbl_rfq_products _rp2 WHERE _rp2.rfq_id = RFQ.id) _c)
+            ) AS _has_appr FROM tbl_rfq_products _rp2 WHERE _rp2.rfq_id = RFQ.id AND _rp2.closed_at IS NULL) _c)
         END) = true
         AND NOT (SELECT CASE
           WHEN NOT EXISTS (SELECT 1 FROM tbl_rfq_purchase_order _po WHERE _po.rfq_id = RFQ.id) THEN false
@@ -4560,7 +4581,7 @@ LIMIT 2;
               JOIN tbl_purchase_order_product _pop3 ON _pop3.purchase_order_id = _po3.id
               WHERE _po3.rfq_id = RFQ.id AND _pop3.rfq_product_id = _rp3.id
                 AND _po3.status IN ('approved','acceptance_pending','sent','dispatched','GRN','completed','invoice_raised')
-            ) AS _has_appr FROM tbl_rfq_products _rp3 WHERE _rp3.rfq_id = RFQ.id) _c2)
+            ) AS _has_appr FROM tbl_rfq_products _rp3 WHERE _rp3.rfq_id = RFQ.id AND _rp3.closed_at IS NULL) _c2)
         END)
       )` : ''}
       ${Array.isArray(hotel_ids) && hotel_ids.length > 0 ? `AND EXISTS (SELECT 1 FROM tbl_rfq_hotel_mappings rhm WHERE rhm.rfq_id = RFQ.id AND rhm.hotel_id IN (${hotel_ids.map(id => parseInt(id)).filter(Number.isFinite).join(',')}))` : ''}
@@ -4654,7 +4675,7 @@ LIMIT 2;
                   WHERE _po2.rfq_id = RFQ.id AND _pop2.rfq_product_id = _rp2.id
                     AND _po2.status IN ('approved','acceptance_pending','sent','dispatched','GRN','completed','invoice_raised')
                 ) AS has_approved
-                FROM tbl_rfq_products _rp2 WHERE _rp2.rfq_id = RFQ.id
+                FROM tbl_rfq_products _rp2 WHERE _rp2.rfq_id = RFQ.id AND _rp2.closed_at IS NULL
               ) _chk
             )
           END
@@ -4814,6 +4835,7 @@ LIMIT 2;
           SELECT EXISTS (
             SELECT 1 FROM tbl_rfq_products _rp_de
             WHERE _rp_de.rfq_id = RFQ.id
+              AND _rp_de.closed_at IS NULL -- closed without award: never a dead end
               AND NOT EXISTS (
                 SELECT 1 FROM tbl_quote_finalization _qf_de
                 WHERE _qf_de.rfq_id = RFQ.id
@@ -4877,6 +4899,7 @@ LIMIT 2;
           SELECT EXISTS (
             SELECT 1 FROM tbl_rfq_product_tech_evaluation _te_unstart
             WHERE _te_unstart.rfq_id = RFQ.id
+              AND NOT ${itemClosedSql({ te: '_te_unstart' })} -- closed without award: settled
               AND CAST(NULLIF(TRIM(RFQ.bid_end_date), '') AS TIMESTAMP)
                   <= (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Kolkata')
               AND EXISTS (
@@ -5112,11 +5135,20 @@ LIMIT 2;
         FROM tbl_rfq
         WHERE id = ANY($1::int[])
       ),
+      -- Items still to be awarded. An item the buyer closed without award
+      -- (closed_at) is settled: it never holds the RFQ short of
+      -- AWAITING_PO / APPROVED_COMPLETED, and no stuck or rejected-PO branch
+      -- below counts it.
       product_counts AS (
         SELECT rfq_id, COUNT(*)::int AS total_products
         FROM tbl_rfq_products
         WHERE rfq_id = ANY($1::int[])
+          AND closed_at IS NULL
         GROUP BY rfq_id
+      ),
+      closed_products AS (
+        SELECT id FROM tbl_rfq_products
+        WHERE rfq_id = ANY($1::int[]) AND closed_at IS NOT NULL
       ),
       -- Latest TECHNICAL approval per RFQ
       tech_approval AS (
@@ -5142,6 +5174,7 @@ LIMIT 2;
         SELECT te.rfq_id, COUNT(DISTINCT te.tbl_rfq_product_id)::int AS products_cleared
         FROM tbl_rfq_product_tech_evaluation te
         WHERE te.rfq_id = ANY($1::int[])
+          AND NOT EXISTS (SELECT 1 FROM closed_products cp WHERE cp.id = te.tbl_rfq_product_id)
           AND NOT ${techBlockedNoPassSql({ te: 'te' })}
           AND (
             te.is_complete = true
@@ -5176,6 +5209,7 @@ LIMIT 2;
         FROM tbl_rfq_product_tech_evaluation te
         JOIN tbl_rfq r_ts ON r_ts.id = te.rfq_id
         WHERE te.rfq_id = ANY($1::int[])
+          AND NOT EXISTS (SELECT 1 FROM closed_products cp WHERE cp.id = te.tbl_rfq_product_id)
           AND ${techStuckSql({ te: 'te', rfq: 'r_ts' })}
         GROUP BY te.rfq_id
       ),
@@ -5249,11 +5283,15 @@ LIMIT 2;
       ),
       -- Whether tech eval is configured for this RFQ (+ count of TE products)
       has_tech_eval AS (
-        SELECT DISTINCT rfq_id FROM tbl_rfq_product_tech_evaluation WHERE rfq_id = ANY($1::int[])
+        SELECT DISTINCT rfq_id FROM tbl_rfq_product_tech_evaluation
+        WHERE rfq_id = ANY($1::int[])
+          AND NOT EXISTS (SELECT 1 FROM closed_products cp WHERE cp.id = tbl_rfq_product_tech_evaluation.tbl_rfq_product_id)
       ),
       tech_eval_product_count AS (
         SELECT rfq_id, COUNT(DISTINCT tbl_rfq_product_id)::int AS te_products
-        FROM tbl_rfq_product_tech_evaluation WHERE rfq_id = ANY($1::int[])
+        FROM tbl_rfq_product_tech_evaluation
+        WHERE rfq_id = ANY($1::int[])
+          AND NOT EXISTS (SELECT 1 FROM closed_products cp WHERE cp.id = tbl_rfq_product_tech_evaluation.tbl_rfq_product_id)
         GROUP BY rfq_id
       ),
       -- Whether any non-regret quotes have been received (= eligible vendors).
@@ -5276,6 +5314,7 @@ LIMIT 2;
         JOIN tbl_rfq_products rp_rej ON rp_rej.id = pop_rej.rfq_product_id
         WHERE po_rej.rfq_id = ANY($1::int[])
           AND po_rej.status = 'rejected_by_vendor'
+          AND rp_rej.closed_at IS NULL
           AND NOT EXISTS (
             SELECT 1 FROM tbl_quote_finalization qf_rej
             WHERE qf_rej.rfq_id = po_rej.rfq_id
@@ -5302,6 +5341,7 @@ LIMIT 2;
         JOIN tbl_rfq_products rp_rej ON rp_rej.id = pop_rej.rfq_product_id
         WHERE po_rej.rfq_id = ANY($1::int[])
           AND po_rej.status = 'rejected'
+          AND rp_rej.closed_at IS NULL
           AND NOT EXISTS (
             SELECT 1 FROM tbl_quote_finalization qf_rej
             WHERE qf_rej.rfq_id = po_rej.rfq_id
@@ -6807,6 +6847,7 @@ LIMIT 2;
               po_product_count: cov?.po_product_count ?? 0,
               products_on_other_pos: cov?.products_on_other_pos ?? 0,
               products_unawarded: cov?.products_unawarded ?? 0,
+              products_closed: cov?.products_closed ?? 0,
               initiate_kind: isDraft ? classifyInitiateKind(cov) : null,
               initiate_awaiting_me: isDraft && !!canInitiatePo,
             } : {}),
@@ -7239,14 +7280,14 @@ LIMIT 2;
             JOIN tbl_purchase_order_product _pop2 ON _pop2.purchase_order_id = _po2.id
             WHERE _po2.rfq_id = RFQ.id AND _pop2.rfq_product_id = _rp2.id
             AND _po2.status IN ('approved','acceptance_pending','sent','dispatched','GRN','completed','invoice_raised')
-          ) AS _ha FROM tbl_rfq_products _rp2 WHERE _rp2.rfq_id = RFQ.id) _c) END) = true
+          ) AS _ha FROM tbl_rfq_products _rp2 WHERE _rp2.rfq_id = RFQ.id AND _rp2.closed_at IS NULL) _c) END) = true
           OR (SELECT CASE WHEN NOT EXISTS (SELECT 1 FROM tbl_rfq_purchase_order _po WHERE _po.rfq_id = RFQ.id) THEN false
           ELSE (SELECT COUNT(*) FILTER (WHERE _ha) > 0 AND COUNT(*) FILTER (WHERE NOT _ha) > 0
             FROM (SELECT EXISTS (SELECT 1 FROM tbl_rfq_purchase_order _po3
             JOIN tbl_purchase_order_product _pop3 ON _pop3.purchase_order_id = _po3.id
             WHERE _po3.rfq_id = RFQ.id AND _pop3.rfq_product_id = _rp3.id
             AND _po3.status IN ('approved','acceptance_pending','sent','dispatched','GRN','completed','invoice_raised')
-          ) AS _ha FROM tbl_rfq_products _rp3 WHERE _rp3.rfq_id = RFQ.id) _c2) END) = true
+          ) AS _ha FROM tbl_rfq_products _rp3 WHERE _rp3.rfq_id = RFQ.id AND _rp3.closed_at IS NULL) _c2) END) = true
         )` : ''}
         ${completed_status === 'closed' ? `AND RFQ.status = 2` : ''}
         ${completed_status === 'active' ? `AND RFQ.status != 2 AND NOT (
@@ -7255,7 +7296,7 @@ LIMIT 2;
             JOIN tbl_purchase_order_product _pop2 ON _pop2.purchase_order_id = _po2.id
             WHERE _po2.rfq_id = RFQ.id AND _pop2.rfq_product_id = _rp2.id
             AND _po2.status IN ('approved','acceptance_pending','sent','dispatched','GRN','completed','invoice_raised')
-          ) AS _ha FROM tbl_rfq_products _rp2 WHERE _rp2.rfq_id = RFQ.id) _c) END) = true
+          ) AS _ha FROM tbl_rfq_products _rp2 WHERE _rp2.rfq_id = RFQ.id AND _rp2.closed_at IS NULL) _c) END) = true
         )` : ''}
         ${Array.isArray(hotel_ids) && hotel_ids.length > 0 ? `AND EXISTS (SELECT 1 FROM tbl_rfq_hotel_mappings rhm WHERE rhm.rfq_id = RFQ.id AND rhm.hotel_id IN (${hotel_ids.map(id => parseInt(id)).filter(Number.isFinite).join(',')}))` : ''}
         ;`,
@@ -7321,6 +7362,7 @@ LIMIT 2;
                     SELECT COUNT(*)
                       FROM tbl_rfq_products _rpv
                       WHERE _rpv.rfq_id = RFQ.id
+                        AND _rpv.closed_at IS NULL
                   ) = (
                     SELECT COUNT(*)
                       FROM tbl_quote_finalization tqf2
@@ -14926,11 +14968,13 @@ ORDER BY tq.timestamp DESC;
         rpv.variant,
         rpv.id as rfq_product_vendor_id
       FROM tbl_rfq_product_vendors rpv
-      JOIN tbl_rfq_products rp ON rp.rfq_id = rpv.rfq_id 
-        AND rp.product_variant_id = rpv.product_variant_id 
+      JOIN tbl_rfq_products rp ON rp.rfq_id = rpv.rfq_id
+        AND rp.product_variant_id = rpv.product_variant_id
         AND rp.variant = rpv.variant
       JOIN tbl_product_variant pv ON pv.id = rp.product_variant_id
       WHERE rpv.rfq_id = $1
+        -- Items closed without award are no longer asked for.
+        AND rp.closed_at IS NULL
     ),
     quoted_products AS (
       SELECT DISTINCT
@@ -15159,6 +15203,8 @@ ORDER BY tq.timestamp DESC;
                 -- A stuck evaluation (techEvalStuck.js) has nothing to evaluate,
                 -- even when a deadline extension has reset is_complete.
                 AND NOT ${techStuckSql({ te: 'rpe', rfq: 'RFQ' })}
+                -- nor does an item closed without award
+                AND NOT ${itemClosedSql({ te: 'rpe' })}
                 AND NOT EXISTS (
                   -- Exclude products currently waiting on a technical approver
                   SELECT 1 FROM tbl_approval_instances ai_pte
@@ -15567,7 +15613,7 @@ ORDER BY tq.timestamp DESC;
                 COUNT(*) FILTER (WHERE _is_approved) > 0
                 AND (
                   COUNT(*) FILTER (WHERE NOT _is_approved) > 0
-                  OR (SELECT COUNT(*) FROM tbl_rfq_products _rp_all WHERE _rp_all.rfq_id = RFQ.id) > COUNT(*)
+                  OR (SELECT COUNT(*) FROM tbl_rfq_products _rp_all WHERE _rp_all.rfq_id = RFQ.id AND _rp_all.closed_at IS NULL) > COUNT(*)
                 )
               FROM (
                 SELECT (
@@ -15610,7 +15656,7 @@ ORDER BY tq.timestamp DESC;
                     AND _pop2.rfq_product_id = _rp3.id
                     AND _po2.status IN ('approved','acceptance_pending','sent','dispatched','GRN','completed','invoice_raised')
                 ) AS has_approved
-                FROM tbl_rfq_products _rp3 WHERE _rp3.rfq_id = RFQ.id
+                FROM tbl_rfq_products _rp3 WHERE _rp3.rfq_id = RFQ.id AND _rp3.closed_at IS NULL
               ) _chk
             )
           END
@@ -15620,6 +15666,7 @@ ORDER BY tq.timestamp DESC;
           SELECT EXISTS (
             SELECT 1 FROM tbl_rfq_products _rp_de
             WHERE _rp_de.rfq_id = RFQ.id
+              AND _rp_de.closed_at IS NULL -- closed without award: never a dead end
               AND NOT EXISTS (
                 SELECT 1 FROM tbl_quote_finalization _qf_de
                 WHERE _qf_de.rfq_id = RFQ.id
@@ -15755,6 +15802,7 @@ ORDER BY tq.timestamp DESC;
           SELECT EXISTS (
             SELECT 1 FROM tbl_rfq_product_tech_evaluation _te_unstart
             WHERE _te_unstart.rfq_id = RFQ.id
+              AND NOT ${itemClosedSql({ te: '_te_unstart' })} -- closed without award: settled
               -- bid_end_date is naive-IST *text*: compare it through Asia/Kolkata, never
               -- against bare CURRENT_TIMESTAMP (production's session zone is UTC, so that
               -- comparison is wrong by 5h30m and changes sign east of IST). See CLAUDE.md.
@@ -17724,6 +17772,7 @@ ORDER BY tq.timestamp DESC;
     const techEval = await dbContext.oneOrNone(
       `SELECT te.*, rp.product_variant_id, rp.variant, pv.name AS product_name, r.rfq_no,
               ${techStuckSql({ te: 'te', rfq: 'r' })} AS is_stuck,
+              rp.closed_at AS item_closed_at,
               ${bidWindowOpenSql({ rfq: 'r' })} AS bid_window_open,
               ${techReopenedSql({ te: 'te' })} AS reopened
        FROM tbl_rfq_product_tech_evaluation te

@@ -116,9 +116,13 @@ function record(body) {
 // COPY of the live payload here; everything else must still match exactly.
 //   po_rejection.po_id, po_rejection.reason_category, po_rejection.route —
 //   client ticket T3 (rfq.lifecycle.poRejected.test.js)
+//   award_outcome, items_summary — items closed without award
+//   (rfq.itemsClose.test.js)
 function withoutPostFreezeFields(payload) {
   const copy = JSON.parse(JSON.stringify(payload));
   for (const r of copy?.data?.rows || []) {
+    delete r.award_outcome;
+    delete r.items_summary;
     if (r.po_rejection) {
       delete r.po_rejection.po_id;
       delete r.po_rejection.reason_category;

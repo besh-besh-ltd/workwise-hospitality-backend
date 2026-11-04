@@ -129,12 +129,17 @@ export const LIVE_PO_EXISTS = (lk) => `EXISTS (
  * THE live-link rule, per link (R24): link `lk` (tbl_pr_line_rfq) of RFQ `r`
  * is live iff its RFQ product still exists (the FK cascades, so a deleted
  * draft takes its links with it) AND (the RFQ is not closed — status 2,
- * RFQ_STATUSES.CLOSED — OR a live PO exists for the product). A withdrawn
- * publish request (status 5) can go back to drafts, so it does NOT release
- * the line. Used by LIVE_LINK_EXISTS and the detail's links[].live — no copy.
+ * RFQ_STATUSES.CLOSED — and the product was not closed without award
+ * (tbl_rfq_products.closed_at), OR a live PO exists for the product). A
+ * withdrawn publish request (status 5) can go back to drafts, so it does NOT
+ * release the line. Used by LIVE_LINK_EXISTS and the detail's links[].live —
+ * no copy.
  */
 export const LINK_IS_LIVE_SQL = (lk, r) => `(EXISTS (SELECT 1 FROM tbl_rfq_products _ll_rp WHERE _ll_rp.id = ${lk}.rfq_product_id)
-  AND (${r}.status <> 2 OR ${LIVE_PO_EXISTS(lk)}))`;
+  AND ((${r}.status <> 2
+        AND NOT EXISTS (SELECT 1 FROM tbl_rfq_products _lc_rp
+                         WHERE _lc_rp.id = ${lk}.rfq_product_id AND _lc_rp.closed_at IS NOT NULL))
+       OR ${LIVE_PO_EXISTS(lk)}))`;
 export const LIVE_LINK_EXISTS = (l) => `EXISTS (
   SELECT 1 FROM tbl_pr_line_rfq lk JOIN tbl_rfq r ON r.id = lk.rfq_id
    WHERE lk.pr_line_id = ${l}.id AND ${LINK_IS_LIVE_SQL('lk', 'r')})`;

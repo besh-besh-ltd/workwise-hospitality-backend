@@ -28,8 +28,10 @@ const VENDOR = IDS.users.vendor_alpha;
 //   vendor: 15 statements / 14 waves  ->  14 / 8
 // +1 vendor statement (Vendor Networks, spec §4.1): jwtUsr re-checks the vendor's
 // network placement on every request so revocation bites on the next call.
+// +1 buyer statement (items closed without award): the RFQ's award_outcome /
+// items_summary, read in the same wave as the other post-fetch lookups.
 const BUDGET = {
-  buyer: { statements: 11, waves: 7 },
+  buyer: { statements: 12, waves: 7 },
   vendor: { statements: 15, waves: 9 },
 };
 

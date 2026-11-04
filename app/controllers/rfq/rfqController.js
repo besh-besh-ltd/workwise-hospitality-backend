@@ -70,10 +70,18 @@ import { draftPO, buildAuthoritativePOPayload } from '../po/purchaseOrderControl
 import { autoInitiateRFQPOs, assertRfqPoListingAccess, PoAccessError, assertDraftMergeTarget } from '../../models/purchaseOrderModel.js';
 import { sendApprovalNotification } from '../po/purchaseOrderEmails.js';
 import UsersController from '../users/usersController.js';
-import { summaries } from '../../util/constants.js';
+import { summaries, VENDOR_LIKE_USER_TYPES } from '../../util/constants.js';
 import Razorpay from 'razorpay';
 import crypto from 'crypto';
 import negotiationModel, { coversProductSql } from '../../models/negotiationModel.js';
+import {
+  closeLeftoverItemsTx,
+  parseCloseRfqItemInput,
+  sendItemClosureError,
+  RfqItemClosureError,
+  findClosedItems,
+  getAwardOutcomes,
+} from '../../services/rfq/rfqItemClosure.js';
 import { evaluateVendorTechnicalQualification } from '../../services/technicalQualificationService.js';
 import { findUnansweredTechEvalLines, unansweredTechEvalMessage } from '../../services/techEvalQuoteGate.js';
 import rbacModel from '../../models/rbacModel.js';
@@ -6647,6 +6655,7 @@ const rfqController = {
         const hasDeadEndProduct = !!(await t.oneOrNone(`
           SELECT 1 FROM tbl_rfq_products rp_de
           WHERE rp_de.rfq_id = $1
+            AND rp_de.closed_at IS NULL -- closed without award: never a dead end
             AND NOT EXISTS (
               SELECT 1 FROM tbl_quote_finalization qf_de
               WHERE qf_de.rfq_id = $1
@@ -6715,6 +6724,10 @@ const rfqController = {
             JOIN tbl_rfq r_stuck ON r_stuck.id = te_stuck.rfq_id
            WHERE te_stuck.rfq_id = $1
              AND ${techReopenCandidateSql({ te: 'te_stuck', rfq: 'r_stuck' })}
+             -- An item closed without award is settled: an extension does not
+             -- reopen its evaluation, and it does not unlock the edit.
+             AND NOT EXISTS (SELECT 1 FROM tbl_rfq_products rp_cl
+                              WHERE rp_cl.id = te_stuck.tbl_rfq_product_id AND rp_cl.closed_at IS NOT NULL)
            ORDER BY te_stuck.id
         `, [rfq_id]);
         const hasTechStuckProduct = reopenCandidates.some((te) => te.is_stuck === true);
@@ -6741,6 +6754,8 @@ const rfqController = {
             FROM tbl_rfq_product_tech_evaluation te_un
             JOIN tbl_rfq r_un ON r_un.id = te_un.rfq_id
            WHERE te_un.rfq_id = $1
+             AND NOT EXISTS (SELECT 1 FROM tbl_rfq_products rp_cl
+                              WHERE rp_cl.id = te_un.tbl_rfq_product_id AND rp_cl.closed_at IS NOT NULL)
              -- bid_end_date is naive-IST text; compare through Asia/Kolkata, never
              -- bare CURRENT_TIMESTAMP (production's session zone is UTC).
              AND CAST(NULLIF(TRIM(r_un.bid_end_date), '') AS TIMESTAMP)
@@ -8879,8 +8894,17 @@ const rfqController = {
         }).catch((closeErr) => { logError('Error fetching close info for RFQ', closeErr); return null; })
         : null;
 
-      const [, evaluators, rejections, closeComment] = await Promise.all([
-        lifecycleP, evaluatorsP, rejectionsP, closeCommentP,
+      // The RFQ's outcome from its items (rfqItemClosure.js): in_progress /
+      // fully_awarded / partially_awarded / not_awarded, with the item counts.
+      // Buyers only; one statement in the same wave as the lookups above.
+      const outcomeP = (rfqData?.id && !VENDOR_LIKE_USER_TYPES.includes(Number(req.user.user_type)))
+        ? getAwardOutcomes([rfqData.id])
+          .then((m) => m.get(Number(rfqData.id)) || null)
+          .catch((outcomeErr) => { logError('Error fetching award outcome for RFQ', outcomeErr); return null; })
+        : null;
+
+      const [, evaluators, rejections, closeComment, outcome] = await Promise.all([
+        lifecycleP, evaluatorsP, rejectionsP, closeCommentP, outcomeP,
       ]);
 
       if (evaluators) {
@@ -8892,6 +8916,11 @@ const rfqController = {
       }
       rfqData.vendor_rejections = buyerOnlyHidden ? [] : rejections;
       if (closeCommentP) rfqData.close_comment = closeComment;
+
+      if (outcomeP) {
+        rfqData.award_outcome = outcome?.award_outcome ?? null;
+        rfqData.items_summary = outcome?.items ?? null;
+      }
 
       // Add tender payment status for vendor viewers (sourced from main query)
       if (rfqData && rfqData.is_tender === 1 && rfqData.tender_fees > 0 && req.user.user_type == 3) {
@@ -9492,6 +9521,15 @@ const rfqController = {
         };
       };
 
+      // Item outcomes for the page only (rfqItemClosure.js): "Closed ·
+      // Partially awarded (3 of 5)". Never fatal: a row without them renders.
+      let outcomeMap = new Map();
+      try {
+        outcomeMap = await getAwardOutcomes(pageRows.map((r) => r.id));
+      } catch (outcomeErr) {
+        logError('getRfqListView: could not load award outcomes for the page', outcomeErr);
+      }
+
       // 9. trim to the display payload (action holders already computed above).
       const data = pageRows.map((r) => ({
         id: r.id, rfq_no: r.rfq_no, title: r.title, status: r.status, is_published: r.is_published,
@@ -9523,6 +9561,8 @@ const rfqController = {
         approval_step_id: r._approvalStepId ?? null,
         approval_entity_type: r._approvalEntityType ?? null,
         po_rejection: poRejectionFor(r.id),
+        award_outcome: outcomeMap.get(Number(r.id))?.award_outcome ?? null,
+        items_summary: outcomeMap.get(Number(r.id))?.items ?? null,
       }));
 
       return res.status(200).json({ status: 1, data: { rows: data, facets, tab_counts, total, page, limit } });
@@ -9793,6 +9833,26 @@ const rfqController = {
               message: 'RFQ is Closed'
             })
             .end();
+        }
+
+        // Items the buyer closed without award take no quote lines (a regret
+        // is RFQ-level and is still allowed). Only a real regret (1 / true)
+        // skips the check: a truthy "0" is stored as a quote, not a regret.
+        const isRegretQuote = is_regret === true || Number(is_regret) === 1;
+        if (!isRegretQuote && Array.isArray(products)) {
+          const closedLines = await findClosedItems(
+            db,
+            rfq_id,
+            products.map((p) => ({ product_variant_id: p?.product_id, variant: p?.variant }))
+          );
+          if (closedLines.length) {
+            return res.status(409).json({
+              status: 0,
+              code: 'ITEM_CLOSED',
+              message: 'The buyer closed some of these items without award, so they can no longer be quoted. Remove them and submit again.',
+              details: { rfq_product_ids: closedLines.map((l) => l.rfq_product_id) }
+            }).end();
+          }
         }
 
         // Check if reverse auction is active (second priority)
@@ -11180,9 +11240,18 @@ const rfqController = {
         ? `${entityType} closed by creator: ${comment}`
         : `${entityType} closed by creator`;
 
+      // Items still open when the RFQ closes are closed without award in the
+      // same transaction, so a closed RFQ never has an item with no outcome.
+      // Optional body: item_reason_code / item_remarks (all of them) and
+      // items[{rfq_product_id, reason_code, remarks}] (per item). Default
+      // reason: rfq_closed, remarks: the close comment.
+      // A bad reason is answered 400 by the catch below (sendItemClosureError).
+      const itemClosureInput = parseCloseRfqItemInput(req.body || {}, comment);
+
       // Captured inside the transaction, used outside the tx for emails.
       let cancelledInstances = [];
       let cancelledRoundCount = 0;
+      let closedItemIds = [];
 
       // Update RFQ status to CLOSED (2) and cancel ALL pending approvals tied to this RFQ.
       await db.tx(async t => {
@@ -11325,6 +11394,12 @@ const rfqController = {
             approvers
           });
         }
+
+        closedItemIds = await closeLeftoverItemsTx(t, {
+          rfqId: Number(rfq_id),
+          userId: id,
+          ...itemClosureInput,
+        });
       });
 
       logger.debug('[closeRFQ] RFQ ${rfq_id}: cancelled ${cancelledInstances.length} pending approval instance(s) and ${cancelledRoundCount} active negotiation round(s)');
@@ -11394,6 +11469,7 @@ const rfqController = {
             previous_status: 1,
             cancelled_approval_count: cancelledInstances.length,
             cancelled_negotiation_round_count: cancelledRoundCount,
+            closed_item_ids: closedItemIds,
           },
           remarks: comment || null
         });
@@ -11405,10 +11481,12 @@ const rfqController = {
         .status(200)
         .json({
           status: 1,
-          data: [rfQItem]
+          data: [rfQItem],
+          closed_item_ids: closedItemIds
         })
         .end();
     } catch (error) {
+      if (sendItemClosureError(res, error)) return;
       logError(error);
       res
         .status(400)
@@ -11943,9 +12021,18 @@ const rfqController = {
       //     date columns, which hold IST, this one is UTC — do NOT "correct"
       //     it toward Asia/Kolkata.
       const rfqProductForNego = await db.oneOrNone(
-        `SELECT id FROM tbl_rfq_products WHERE rfq_id = $1 AND product_variant_id = $2 AND variant = $3`,
+        `SELECT id, closed_at FROM tbl_rfq_products WHERE rfq_id = $1 AND product_variant_id = $2 AND variant = $3`,
         [rfq_id, product_variant_id, variant]
       );
+      // An item the buyer closed without award takes no award. Re-checked
+      // under a row lock inside the transaction below.
+      if (rfqProductForNego?.closed_at) {
+        return res.status(409).json({
+          status: 0,
+          code: 'ITEM_CLOSED',
+          message: 'This item was closed without award. Reopen it before awarding it.'
+        });
+      }
       if (rfqProductForNego) {
         const activeNegotiationRound = await db.oneOrNone(
           `SELECT nr.id FROM tbl_negotiation_rounds nr
@@ -12059,6 +12146,19 @@ const rfqController = {
           // open between the check and the draft. 409 PO_ON_HOLD.
           if (rfqProductForNego) {
             await assertProductNotOnHeldPo(t, { rfqProductId: rfqProductForNego.id, lock: true });
+            // Serialises with POST /rfq/:id/items/close, which locks the item
+            // FOR UPDATE: an award and a close of the same item cannot both land.
+            const lockedItem = await t.one(
+              `SELECT closed_at FROM tbl_rfq_products WHERE id = $1 FOR SHARE`,
+              [rfqProductForNego.id]
+            );
+            if (lockedItem.closed_at) {
+              throw new RfqItemClosureError(
+                'CONFLICT',
+                'This item was closed without award. Reopen it before awarding it.',
+                { rfq_product_id: rfqProductForNego.id }
+              );
+            }
           }
 
           // const userInHierarchy = t.oneOrNone(
@@ -12567,6 +12667,7 @@ const rfqController = {
           .end();
       }
     } catch (error) {
+      if (sendItemClosureError(res, error)) return;
       // A refused award (a product on a held PO) answers with its own status
       // and code, the same body as every PO hold refusal.
       if (error instanceof PoDecisionError) {
@@ -15638,6 +15739,28 @@ sendFollowUpEmails: async (req, res) => {
           status: 3,
           message: 'RFQ is Closed'
         });
+      }
+
+      // Lines on items the buyer closed without award are frozen: they are
+      // left out of the revision and keep the values they were closed with.
+      // A revision that touches nothing else is refused.
+      const closedLines = await findClosedItems(
+        db,
+        rfq_id,
+        products.map((p) => ({ product_variant_id: p?.product_id, variant: p?.variant }))
+      );
+      if (closedLines.length) {
+        const lineKey = (pv, v) => `${Number(pv)}:${v == null || v === '' ? '' : Number(v)}`;
+        const closedKeys = new Set(closedLines.map((l) => lineKey(l.product_variant_id, l.variant)));
+        products = products.filter((p) => !closedKeys.has(lineKey(p.product_id, p.variant)));
+        if (!products.length) {
+          return res.status(409).json({
+            status: 0,
+            code: 'ITEM_CLOSED',
+            message: 'The buyer closed these items without award, so they can no longer be revised.',
+            details: { rfq_product_ids: closedLines.map((l) => l.rfq_product_id) }
+          });
+        }
       }
 
       // Check if reverse auction is active (second priority)
