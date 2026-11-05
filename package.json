@@ -13,6 +13,8 @@
     "lint": "eslint",
     "dev": "nodemon --experimental-json-modules --import ./otel-instrument.mjs server.js | pino-pretty --colorize --translateTime 'yyyy-mm-dd HH:MM:ss' --ignore 'pid,hostname,trace_id,span_id,trace_flags'",
     "start": "node --import ./otel-instrument.mjs server.js",
+    "migrate": "node scripts/migrate.mjs",
+    "migrate:dry-run": "node scripts/migrate.mjs --dry-run",
     "test": "NODE_OPTIONS=--experimental-vm-modules NODE_ENV=test jest",
     "test:watch": "NODE_OPTIONS=--experimental-vm-modules NODE_ENV=test jest --watch",
     "test:cov": "NODE_OPTIONS=--experimental-vm-modules NODE_ENV=test jest --coverage",
