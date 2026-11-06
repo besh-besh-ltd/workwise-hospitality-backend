@@ -15,11 +15,12 @@
 // "is this item settled" query reads.
 //
 // Who: the RFQ's creator, the same rule as POST /rfq/close-rfq/:id.
-// When: the RFQ is live (status 1, published) and the item's bid window has
-// closed, or every vendor invited on the item has regretted. An item can be
-// closed only while it is open: not awarded, no award approval pending, no
-// negotiation round open or awaiting approval on it, no technical-evaluation
-// round awaiting a decision.
+// When: the RFQ is live (status 1, published), before or after the bid deadline.
+// An item can be closed only while it is open and nothing is waiting on it: not
+// awarded, no approval pending on it (award, purchase order, technical,
+// negotiation round), no negotiation round open on it, no technical evaluation
+// awaiting a decision, and no reverse auction running on the RFQ. An auction
+// scheduled for later, or already over, does not stop it.
 //
 // Lock order: the RFQ row, then its items (id order). closeRFQ takes the RFQ
 // row through its status UPDATE; finalize takes the item row FOR SHARE before
@@ -111,7 +112,13 @@ async function loadRfq(t, rfqId, { forUpdate = false } = {}) {
   const id = positiveInt(rfqId);
   if (!id) throw new RfqItemClosureError('NOT_FOUND', 'RFQ not found');
   const rfq = await t.oneOrNone(
-    `SELECT id, rfq_no, title, status, is_published, is_tender, created_by, bid_end_date
+    `SELECT id, rfq_no, title, status, is_published, is_tender, created_by, bid_end_date,
+            -- reverse_auction is on for most RFQs with no dates: only the window
+            -- counts. ra_* are naive IST wall clock.
+            (COALESCE(reverse_auction, 0) = 1
+             AND ra_start_date IS NOT NULL AND ra_end_date IS NOT NULL
+             AND (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Kolkata') >= ra_start_date
+             AND (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Kolkata') <= ra_end_date) AS ra_running
        FROM tbl_rfq WHERE id = $1 ${forUpdate ? 'FOR UPDATE' : ''}`,
     [id]
   );
@@ -125,8 +132,10 @@ function assertCreator(rfq, user) {
   }
 }
 
+const isLive = (rfq) => Number(rfq.status) === 1 && Number(rfq.is_published) === 1;
+
 function assertLive(rfq) {
-  if (Number(rfq.status) !== 1 || Number(rfq.is_published) !== 1) {
+  if (!isLive(rfq)) {
     throw new RfqItemClosureError(
       'CONFLICT',
       Number(rfq.status) === 2
@@ -159,17 +168,45 @@ export async function getRfqItemFacts(t, rfqId, { lock = false } = {}) {
                       JOIN tbl_rfq_purchase_order po ON po.id = pop.purchase_order_id
                      WHERE pop.rfq_product_id = rp.id
                        AND po.status::text <> ALL($2::text[])) AS live_po,
+            EXISTS (SELECT 1 FROM tbl_purchase_order_product pop
+                      JOIN tbl_rfq_purchase_order po ON po.id = pop.purchase_order_id
+                     WHERE pop.rfq_product_id = rp.id
+                       AND po.status::text = 'pending_approval') AS po_approval_pending,
             EXISTS (SELECT 1 FROM tbl_negotiation_rounds nr
                      WHERE nr.rfq_id = rp.rfq_id
                        AND nr.source_type = 'RFQ'
-                       AND (nr.status IN ('DRAFT', 'PENDING_APPROVAL')
+                       AND (nr.status = 'DRAFT'
                             OR (nr.status = 'ACTIVE'
                                 AND (nr.end_date IS NULL OR nr.end_date > (now() AT TIME ZONE 'UTC'))))
                        AND ${coversProductSql('rp.id')}) AS in_round,
+            EXISTS (SELECT 1 FROM tbl_negotiation_rounds nr
+                     WHERE nr.rfq_id = rp.rfq_id
+                       AND nr.source_type = 'RFQ'
+                       AND (nr.status = 'PENDING_APPROVAL'
+                            OR EXISTS (SELECT 1 FROM tbl_approval_instances ai
+                                        WHERE ai.entity_type = 'NEGOTIATION'
+                                          AND ai.status = 'PENDING'
+                                          AND ai.entity_id = nr.id))
+                       AND ${coversProductSql('rp.id')}) AS negotiation_approval_pending,
             EXISTS (SELECT 1 FROM tbl_tech_evaluation_rounds ter
                       JOIN tbl_rfq_product_tech_evaluation te ON te.id = ter.tbl_rfq_product_tech_evaluation_id
                      WHERE te.tbl_rfq_product_id = rp.id
-                       AND ter.status IN ('PENDING', 'SUBMITTED')) AS tech_eval_pending,
+                       AND ter.status = 'PENDING') AS tech_eval_pending,
+            -- The approval itself decides, not only the round's status: older
+            -- rounds sit at PENDING_APPROVAL, and a round whose approval was
+            -- cancelled must not block the item for good.
+            (EXISTS (SELECT 1 FROM tbl_tech_evaluation_rounds ter
+                       JOIN tbl_rfq_product_tech_evaluation te ON te.id = ter.tbl_rfq_product_tech_evaluation_id
+                      WHERE te.tbl_rfq_product_id = rp.id
+                        AND (ter.status = 'SUBMITTED'
+                             OR EXISTS (SELECT 1 FROM tbl_approval_instances ai
+                                         WHERE ai.entity_type = 'TECHNICAL'
+                                           AND ai.status = 'PENDING'
+                                           AND (ai.id = ter.approval_instance_id OR ai.entity_id = ter.id))))
+             OR EXISTS (SELECT 1 FROM tbl_approval_instances ai
+                         WHERE ai.entity_type = 'TECHNICAL'
+                           AND ai.status = 'PENDING'
+                           AND ai.metadata->>'rfq_product_id' = rp.id::text)) AS tech_approval_pending,
             (SELECT count(DISTINCT q.created_by)
                FROM tbl_quote_items qi
                JOIN tbl_quotes q ON q.id = qi.quote_id
@@ -211,16 +248,18 @@ export function itemState(f) {
 }
 
 /** Why an item cannot be closed right now; empty when it can. */
-export function closeBlockers(f, { bidEnded }) {
+export function closeBlockers(f, { live = true, raRunning = false } = {}) {
   const state = itemState(f);
   if (state === ITEM_STATES.CLOSED) return ['already_closed'];
-  if (state === ITEM_STATES.AWARDED) return ['awarded'];
+  if (state === ITEM_STATES.AWARDED) return [f.po_approval_pending ? 'po_approval_pending' : 'awarded'];
   if (state === ITEM_STATES.AWARD_PENDING) return ['award_pending'];
+  if (!live) return ['rfq_not_live'];
   const out = [];
-  if (f.in_round) out.push('negotiation_round');
+  if (f.tech_approval_pending) out.push('tech_approval_pending');
   if (f.tech_eval_pending) out.push('tech_eval_pending');
-  const allRegretted = f.invited_vendor_count > 0 && f.regretted_vendor_count >= f.invited_vendor_count;
-  if (!bidEnded && !allRegretted) out.push('bid_window_open');
+  if (f.negotiation_approval_pending) out.push('negotiation_approval_pending');
+  if (f.in_round) out.push('negotiation_round');
+  if (raRunning) out.push('reverse_auction_running');
   return out;
 }
 
@@ -228,16 +267,21 @@ const BLOCKER_TEXT = Object.freeze({
   already_closed: 'already closed',
   awarded: 'already awarded',
   award_pending: 'its award is awaiting approval',
-  negotiation_round: 'a negotiation round is open or awaiting approval on it',
+  po_approval_pending: 'its purchase order is awaiting approval',
+  tech_approval_pending: 'its technical evaluation is awaiting approval',
   tech_eval_pending: 'a technical evaluation is awaiting a decision on it',
-  bid_window_open: 'the bid window is still open',
+  negotiation_approval_pending: 'a negotiation round on it is awaiting approval',
+  negotiation_round: 'a negotiation round is open on it',
+  reverse_auction_running: 'a reverse auction is running on this RFQ',
+  rfq_not_live: 'the RFQ is not live',
 });
 
 /** The reason the UI should preselect, from what happened on the item. */
-function suggestedReason(f) {
+function suggestedReason(f, { bidEnded }) {
   if (f.quoted_vendor_count > 0) return null;
   if (f.invited_vendor_count > 0 && f.regretted_vendor_count >= f.invited_vendor_count) return 'all_vendors_regretted';
-  return 'no_quotes_received';
+  // While bidding is open a quote may still arrive, so this would not be true yet.
+  return bidEnded ? 'no_quotes_received' : null;
 }
 
 function publicClosure(f) {
@@ -330,17 +374,18 @@ export async function getClosePreview(user, rfqId, dbCtx = db) {
   const rfq = await loadRfq(dbCtx, rfqId);
   assertCreator(rfq, user);
   const bidEnded = isBidEnded(rfq);
+  const live = isLive(rfq);
   const facts = await getRfqItemFacts(dbCtx, rfq.id);
   const items = facts.map((f) => {
     const state = itemState(f);
-    const blockers = closeBlockers(f, { bidEnded });
+    const blockers = closeBlockers(f, { live, raRunning: rfq.ra_running === true });
     return {
       rfq_product_id: Number(f.id),
       product_name: f.product_name,
       state,
       closable: blockers.length === 0,
       blockers,
-      suggested_reason: state === ITEM_STATES.OPEN ? suggestedReason(f) : null,
+      suggested_reason: state === ITEM_STATES.OPEN ? suggestedReason(f, { bidEnded }) : null,
       quoted_vendor_count: f.quoted_vendor_count,
       invited_vendor_count: f.invited_vendor_count,
       regretted_vendor_count: f.regretted_vendor_count,
@@ -382,6 +427,7 @@ export async function getClosePreview(user, rfqId, dbCtx = db) {
       status: Number(rfq.status),
       is_published: Number(rfq.is_published),
       bid_ended: bidEnded,
+      reverse_auction_running: rfq.ra_running === true,
     },
     items,
     summary,
@@ -449,13 +495,12 @@ export async function closeItems(t, user, rfqId, { rfq_product_ids, reason_code,
     throw new RfqItemClosureError('NOT_FOUND', 'Some items are not on this RFQ', { rfq_product_ids: missing });
   }
 
-  const bidEnded = isBidEnded(rfq);
   const alreadyClosed = [];
   const toClose = [];
   const refused = [];
   for (const id of ids) {
     const f = byId.get(id);
-    const blockers = closeBlockers(f, { bidEnded });
+    const blockers = closeBlockers(f, { raRunning: rfq.ra_running === true });
     if (blockers[0] === 'already_closed') alreadyClosed.push(id);
     else if (blockers.length) refused.push({ rfq_product_id: id, product_name: f.product_name, blockers });
     else toClose.push(id);
