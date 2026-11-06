@@ -95,12 +95,19 @@ afterEach(async () => {
   if (!rfqIds.length) return;
   const poIds = (await db.any(`SELECT id FROM tbl_rfq_purchase_order WHERE rfq_id = ANY($1::int[])`, [rfqIds]))
     .map((r) => Number(r.id));
+  await db.none(
+    `DELETE FROM tbl_tech_evaluation_rounds WHERE tbl_rfq_product_tech_evaluation_id IN (
+       SELECT id FROM tbl_rfq_product_tech_evaluation WHERE rfq_id = ANY($1::int[]))`,
+    [rfqIds]
+  );
+  await db.none(`DELETE FROM tbl_rfq_product_tech_evaluation WHERE rfq_id = ANY($1::int[])`, [rfqIds]);
   const instanceIds = (await db.any(
     `SELECT id FROM tbl_approval_instances
       WHERE (entity_type = 'PO' AND entity_id = ANY($2::int[]))
          OR (entity_type IN ('NEGOTIATION_QUOTE', 'ARC')
              AND entity_id IN (SELECT id FROM tbl_rfq_products WHERE rfq_id = ANY($1::int[])))
-         OR (entity_type IN ('RFQ', 'TENDER') AND entity_id = ANY($1::int[]))`,
+         OR (entity_type IN ('RFQ', 'TENDER') AND entity_id = ANY($1::int[]))
+         OR (metadata->>'rfq_id')::int = ANY($1::int[])`,
     [rfqIds, poIds]
   )).map((r) => Number(r.id));
   // An auto-initiated PO points at its approval instance.
@@ -236,6 +243,58 @@ async function po(rfq, itemId, status) {
   return Number(po_id);
 }
 
+/** A technical evaluation round on an item; returns the round id. */
+async function techRound(rfq, itemId, status) {
+  const te = await db.one(
+    `INSERT INTO tbl_rfq_product_tech_evaluation (rfq_id, tbl_rfq_product_id) VALUES ($1, $2) RETURNING id`,
+    [rfq.rfq_id, itemId]
+  );
+  const round = await db.one(
+    `INSERT INTO tbl_tech_evaluation_rounds (tbl_rfq_product_tech_evaluation_id, round_number, status)
+     VALUES ($1, 1, $2) RETURNING id`,
+    [te.id, status]
+  );
+  return Number(round.id);
+}
+
+/** An approval on a round or item, shaped as the engine writes it. */
+async function approval(rfq, entityType, entityId, status = "PENDING", extra = {}) {
+  const row = await db.one(
+    `INSERT INTO tbl_approval_instances
+       (entity_type, entity_id, approval_policy_id, status, current_step,
+        hospitality_company_id, hotel_id, department_id, initiated_by, metadata, created_at)
+     VALUES ($1, $2, $3, $4, 1, $5, $6, $7, $8, $9::jsonb, NOW()) RETURNING id`,
+    [entityType, entityId, POLICY_ID, status, IDS.hospitality.A, IDS.hotels.A1, IDS.departments.proc, BUYER,
+     JSON.stringify({ rfq_id: rfq.rfq_id, ...extra })]
+  );
+  return Number(row.id);
+}
+
+/** A negotiation round covering an item; returns the round id. */
+async function negotiationRound(rfq, itemId, status) {
+  const row = await db.one(
+    `INSERT INTO tbl_negotiation_rounds
+       (rfq_id, rfq_product_id, round_number, end_date, status, created_by, source_type, source_id,
+        vendor_ids, vendor_approvals, created_at)
+     VALUES ($1, $2, 1, (now() AT TIME ZONE 'UTC') + interval '1 day', $3, $4, 'RFQ', $1,
+             ARRAY[$5]::int[], '[]'::jsonb, now())
+     RETURNING id`,
+    [rfq.rfq_id, itemId, status, BUYER, VENDOR]
+  );
+  return Number(row.id);
+}
+
+const reverseAuction = (rfq, startOffsetMs, endOffsetMs) => db.none(
+  `UPDATE tbl_rfq SET reverse_auction = 1, ra_start_date = $2, ra_end_date = $3 WHERE id = $1`,
+  [rfq.rfq_id, startOffsetMs == null ? null : ist(startOffsetMs), endOffsetMs == null ? null : ist(endOffsetMs)]
+);
+
+const previewItem = async (rfq, itemId) => {
+  const res = await (await httpClient(BUYER)).get(`/api/v1/rfq/${rfq.rfq_id}/close-preview`);
+  expect(res.status).toBe(200);
+  return res.body.data.items.find((i) => i.rfq_product_id === itemId);
+};
+
 const item = (id) => db.one(
   `SELECT closed_at, closed_by, close_reason_code, close_remarks FROM tbl_rfq_products WHERE id = $1`, [id]
 );
@@ -302,22 +361,6 @@ describe("POST /rfq/:id/items/close", () => {
     expect(res.status).toBe(403);
     expect((await item(rfq.items[1])).closed_at).toBeNull();
     expect(await closureLog(rfq.rfq_id)).toEqual([]);
-  });
-
-  it("refuses while the bid window is open, unless every invited vendor regretted", async () => {
-    const rfq = await threeItemRfq({ bidOpen: true });
-    const [A] = rfq.items;
-
-    let res = await closeItems(rfq.rfq_id, { rfq_product_ids: [A], reason_code: "no_quotes_received" });
-    expect(res.status).toBe(409);
-    expect(res.body.code).toBe("CONFLICT");
-    expect(res.body.details.items[0].blockers).toEqual(["bid_window_open"]);
-    expect((await item(A)).closed_at).toBeNull();
-
-    await plantQuote(rfq, VENDOR, A, { regret: true });
-    res = await closeItems(rfq.rfq_id, { rfq_product_ids: [A], reason_code: "all_vendors_regretted" });
-    expect(res.status).toBe(200);
-    expect((await item(A)).close_reason_code).toBe("all_vendors_regretted");
   });
 
   it("refuses an awarded item or one awaiting award approval, and closes nothing in that request", async () => {
@@ -415,6 +458,177 @@ describe("POST /rfq/:id/items/close", () => {
   });
 });
 
+describe("closing while bidding is open", () => {
+  it("closes an item before the deadline, whether or not vendors have quoted", async () => {
+    const rfq = await threeItemRfq({ bidOpen: true });
+    const [A, B, C] = rfq.items;
+    await plantQuote(rfq, VENDOR, B);
+
+    const res = await closeItems(rfq.rfq_id, { rfq_product_ids: [A, B], reason_code: "requirement_cancelled" });
+
+    expect(res.status).toBe(200);
+    expect((await item(A)).close_reason_code).toBe("requirement_cancelled");
+    expect((await item(B)).close_reason_code).toBe("requirement_cancelled");
+    expect((await item(C)).closed_at).toBeNull();
+    expect(Number((await db.one(`SELECT status FROM tbl_rfq WHERE id = $1`, [rfq.rfq_id])).status)).toBe(1);
+  });
+
+  it("closes an item before the deadline when every invited vendor regretted, and suggests that reason", async () => {
+    const rfq = await threeItemRfq({ bidOpen: true });
+    const [A] = rfq.items;
+    await plantQuote(rfq, VENDOR, A, { regret: true });
+
+    expect(await previewItem(rfq, A)).toMatchObject({ closable: true, suggested_reason: "all_vendors_regretted" });
+
+    const res = await closeItems(rfq.rfq_id, { rfq_product_ids: [A], reason_code: "all_vendors_regretted" });
+    expect(res.status).toBe(200);
+  });
+
+  it("does not suggest 'no quotes received' until the deadline has passed", async () => {
+    const open = await threeItemRfq({ bidOpen: true });
+    expect(await previewItem(open, open.items[0])).toMatchObject({ closable: true, suggested_reason: null });
+
+    const ended = await threeItemRfq();
+    expect(await previewItem(ended, ended.items[0])).toMatchObject({ closable: true, suggested_reason: "no_quotes_received" });
+  });
+
+  it("still blocks an item with an approval pending while bidding is open", async () => {
+    const rfq = await threeItemRfq({ bidOpen: true });
+    const [A] = rfq.items;
+    await approval(rfq, "TECHNICAL", await techRound(rfq, A, "SUBMITTED"), "PENDING", { rfq_product_id: A });
+
+    const res = await closeItems(rfq.rfq_id, { rfq_product_ids: [A], reason_code: "requirement_cancelled" });
+    expect(res.status).toBe(409);
+    expect(res.body.details.items[0].blockers).toEqual(["tech_approval_pending"]);
+  });
+});
+
+describe("an approval pending on the item blocks closing it", () => {
+  const expectBlocked = async (rfq, itemId, blocker, message) => {
+    expect(await previewItem(rfq, itemId)).toMatchObject({ closable: false, blockers: [blocker] });
+    const res = await closeItems(rfq.rfq_id, { rfq_product_ids: [itemId], reason_code: "quotes_not_acceptable" });
+    expect(res.status).toBe(409);
+    expect(res.body.details.items[0].blockers).toEqual([blocker]);
+    expect(res.body.message).toContain(message);
+    expect((await item(itemId)).closed_at).toBeNull();
+  };
+
+  it("technical approval on a current round", async () => {
+    const rfq = await threeItemRfq();
+    const [A] = rfq.items;
+    await approval(rfq, "TECHNICAL", await techRound(rfq, A, "SUBMITTED"));
+    await expectBlocked(rfq, A, "tech_approval_pending", "technical evaluation is awaiting approval");
+  });
+
+  it("technical approval on an older round (PENDING_APPROVAL), which used to slip through", async () => {
+    const rfq = await threeItemRfq();
+    const [A] = rfq.items;
+    await approval(rfq, "TECHNICAL", await techRound(rfq, A, "PENDING_APPROVAL"));
+    await expectBlocked(rfq, A, "tech_approval_pending", "technical evaluation is awaiting approval");
+  });
+
+  it("a technical approval that was cancelled does not block the item for good", async () => {
+    const rfq = await threeItemRfq();
+    const [A] = rfq.items;
+    await approval(rfq, "TECHNICAL", await techRound(rfq, A, "PENDING_APPROVAL"), "CANCELLED");
+
+    expect(await previewItem(rfq, A)).toMatchObject({ closable: true, blockers: [] });
+    const res = await closeItems(rfq.rfq_id, { rfq_product_ids: [A], reason_code: "quotes_not_acceptable" });
+    expect(res.status).toBe(200);
+  });
+
+  it("negotiation round awaiting approval", async () => {
+    const rfq = await threeItemRfq();
+    const [A] = rfq.items;
+    await negotiationRound(rfq, A, "PENDING_APPROVAL");
+    await expectBlocked(rfq, A, "negotiation_approval_pending", "negotiation round on it is awaiting approval");
+  });
+
+  it("award approval", async () => {
+    const rfq = await threeItemRfq();
+    const [A] = rfq.items;
+    await award(rfq, A);
+    await pendingAward(rfq, A);
+    await expectBlocked(rfq, A, "award_pending", "award is awaiting approval");
+  });
+
+  it("purchase order approval", async () => {
+    const rfq = await threeItemRfq();
+    const [A] = rfq.items;
+    await award(rfq, A);
+    await po(rfq, A, "pending_approval");
+    await expectBlocked(rfq, A, "po_approval_pending", "purchase order is awaiting approval");
+  });
+
+  it("an approval on one item leaves the others closable", async () => {
+    const rfq = await threeItemRfq();
+    const [A, B] = rfq.items;
+    await approval(rfq, "TECHNICAL", await techRound(rfq, A, "SUBMITTED"));
+    expect(await previewItem(rfq, B)).toMatchObject({ closable: true });
+    const res = await closeItems(rfq.rfq_id, { rfq_product_ids: [B], reason_code: "quotes_not_acceptable" });
+    expect(res.status).toBe(200);
+  });
+
+  it("a publish approval left pending on a live RFQ does not block: it can no longer be acted on", async () => {
+    const rfq = await threeItemRfq();
+    await approval(rfq, "RFQ", rfq.rfq_id);
+    expect(await previewItem(rfq, rfq.items[0])).toMatchObject({ closable: true });
+  });
+});
+
+describe("a reverse auction", () => {
+  const closeA = (rfq) => closeItems(rfq.rfq_id, { rfq_product_ids: [rfq.items[0]], reason_code: "quotes_not_acceptable" });
+
+  it("running: every item is blocked, and the preview says so", async () => {
+    const rfq = await threeItemRfq();
+    await reverseAuction(rfq, -HOUR, HOUR);
+
+    expect(await previewItem(rfq, rfq.items[1])).toMatchObject({ closable: false, blockers: ["reverse_auction_running"] });
+    const res = await closeA(rfq);
+    expect(res.status).toBe(409);
+    expect(res.body.message).toContain("reverse auction is running");
+    expect((await item(rfq.items[0])).closed_at).toBeNull();
+  });
+
+  it("scheduled for later: the item can be closed", async () => {
+    const rfq = await threeItemRfq();
+    await reverseAuction(rfq, HOUR, 2 * HOUR);
+    expect((await closeA(rfq)).status).toBe(200);
+  });
+
+  it("already over: the item can be closed", async () => {
+    const rfq = await threeItemRfq();
+    await reverseAuction(rfq, -2 * HOUR, -HOUR);
+    expect((await closeA(rfq)).status).toBe(200);
+  });
+
+  it("switched on with no dates, as most RFQs are: the item can be closed", async () => {
+    const rfq = await threeItemRfq();
+    await reverseAuction(rfq, null, null);
+    expect((await closeA(rfq)).status).toBe(200);
+  });
+
+  it("the window is read as IST wall clock, not UTC", async () => {
+    const rfq = await threeItemRfq();
+    // Started 1 hour ago in IST. Read as UTC, this start would still be hours away.
+    await reverseAuction(rfq, -HOUR, 10 * HOUR);
+    expect((await closeA(rfq)).status).toBe(409);
+  });
+});
+
+describe("close preview on an RFQ that is not live", () => {
+  it("says the item cannot be closed, and the server agrees", async () => {
+    const draft = await threeItemRfq({ bidOpen: true });
+    await db.none(`UPDATE tbl_rfq SET is_published = 0 WHERE id = $1`, [draft.rfq_id]);
+    expect(await previewItem(draft, draft.items[0])).toMatchObject({ closable: false, blockers: ["rfq_not_live"] });
+    expect((await closeItems(draft.rfq_id, { rfq_product_ids: [draft.items[0]], reason_code: "other", remarks: "x" })).status).toBe(409);
+
+    const closed = await threeItemRfq();
+    await db.none(`UPDATE tbl_rfq SET status = 2 WHERE id = $1`, [closed.rfq_id]);
+    expect(await previewItem(closed, closed.items[0])).toMatchObject({ closable: false, blockers: ["rfq_not_live"] });
+  });
+});
+
 describe("POST /rfq/:id/items/reopen", () => {
   it("needs remarks, clears the closure and logs the reopen", async () => {
     const rfq = await threeItemRfq();
@@ -448,7 +662,7 @@ describe("GET /rfq/:id/close-preview", () => {
     expect(res.status).toBe(200);
     const d = res.body.data;
     const byId = Object.fromEntries(d.items.map((i) => [i.rfq_product_id, i]));
-    expect(byId[A]).toMatchObject({ state: "awarded", closable: false, blockers: ["awarded"] });
+    expect(byId[A]).toMatchObject({ state: "awarded", closable: false, blockers: ["po_approval_pending"] });
     expect(byId[B]).toMatchObject({ state: "open", closable: true, suggested_reason: null, quoted_vendor_count: 1 });
     expect(byId[C]).toMatchObject({ state: "open", closable: true, suggested_reason: "no_quotes_received" });
     expect(d.summary).toEqual({ total: 3, awarded: 1, award_pending: 0, closed_no_award: 0, open: 2 });
