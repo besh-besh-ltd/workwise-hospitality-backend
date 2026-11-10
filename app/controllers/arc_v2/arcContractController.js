@@ -74,9 +74,15 @@ function amountInWords(value) {
 // Replaces the legacy lineFreight() which used the old {value,type:'pct'|'absolute'}
 // shape. Now routes through pricingEngine.calculateLineTotal (same engine the
 // vendor's quote preview uses) so the document totals always match the stored quote.
-// Returns { base, base_tax, chargesTotal, allIn, chargesDisplay } where:
-//   allIn = base + base_tax + chargesTotal  (engine `total`)
-//   chargesDisplay = ₹ string for non-zero aggregate freight/charges
+// Returns { base, base_tax, chargesTotal, chargesTax, rateExclTax, allIn, chargesDisplay }:
+//   chargesTotal = Σ charge amounts BEFORE tax (freight etc.)
+//   chargesTax   = GST on those charges
+//   rateExclTax  = base + chargesTotal — the per-unit awarded rate EXCLUDING GST
+//   allIn        = base + base_tax + charges incl. their tax (engine `total`)
+//   chargesDisplay = ₹ string for non-zero freight/charges (pre-tax amounts)
+// The Schedule of Rates is stated exclusive of tax (GST is charged extra on the
+// invoice), so it is built from rateExclTax. It used to print allIn, which put
+// GST inside the "awarded rate" and the "Value (excl. tax)" total.
 function lineEngineOut(l) {
   let charges = l.charges;
   if (typeof charges === 'string') { try { charges = JSON.parse(charges); } catch (_) { charges = null; } }
@@ -95,7 +101,11 @@ function lineEngineOut(l) {
     })),
   };
   const out = pricingEngine.calculateLineTotal(engineInput);
-  const chargesTotal = out.charges_total;
+  const r2 = (n) => Math.round(Number(n || 0) * 100) / 100;
+  // The engine's charges_total includes each charge's tax; the schedule needs
+  // the pre-tax amounts.
+  const chargesTotal = r2(out.charges.reduce((sum, c) => sum + Number(c.amount || 0), 0));
+  const chargesTax = r2(Number(out.charges_total || 0) - chargesTotal);
   // Build a human-readable display for the charges column.
   let chargesDisplay = '';
   if (chargesTotal > 0 && out.charges.length > 0) {
@@ -105,6 +115,8 @@ function lineEngineOut(l) {
     base:           out.base,
     base_tax:       out.base_tax,
     chargesTotal,
+    chargesTax,
+    rateExclTax:    r2(Number(out.base || 0) + chargesTotal),
     allIn:          out.total,  // base + base_tax + all charges (incl. charge taxes)
     chargesDisplay,
   };
@@ -139,13 +151,14 @@ export function renderContractDocumentHtml(ctx, vendor, lines, { signed = false,
   let grand = 0;
   const rows = lines.map((l, i) => {
     const basic = Number(l.unit_rate || 0);
-    // Phase 2 — engine-computed per-unit all-in price (base + base_tax + charges).
+    // Engine-computed per-unit pricing. The awarded rate and the value are
+    // EXCLUSIVE of GST (basic rate + pre-tax freight/charges), matching the
+    // column headings, the total's label and clause 2's "GST charged extra".
     const engine = lineEngineOut(l);
     const frtDisplay = engine.chargesTotal > 0 ? inr(engine.chargesTotal) : '—';
-    // all-in per unit = engine.allIn (base + tax + charges at qty=1)
-    const allInPerUnit = engine.allIn;
+    const ratePerUnit = engine.rateExclTax;
     const qty = Number(l.committed_qty || 0);
-    const value = allInPerUnit * qty;
+    const value = Math.round(ratePerUnit * qty * 100) / 100;
     grand += value;
     return `<tr>
       <td class="c">${i + 1}</td>
@@ -153,7 +166,7 @@ export function renderContractDocumentHtml(ctx, vendor, lines, { signed = false,
       <td class="c">${esc(l.uom || '—')}</td>
       <td class="r">${inr(basic)}</td>
       <td class="r">${frtDisplay}</td>
-      <td class="r"><strong>${inr(allInPerUnit)}</strong></td>
+      <td class="r"><strong>${inr(ratePerUnit)}</strong></td>
       <td class="r">${Number(l.gst_pct ?? 0)}%</td>
       <td class="r">${qty.toLocaleString('en-IN')}</td>
       <td class="r"><strong>${inr(value)}</strong></td>
