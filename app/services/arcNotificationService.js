@@ -343,15 +343,20 @@ const EVENT_CONFIG = {
 
   // ── Contract (award → sign → active) ─────────────────────────────────────
 
+  // Committee approved → one DRAFT contract per awarded vendor, held for the
+  // buyer to review and send. Goes to the people who can review (creator) and
+  // send (commercial evaluators); the vendors hear nothing until it is sent.
   [ARC_EVENT_TYPES.CONTRACT_GENERATED]: {
-    audiences:    [AUDIENCE.CREATOR],
+    audiences:    [AUDIENCE.CREATOR, AUDIENCE.COMM_EVALUATORS],
     email:        false,
     vendorFacing: false,
-    title:        'Contracts generated',
-    body:         (arc) => `Contracts were generated for ${arc.title} (${arc.arc_number}).`,
+    title:        'Contract copies ready for review',
+    body:         (arc) => `The committee approved ${arc.title} (${arc.arc_number}). Review each vendor's contract copy and send them for signature.`,
     url:          (arc, ctx) => ctx.role === 'vendor' ? vendorArc(ctx) : buyerArc(arc),
   },
 
+  // Fired by the buyer's send (sendContracts) with payload.vendorIds = the
+  // vendors whose contracts were just sent.
   [ARC_EVENT_TYPES.CONTRACT_AWAITING_ACCEPTANCE]: {
     audiences:    [AUDIENCE.AWARDED_VENDORS],
     email:        true,
@@ -779,12 +784,19 @@ async function resolveOneAudience(audience, arc, payload) {
         return tag(users);
       }
       case AUDIENCE.AWARDED_VENDORS: {
+        // Vendors holding a contract on this ARC — never an unsent DRAFT
+        // ('generated'). payload.vendorIds narrows it to specific vendors (the
+        // ones a send just issued contracts to).
+        const only = Array.isArray(payload?.vendorIds) && payload.vendorIds.length
+          ? payload.vendorIds.map(Number) : null;
         const rows = await db.any(
           `SELECT c.vendor_id AS id, u.name, u.email
              FROM tbl_arc_contract c
              JOIN tbl_users u ON u.id = c.vendor_id
-            WHERE c.arc_id = $1`,
-          [arc.id]
+            WHERE c.arc_id = $1
+              AND c.status <> 'generated'
+              AND ($2::int[] IS NULL OR c.vendor_id = ANY($2::int[]))`,
+          [arc.id, only]
         );
         return tag(rows);
       }

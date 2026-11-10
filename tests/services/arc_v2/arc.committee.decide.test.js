@@ -207,12 +207,14 @@ describe("ARC committee — chain visibility, approver gating, decide endpoint",
     expect(s2.status).toBe(200);
     expect(s2.body.data.approval.status).toBe("APPROVED");
 
-    // Hooks fired: contracts generated per awarded vendor, ARC advanced.
+    // Hooks fired: a draft contract per awarded vendor, held for the buyer to
+    // review and send (the vendor is not notified yet).
     const contracts = await db.any(`SELECT * FROM tbl_arc_contract WHERE arc_id = $1`, [arcs.approve.arcId]);
     expect(contracts.length).toBe(1);
     expect(contracts[0].vendor_id).toBe(VENDOR);
+    expect(contracts[0].status).toBe("generated");
     const arcRow = await db.one(`SELECT status FROM tbl_arc WHERE id = $1`, [arcs.approve.arcId]);
-    expect(arcRow.status).toBe("awaiting_vendor_acceptance");
+    expect(arcRow.status).toBe("contract_generated");
 
     // No further decisions allowed.
     const again = await approver1Client

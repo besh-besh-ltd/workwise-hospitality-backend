@@ -8,19 +8,47 @@ import crypto from 'crypto';
  * awards. Lines carry the originally-awarded values + consumed_qty maintained
  * by callOffPoService.releaseForMr.
  */
+// Contract statuses a buyer reviews or a vendor holds. 'generated' is the
+// buyer-only DRAFT that the committee approval produces: it is invisible to
+// the vendor until the buyer sends it (sendDrafts → 'awaiting_acceptance').
+export const DRAFT_CONTRACT_STATUS = 'generated';
+const CONTRACT_STATUSES = new Set(['generated', 'awaiting_acceptance']);
+
 const arcContractModel = {
   createContract: async (data, txContext = null) => {
+    const status = data.status || 'awaiting_acceptance';
+    if (!CONTRACT_STATUSES.has(status)) throw new Error(`createContract: unsupported status '${status}'`);
     return (txContext || db).one(
       `INSERT INTO tbl_arc_contract
          (arc_id, vendor_id, document_s3_url, status, awaiting_until)
-       VALUES ($1, $2, $3, 'awaiting_acceptance', $4)
+       VALUES ($1, $2, $3, $5, $4)
        ON CONFLICT (arc_id, vendor_id) DO UPDATE
          SET document_s3_url = EXCLUDED.document_s3_url,
              status          = EXCLUDED.status,
              awaiting_until  = EXCLUDED.awaiting_until,
              updated_at      = CURRENT_TIMESTAMP
        RETURNING *`,
-      [data.arc_id, data.vendor_id, data.document_s3_url || null, data.awaiting_until || null]
+      [data.arc_id, data.vendor_id, data.document_s3_url || null, data.awaiting_until || null, status]
+    );
+  },
+
+  /**
+   * Send DRAFT contracts to their vendors: 'generated' → 'awaiting_acceptance',
+   * starting the 7-day acceptance window now. Guarded on the from-status, so a
+   * replay (or a second buyer clicking at the same time) sends nothing and
+   * returns no rows. contractIds = null sends every draft on the ARC.
+   */
+  sendDrafts: async (arcId, contractIds = null, txContext = null) => {
+    return (txContext || db).any(
+      `UPDATE tbl_arc_contract
+          SET status         = 'awaiting_acceptance',
+              awaiting_until = CURRENT_TIMESTAMP + INTERVAL '7 days',
+              updated_at     = CURRENT_TIMESTAMP
+        WHERE arc_id = $1
+          AND status = 'generated'
+          AND ($2::bigint[] IS NULL OR id = ANY($2::bigint[]))
+        RETURNING *`,
+      [arcId, contractIds]
     );
   },
 

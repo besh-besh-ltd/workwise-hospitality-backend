@@ -180,6 +180,10 @@ describe("Group ARC — award by hotel and per-hotel contracts", () => {
         { line_qty: 750, hotel_id: A1, hotel_qty: 400, used: 0 },
         { line_qty: 750, hotel_id: A2, hotel_qty: 350, used: 0 },
       ]);
+      // The committee (auto-approved here) holds the copy as a draft; the
+      // buyer reviews and sends it before the vendor can open it.
+      expect((await db.one(`SELECT status FROM tbl_arc_contract WHERE id = $1`, [contracts[0].id])).status).toBe("generated");
+      expect((await buyer.post(`/api/v1/arc-v2/${arcId}/contracts/send`).send({})).status).toBe(200);
     });
 
     test("the committee sees every covered hotel and each award's per-hotel split", async () => {
@@ -224,6 +228,9 @@ describe("Group ARC — award by hotel and per-hotel contracts", () => {
         [contract.id, A1]
       );
       expect(row).toEqual({ committed: 400, used: 50 });
+      // A re-issued copy is a draft again until the buyer re-sends it.
+      expect((await db.one(`SELECT status FROM tbl_arc_contract WHERE id = $1`, [contract.id])).status).toBe("generated");
+      expect(await arcContractModel.sendDrafts(arcId)).toHaveLength(1);
     });
   });
 

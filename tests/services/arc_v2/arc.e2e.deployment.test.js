@@ -203,10 +203,28 @@ describe("ARC v2 — DEPLOYMENT E2E: create → contract_active → MR → call-
     expect(alloc.status).toBe(200);
     const fin = await buyerClient.post(`${E}/${arcId}/comm-eval/finalize`).send({});
     expect(fin.status).toBe(200);
+    // Committee approval holds the contract copy as a draft for buyer review.
     const arc = await db.one(`SELECT status FROM tbl_arc WHERE id=$1`, [arcId]);
-    expect(arc.status).toBe("awaiting_vendor_acceptance");
+    expect(arc.status).toBe("contract_generated");
     const contract = await db.one(`SELECT id, status FROM tbl_arc_contract WHERE arc_id=$1 AND vendor_id=$2`, [arcId, VENDOR_A]);
     contractId = Number(contract.id);
+    expect(contract.status).toBe("generated");
+  });
+
+  test("7b. buyer previews the contract copy, then sends it to the vendor", async () => {
+    const review = await buyerClient.get(`/api/v1/arc-v2/${arcId}/contracts/review`);
+    expect(review.status).toBe(200);
+    expect(review.body.data.contracts.map((c) => c.id)).toEqual([contractId]);
+    expect(review.body.data.can_send).toBe(true);
+    const preview = await buyerClient.get(`/api/v1/arc-v2/${arcId}/contracts/${contractId}/preview`);
+    expect(preview.status).toBe(200);
+    expect(preview.body.data.html).toMatch(/Annual Rate Contract Agreement/);
+
+    const send = await buyerClient.post(`/api/v1/arc-v2/${arcId}/contracts/send`).send({ contract_ids: [contractId] });
+    expect(send.status).toBe(200);
+    const arc = await db.one(`SELECT status FROM tbl_arc WHERE id=$1`, [arcId]);
+    expect(arc.status).toBe("awaiting_vendor_acceptance");
+    const contract = await db.one(`SELECT status FROM tbl_arc_contract WHERE id=$1`, [contractId]);
     expect(contract.status).toBe("awaiting_acceptance");
   });
 
