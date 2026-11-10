@@ -171,12 +171,16 @@ export async function handleArcCommitteeApproval(approvalInstanceId, approverUse
         actorId: approverUserId, payload: { decision: 'approved', approval_instance_id: approvalInstanceId },
         txContext: t,
       });
-      // Generate one contract per awarded vendor.
+      // Generate one DRAFT contract per awarded vendor. The drafts are held for
+      // the buyer to review and send (POST /arc-v2/:id/contracts/send); no
+      // vendor sees or is told about its contract before that.
       const contracts = await generateContractsForArc(arcId, { txContext: t, generatedBy: approverUserId });
-      await arcModel.setStatus(arcId, 'awaiting_vendor_acceptance', {}, t);
+      // No draft at all (every awarded vendor already signed, e.g. a re-issue
+      // that only touched a signed sibling) leaves nothing to review.
+      await arcModel.setStatus(arcId, contracts.length > 0 ? 'contract_generated' : 'awaiting_vendor_acceptance', {}, t);
       await logArcEvent({
         arcId, eventType: ARC_EVENT_TYPES.CONTRACT_GENERATED,
-        actorId: approverUserId, payload: { contract_count: contracts.length },
+        actorId: approverUserId, payload: { contract_count: contracts.length, held_for_review: contracts.length > 0 },
         txContext: t,
       });
     });
@@ -188,10 +192,10 @@ export async function handleArcCommitteeApproval(approvalInstanceId, approverUse
       arcId, eventType: ARC_EVENT_TYPES.COMMITTEE_DECISION,
       actorId: approverUserId, payload: { decision: 'approved', approval_instance_id: approvalInstanceId },
     });
-    // Notify creator that contracts were generated (in-app only)
+    // Tell the creator + commercial evaluators the contract copies are ready
+    // to review and send (in-app). The vendors' "please sign" notification
+    // goes out from sendContracts.
     await notifyArcEvent({ arcId, eventType: ARC_EVENT_TYPES.CONTRACT_GENERATED, actorId: approverUserId, payload: {} });
-    // Notify awarded vendors they must sign (BOTH email) — contract_awaiting_acceptance
-    await notifyArcEvent({ arcId, eventType: ARC_EVENT_TYPES.CONTRACT_AWAITING_ACCEPTANCE, actorId: approverUserId, payload: {} });
   } catch (err) {
     logger.error({ err, approvalInstanceId }, '[committeeController.handleArcCommitteeApproval]');
   }

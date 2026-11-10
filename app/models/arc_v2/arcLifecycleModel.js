@@ -82,7 +82,10 @@ const STAGE_FLOW = {
 };
 
 const ENDED_STATUSES  = ['expired', 'terminated', 'closed_no_award'];
-const ACTIVE_STATUSES = ['contract_generated', 'awaiting_vendor_acceptance', 'contract_active', 'expiring_soon'];
+// contract_generated is NOT active: the committee approved and the contract
+// copies exist as buyer-only drafts, held on Awarding until the buyer sends them.
+const ACTIVE_STATUSES = ['awaiting_vendor_acceptance', 'contract_active', 'expiring_soon'];
+export const CONTRACT_REVIEW_STATUS = 'contract_generated';
 
 function stageImmutableError(stageKey) {
   const err = new Error(`Stage '${stageKey}' is complete and immutable`);
@@ -689,6 +692,10 @@ export function deriveStages(arc, f) {
   let awarding;
   if (!['partial', 'complete'].includes(commercial.state)) {
     awarding = { state: 'locked', reason: 'commercial_incomplete' };
+  } else if (f.committeeApproval?.status === 'APPROVED' && arc.status === CONTRACT_REVIEW_STATUS) {
+    // Committee approved; the contract copies wait here for the buyer to
+    // review and send them. Nothing has reached the vendors yet.
+    awarding = { state: 'active', reason: 'contract_review' };
   } else if (f.committeeApproval?.status === 'APPROVED') {
     awarding = { state: 'complete', reason: 'contracts_generated' };
   } else if (f.committeeApproval?.status === 'PENDING') {
@@ -707,6 +714,8 @@ export function deriveStages(arc, f) {
   let active;
   if (ENDED_STATUSES.includes(arc.status)) {
     active = { state: 'ended', reason: arc.status };
+  } else if (arc.status === CONTRACT_REVIEW_STATUS) {
+    active = { state: 'locked', reason: 'contracts_in_review' };
   } else if (ACTIVE_STATUSES.includes(arc.status)) {
     active = {
       state: 'active',

@@ -546,11 +546,22 @@ describe("ARC lifecycle — stage state machine end-to-end", () => {
     expect(awardingActors.approver.people.map((p) => p.user_id)).not.toContain(ROUND_APPROVER);
   });
 
-  test("8. committee approval completes awarding and activates the contract stage", async () => {
+  test("8a. committee approval holds the contract copies on Awarding for review", async () => {
     const decide = await committeeApproverClient
       .post(`/api/v1/arc-v2/committee/${arcId}/decide`)
       .send({ decision: "approve", comment: "Award confirmed" });
     expect(decide.status).toBe(200);
+
+    const res = await buyerClient.get(`/api/v1/arc-v2/${arcId}/lifecycle`);
+    expect(res.body.data.current_status).toBe("contract_generated");
+    expect(stageOf(res.body, "awarding")).toMatchObject({ state: "active", reason: "contract_review" });
+    expect(stageOf(res.body, "active")).toMatchObject({ state: "locked", reason: "contracts_in_review" });
+    expect(res.body.data.default_stage).toBe("awarding");
+  });
+
+  test("8. sending the copies completes awarding and activates the contract stage", async () => {
+    const send = await buyerClient.post(`/api/v1/arc-v2/${arcId}/contracts/send`).send({});
+    expect(send.status).toBe(200);
 
     const res = await buyerClient.get(`/api/v1/arc-v2/${arcId}/lifecycle`);
     expect(stageOf(res.body, "awarding")).toMatchObject({ state: "complete", reason: "contracts_generated" });

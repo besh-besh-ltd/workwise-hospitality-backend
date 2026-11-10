@@ -212,13 +212,18 @@ function validateSubmittedLines(lines) {
 // Vendor-perspective state of one invitation. Mirrors the requests page's
 // derivation so dashboard counts and the inbox always agree.
 function vendorArcStatus(r) {
-  if (r.contract_status === 'awaiting_acceptance' || r.contract_status === 'generated') return 'awaiting_sign';
+  // A 'generated' contract is the buyer's unsent DRAFT: the vendor must not
+  // see it as awarded or awaiting signature until the buyer sends it, so it
+  // falls through to the ARC status (contract_generated → still evaluating).
+  if (r.contract_status === 'awaiting_acceptance') return 'awaiting_sign';
   if (r.contract_status === 'active' || r.contract_status === 'expiring_soon') return 'active';
   if (r.contract_status === 'expired' || r.contract_status === 'terminated' || r.contract_status === 'declined') return 'past';
   if (r.arc_status === 'floated') return r.quote_submitted_at ? 'submitted' : 'open';
   const EVALUATING = new Set([
     'submission_closed', 'tech_eval_in_progress', 'tech_eval_approved', 'tech_eval_rejected',
     'comm_eval_in_progress', 'comm_eval_finalized', 'committee_review', 'committee_sent_back',
+    // Committee approved; the buyer is still reviewing the contract copies.
+    'committee_approved', 'contract_generated',
   ]);
   if (EVALUATING.has(r.arc_status)) return r.quote_submitted_at ? 'evaluating' : 'past';
   // ARC moved past committee and this vendor holds no contract → not awarded.
@@ -238,7 +243,9 @@ function rangeFloor(range) {
 const VENDOR_SAFE_EVENTS = [
   'floated', 'submission_closed', 'deadline_extended',
   'vendor_submitted', 'vendor_tech_submitted', 'vendor_withdrew', 'vendor_declined',
-  'contract_generated', 'contract_awaiting_acceptance', 'contract_signed',
+  // 'contract_generated' is buyer-internal: the drafts are under buyer review.
+  // The vendor learns of its award from 'contract_awaiting_acceptance' (sent).
+  'contract_awaiting_acceptance', 'contract_signed',
   'contract_active', 'contract_declined',
   'amendment_requested', 'amendment_approved', 'amendment_rejected',
   'amendment_live', 'amendment_ended',
@@ -361,7 +368,8 @@ export async function getVendorDashboard(req, res) {
       counts[s] = (counts[s] || 0) + 1;
       if (['awaiting_sign', 'open', 'submitted', 'evaluating'].includes(s)) {
         needsAction.push({
-          arc_id: r.arc_id, contract_id: r.contract_id, arc_number: r.arc_number,
+          // Never hand out the id of an unsent draft contract.
+          arc_id: r.arc_id, contract_id: r.contract_status === 'generated' ? null : r.contract_id, arc_number: r.arc_number,
           title: r.title, category_title: r.category_title, hotel_name: r.hotel_name,
           status: s, submission_end_at: r.submission_end_at, awaiting_until: r.awaiting_until,
         });
@@ -443,7 +451,7 @@ export async function listRequests(req, res) {
          FROM tbl_arc a
          JOIN tbl_arc_invitation i ON i.arc_id = a.id AND i.vendor_id = $1
          LEFT JOIN tbl_arc_quote q ON q.arc_id = a.id AND q.vendor_id = $1
-        WHERE a.status IN ('floated','submission_closed','tech_eval_in_progress','comm_eval_in_progress','committee_review','committee_approved','awaiting_vendor_acceptance','contract_active')
+        WHERE a.status IN ('floated','submission_closed','tech_eval_in_progress','comm_eval_in_progress','committee_review','committee_approved','contract_generated','awaiting_vendor_acceptance','contract_active')
           -- Sr 27 (Option C): a floated-but-not-yet-open ARC (submission_start_at
           -- still in the IST future) must not appear in the vendor's list. Scoped
           -- to status='floated' — every later status necessarily has a past

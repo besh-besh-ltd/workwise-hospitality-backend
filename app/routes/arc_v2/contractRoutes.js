@@ -3,9 +3,15 @@ import passport from '../../middleware/passport.js';
 import { acl } from '../../helper/common.js';
 import * as arcController from '../../controllers/arc_v2/arcController.js';
 import * as arcContractController from '../../controllers/arc_v2/arcContractController.js';
+import { requireArcPermission } from '../../middleware/arcPermission.js';
 
 const r = Router();
 const passportSignIn = passport.authenticate('jwtUsr', { session: false });
+// Contract copies carry awarded rates: commercial read to review, commercial
+// write (the evaluator who finalizes the award) or ARC admin to send. Checked
+// in the ARC's own scope (hotel/department/process from tbl_arc).
+const COMM_READ  = requireArcPermission(['arc-comm.read', 'arc-comm.evaluate', 'arc.admin']);
+const COMM_WRITE = requireArcPermission(['arc-comm.evaluate', 'arc.admin']);
 
 // All routes here require auth; acl gates writes to buyer roles. Per
 // architectural memory: use acl(), not can() — the latter relies on
@@ -35,6 +41,11 @@ r.get('/:id/active-summary',   passportSignIn, acl([2, 8]), arcContractControlle
 r.get('/:id/publish-approval', passportSignIn, acl([2, 8]), arcController.getPublishApproval);
 // Bundle of the contracted vendor's uploaded compliance docs (GST/PAN/cheque…).
 r.get('/contracts/:contractId/vendor-documents', passportSignIn, acl([2, 8]), arcContractController.getVendorDocumentsBundle);
+// Contract copies held for review after committee approval (drafts), the
+// exact document each vendor will sign, and the send action.
+r.get('/:id/contracts/review',              passportSignIn, acl([2, 8]), COMM_READ,  arcContractController.getContractReview);
+r.get('/:id/contracts/:contractId/preview', passportSignIn, acl([2, 8]), COMM_READ,  arcContractController.getContractPreview);
+r.post('/:id/contracts/send',               passportSignIn, acl([2, 8]), COMM_WRITE, arcContractController.sendContracts);
 
 // Mutations — creator + ARC-roles only.
 r.post('/',                    passportSignIn, acl([2, 8]), arcController.createDraft);
