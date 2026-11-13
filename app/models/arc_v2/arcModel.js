@@ -193,14 +193,29 @@ const arcModel = {
    * rollback is an acceptable gap, a duplicated one is not. UNIQUE(arc_number)
    * on tbl_arc remains the last-line-of-defence.
    *
+   * The counter also never hands out a number already in tbl_arc: the next
+   * value is one past the larger of the counter and the highest
+   * `ARC-<fy>-<n>` already stored. Rows can get ahead of the counter (a
+   * hand-typed manual-entry number, seeded or copied data, a reset counter
+   * row), and a plain +1 would then fail on UNIQUE(arc_number). That failure
+   * rolls the counter back too, so every later create would fail the same way.
+   *
    * @param {string} fy - Indian FY label, e.g. "2026-27" (see helper/financialYear.js)
    * @param {*} [txContext] - tx runner; falls back to the plain `db` if omitted
    */
   nextArcNumber: async (fy, txContext = null) => {
     const runner = txContext || db;
+    // Digits capped at 9 so a hand-typed huge suffix can't overflow the int.
     const { last_seq } = await runner.one(
-      `INSERT INTO tbl_arc_number_seq (fy, last_seq) VALUES ($1, 1)
-       ON CONFLICT (fy) DO UPDATE SET last_seq = tbl_arc_number_seq.last_seq + 1
+      `WITH taken AS (
+         SELECT COALESCE(MAX(substring(arc_number FROM char_length($1) + 6)::int), 0) AS max_seq
+           FROM tbl_arc
+          WHERE arc_number ~ ('^ARC-' || $1 || '-[0-9]{1,9}$')
+       )
+       INSERT INTO tbl_arc_number_seq (fy, last_seq)
+       SELECT $1, max_seq + 1 FROM taken
+       ON CONFLICT (fy) DO UPDATE
+         SET last_seq = GREATEST(tbl_arc_number_seq.last_seq + 1, EXCLUDED.last_seq)
        RETURNING last_seq`,
       [fy]
     );
