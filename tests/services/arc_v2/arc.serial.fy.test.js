@@ -32,6 +32,8 @@ describe("ARC v2 — contract serial embeds Financial Year", () => {
   // them, and distinct from currentFinancialYearIst().
   const RESET_OLD_FY = "2091-92";
   const RESET_NEW_FY = "2092-93";
+  // FY used only by the "counter behind existing numbers" tests below.
+  const DRIFT_FY = "2093-94";
 
   beforeAll(async () => {
     await db.none(`UPDATE tbl_users SET user_type = 2 WHERE id = $1`, [BUYER]);
@@ -45,7 +47,7 @@ describe("ARC v2 — contract serial embeds Financial Year", () => {
       await db.none(`DELETE FROM tbl_arc_event_log WHERE arc_id = ANY($1::int[])`, [createdArcIds]);
       await db.none(`DELETE FROM tbl_arc WHERE id = ANY($1::int[])`, [createdArcIds]);
     }
-    await db.none(`DELETE FROM tbl_arc_number_seq WHERE fy = ANY($1::text[])`, [[RESET_OLD_FY, RESET_NEW_FY]]);
+    await db.none(`DELETE FROM tbl_arc_number_seq WHERE fy = ANY($1::text[])`, [[RESET_OLD_FY, RESET_NEW_FY, DRIFT_FY]]);
   });
 
   async function createLive(title) {
@@ -175,5 +177,88 @@ describe("ARC v2 — contract serial embeds Financial Year", () => {
     // And the old FY's row is untouched by the new FY's activity.
     const oldFyAfter = await db.one(`SELECT last_seq FROM tbl_arc_number_seq WHERE fy = $1`, [RESET_OLD_FY]);
     expect(Number(oldFyAfter.last_seq)).toBe(5);
+  });
+
+  // ── 7. Counter behind numbers already in tbl_arc ───────────────────────────
+  // A hand-typed manual number, copied/seeded data or a reset counter row can
+  // leave tbl_arc holding ARC-<fy>-<n> above the counter. A plain +1 then hit
+  // UNIQUE(arc_number) on every create, and the rollback put the counter back,
+  // so no rate contract could be created again ("duplicate key value violates
+  // unique constraint tbl_arc_arc_number_key" at Submit for publish approval).
+  test("live create when the counter is behind an existing number → next free number, no 500", async () => {
+    const existing = await createLive("Serial FY — drift anchor");
+    const [, fy, seq] = existing.arc_number.match(ARC_NUMBER_RE);
+    // Put the counter one behind, so a plain +1 would mint `existing` again.
+    await db.none(`UPDATE tbl_arc_number_seq SET last_seq = $2 WHERE fy = $1`, [fy, Number(seq) - 1]);
+
+    const res = await client.post("/api/v1/arc-v2").send({
+      title: "Serial FY — after drift", category_id: CATEGORY, hotel_id: HOTEL, department_id: DEPT,
+    });
+    expect(res.status).toBe(200);
+    createdArcIds.push(res.body.data.arc.id);
+    const [, fy2, seq2] = res.body.data.arc.arc_number.match(ARC_NUMBER_RE);
+    expect(fy2).toBe(fy);
+    expect(Number(seq2)).toBeGreaterThan(Number(seq));
+
+    // And the next one carries on from there, one up.
+    const next = await createLive("Serial FY — after drift 2");
+    expect(Number(next.arc_number.match(ARC_NUMBER_RE)[2])).toBe(Number(seq2) + 1);
+  });
+
+  // Rows already in tbl_arc in the automatic format but ahead of the counter
+  // (copied or seeded data, or typed on manual entry before it was refused).
+  let seedSeq = 0;
+  async function storedNumber(arcNumber) {
+    const res = await createManual({ arcNumber: `SEED-${Date.now()}-${++seedSeq}`, createdAt: "2019-06-15T00:00:00+05:30" });
+    expect(res.status).toBe(200);
+    createdArcIds.push(res.body.data.arc.id);
+    await db.none(`UPDATE tbl_arc SET arc_number = $2 WHERE id = $1`, [res.body.data.arc.id, arcNumber]);
+  }
+
+  test("a stored FY-format number ahead of the counter is skipped, with or without a counter row", async () => {
+    // No counter row yet for DRIFT_FY, but 0007 is already in tbl_arc.
+    await storedNumber(`ARC-${DRIFT_FY}-0007`);
+
+    expect(await db.tx((t) => arcModel.nextArcNumber(DRIFT_FY, t))).toBe(`ARC-${DRIFT_FY}-0008`);
+
+    // Counter row exists but is behind (reset to 2): still skips past 0008.
+    await db.none(`UPDATE tbl_arc_number_seq SET last_seq = 2 WHERE fy = $1`, [DRIFT_FY]);
+    const after = await db.tx((t) => arcModel.nextArcNumber(DRIFT_FY, t));
+    expect(after).toBe(`ARC-${DRIFT_FY}-0008`); // 0008 was minted, not inserted, so it is free
+
+    // Counter ahead of every stored number: plain +1, gaps are fine.
+    expect(await db.tx((t) => arcModel.nextArcNumber(DRIFT_FY, t))).toBe(`ARC-${DRIFT_FY}-0009`);
+  });
+
+  test("numbers that are not ARC-<fy>-<1..9 digits> never move the counter", async () => {
+    const before = await db.one(`SELECT last_seq FROM tbl_arc_number_seq WHERE fy = $1`, [DRIFT_FY]);
+    await storedNumber(`ARC-${DRIFT_FY}-99999999999`); // too many digits to be a counter value
+    for (const n of [`ARC-${DRIFT_FY}-0500-B`, `XARC-${DRIFT_FY}-0600`]) {
+      const res = await createManual({ arcNumber: n, createdAt: "2019-06-15T00:00:00+05:30" });
+      expect(res.status).toBe(200);
+      createdArcIds.push(res.body.data.arc.id);
+    }
+    const minted = await db.tx((t) => arcModel.nextArcNumber(DRIFT_FY, t));
+    expect(minted).toBe(`ARC-${DRIFT_FY}-${String(Number(before.last_seq) + 1).padStart(4, "0")}`);
+  });
+
+  // ── 8. Manual entry may not type a number in the automatic format ──────────
+  // Such a number would collide with one the counter is about to hand out, or
+  // (since the counter skips past stored numbers) push every later number for
+  // every company past it.
+  test("manual entry refuses a typed ARC-<fy>-<n> number and leaves the counter alone", async () => {
+    const fy = currentFinancialYearIst();
+    const before = await db.oneOrNone(`SELECT last_seq FROM tbl_arc_number_seq WHERE fy = $1`, [fy]);
+    for (const n of [`ARC-${fy}-0001`, `ARC-${fy}-999999999`, `ARC-${DRIFT_FY}-0042`, ` arc-${fy}-0042 `]) {
+      const res = await createManual({ arcNumber: n, createdAt: "2019-06-15T00:00:00+05:30" });
+      expect(res.status).toBe(400);
+      expect(res.body.message).toMatch(/given automatically/);
+    }
+    const after = await db.oneOrNone(`SELECT last_seq FROM tbl_arc_number_seq WHERE fy = $1`, [fy]);
+    expect(after).toEqual(before);
+    // Own reference formats are still accepted as typed (see test 5), e.g. ARC-2024-014.
+    const own = await createManual({ arcNumber: `ARC-2024-${Date.now() % 1000}`, createdAt: "2019-06-15T00:00:00+05:30" });
+    expect(own.status).toBe(200);
+    createdArcIds.push(own.body.data.arc.id);
   });
 });
