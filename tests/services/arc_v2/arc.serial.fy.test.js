@@ -205,11 +205,19 @@ describe("ARC v2 — contract serial embeds Financial Year", () => {
     expect(Number(next.arc_number.match(ARC_NUMBER_RE)[2])).toBe(Number(seq2) + 1);
   });
 
-  test("a hand-typed FY-format number ahead of the counter is skipped, with or without a counter row", async () => {
-    // No counter row yet for DRIFT_FY, but a manual entry already took 0007.
-    const typed = await createManual({ arcNumber: `ARC-${DRIFT_FY}-0007`, createdAt: "2019-06-15T00:00:00+05:30" });
-    expect(typed.status).toBe(200);
-    createdArcIds.push(typed.body.data.arc.id);
+  // Rows already in tbl_arc in the automatic format but ahead of the counter
+  // (copied or seeded data, or typed on manual entry before it was refused).
+  let seedSeq = 0;
+  async function storedNumber(arcNumber) {
+    const res = await createManual({ arcNumber: `SEED-${Date.now()}-${++seedSeq}`, createdAt: "2019-06-15T00:00:00+05:30" });
+    expect(res.status).toBe(200);
+    createdArcIds.push(res.body.data.arc.id);
+    await db.none(`UPDATE tbl_arc SET arc_number = $2 WHERE id = $1`, [res.body.data.arc.id, arcNumber]);
+  }
+
+  test("a stored FY-format number ahead of the counter is skipped, with or without a counter row", async () => {
+    // No counter row yet for DRIFT_FY, but 0007 is already in tbl_arc.
+    await storedNumber(`ARC-${DRIFT_FY}-0007`);
 
     expect(await db.tx((t) => arcModel.nextArcNumber(DRIFT_FY, t))).toBe(`ARC-${DRIFT_FY}-0008`);
 
@@ -224,12 +232,33 @@ describe("ARC v2 — contract serial embeds Financial Year", () => {
 
   test("numbers that are not ARC-<fy>-<1..9 digits> never move the counter", async () => {
     const before = await db.one(`SELECT last_seq FROM tbl_arc_number_seq WHERE fy = $1`, [DRIFT_FY]);
-    for (const n of [`ARC-${DRIFT_FY}-99999999999`, `ARC-${DRIFT_FY}-0500-B`, `XARC-${DRIFT_FY}-0600`]) {
+    await storedNumber(`ARC-${DRIFT_FY}-99999999999`); // too many digits to be a counter value
+    for (const n of [`ARC-${DRIFT_FY}-0500-B`, `XARC-${DRIFT_FY}-0600`]) {
       const res = await createManual({ arcNumber: n, createdAt: "2019-06-15T00:00:00+05:30" });
       expect(res.status).toBe(200);
       createdArcIds.push(res.body.data.arc.id);
     }
     const minted = await db.tx((t) => arcModel.nextArcNumber(DRIFT_FY, t));
     expect(minted).toBe(`ARC-${DRIFT_FY}-${String(Number(before.last_seq) + 1).padStart(4, "0")}`);
+  });
+
+  // ── 8. Manual entry may not type a number in the automatic format ──────────
+  // Such a number would collide with one the counter is about to hand out, or
+  // (since the counter skips past stored numbers) push every later number for
+  // every company past it.
+  test("manual entry refuses a typed ARC-<fy>-<n> number and leaves the counter alone", async () => {
+    const fy = currentFinancialYearIst();
+    const before = await db.oneOrNone(`SELECT last_seq FROM tbl_arc_number_seq WHERE fy = $1`, [fy]);
+    for (const n of [`ARC-${fy}-0001`, `ARC-${fy}-999999999`, `ARC-${DRIFT_FY}-0042`, ` arc-${fy}-0042 `]) {
+      const res = await createManual({ arcNumber: n, createdAt: "2019-06-15T00:00:00+05:30" });
+      expect(res.status).toBe(400);
+      expect(res.body.message).toMatch(/given automatically/);
+    }
+    const after = await db.oneOrNone(`SELECT last_seq FROM tbl_arc_number_seq WHERE fy = $1`, [fy]);
+    expect(after).toEqual(before);
+    // Own reference formats are still accepted as typed (see test 5), e.g. ARC-2024-014.
+    const own = await createManual({ arcNumber: `ARC-2024-${Date.now() % 1000}`, createdAt: "2019-06-15T00:00:00+05:30" });
+    expect(own.status).toBe(200);
+    createdArcIds.push(own.body.data.arc.id);
   });
 });
