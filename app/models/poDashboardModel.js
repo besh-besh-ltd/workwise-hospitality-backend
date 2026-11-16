@@ -1356,16 +1356,24 @@ export async function getPODetailFull(po_id, scope, viewer = null) {
   // what is missing. Call-off POs are sourced from an ARC/MR, not from RFQ
   // finalization, so the question does not apply and coverage is reported as
   // complete.
+  //
+  // Products the buyer closed without award (tbl_rfq_products.closed_at) are
+  // not counted: nothing will be finalized on them, so they never make this
+  // PO incomplete. products_closed says how many were left out.
   let productCoverage = {
     rfq_product_count: 0,
     po_product_count: 0,
+    products_closed: 0,
     covers_all_products: true,
     mergeable_draft_count: 0,
   };
   if (!po.is_call_off && po.rfq_id) {
     const cov = await db.one(
       `SELECT
-         (SELECT count(*)::int FROM tbl_rfq_products rp WHERE rp.rfq_id = $2) AS rfq_product_count,
+         (SELECT count(*)::int FROM tbl_rfq_products rp
+           WHERE rp.rfq_id = $2 AND rp.closed_at IS NULL) AS rfq_product_count,
+         (SELECT count(*)::int FROM tbl_rfq_products rp
+           WHERE rp.rfq_id = $2 AND rp.closed_at IS NOT NULL) AS products_closed,
          (SELECT count(DISTINCT pop.rfq_product_id)::int
             FROM tbl_purchase_order_product pop
            WHERE pop.purchase_order_id = $1) AS po_product_count,
@@ -1386,6 +1394,7 @@ export async function getPODetailFull(po_id, scope, viewer = null) {
     productCoverage = {
       rfq_product_count: cov.rfq_product_count,
       po_product_count: cov.po_product_count,
+      products_closed: cov.products_closed,
       // Only meaningful while THIS PO is itself a draft — once it has moved on
       // it can no longer participate in a merge.
       mergeable_draft_count: po.status === "draft" ? cov.mergeable_draft_count : 0,

@@ -1595,8 +1595,9 @@ export const initiatePurchaseOrder = async (po_id, initiator, t) => {
  *
  *   1. Every line item in `tbl_rfq_products` (one per (product_variant_id,
  *      variant) on the RFQ) has at least one matching row in
- *      `tbl_quote_finalization`. Multi-vendor split awards count as
- *      finalized; the only thing that blocks is an unawarded line item.
+ *      `tbl_quote_finalization`, or was closed without award by the buyer
+ *      (`closed_at`). Multi-vendor split awards count as finalized; the only
+ *      thing that blocks is an item still open for award.
  *
  *   2. No NEGOTIATION_QUOTE approval instance for any of this RFQ's
  *      products is still PENDING. This is the load-bearing condition that
@@ -1617,6 +1618,7 @@ export const isRfqFullyAwarded = async (rfq_id, dbCtx = db) => {
          SELECT 1
          FROM tbl_rfq_products rp
          WHERE rp.rfq_id = $1
+           AND rp.closed_at IS NULL
            AND NOT EXISTS (
              SELECT 1 FROM tbl_quote_finalization qf
              WHERE qf.rfq_id = $1

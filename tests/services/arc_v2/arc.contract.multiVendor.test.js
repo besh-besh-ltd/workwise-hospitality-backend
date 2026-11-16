@@ -1,8 +1,9 @@
 // ARC v2 — Multi-vendor contract generation + OTP sign + ARC activation.
 //
 // Proves:
-//   1. handleArcCommitteeApproval generates one contract per awarded vendor
-//      with committed_qty = allocated_qty per line.
+//   1. handleArcCommitteeApproval generates one DRAFT contract per awarded
+//      vendor with committed_qty = allocated_qty per line; the buyer then
+//      reviews and sends them (POST /:id/contracts/send).
 //   2. The vendor OTP-sign flow flips the contract status to 'active' and
 //      hash-pins the document.
 //   3. The parent ARC moves to 'contract_active' only when EVERY vendor
@@ -16,6 +17,7 @@ import { httpClient } from "../../helpers/http.js";
 import { db } from "../../setup/db.js";
 import { IDS } from "../../fixtures/ids.js";
 import { TEST_CATEGORIES } from "../../fixtures/vendors.js";
+import { seedArcEvalPerms, cleanupArcEvalPerms } from "../../helpers/arcEvalPerms.js";
 
 const HC     = IDS.hospitality.A;
 const HOTEL  = IDS.hotels.A1;
@@ -42,6 +44,8 @@ describe("ARC v2 — multi-vendor contract generation + OTP sign", () => {
     await db.none(`UPDATE tbl_users SET user_type = 3 WHERE id IN ($1, $2)`,
       [VENDOR_A, VENDOR_B]);
 
+    // Sending the reviewed contract copies needs arc-comm.evaluate.
+    await seedArcEvalPerms(db, [BUYER], { hospitality: HC, hotel: HOTEL });
     buyerClient   = await httpClient(BUYER);
     vendorAClient = await httpClient(VENDOR_A);
     vendorBClient = await httpClient(VENDOR_B);
@@ -127,6 +131,7 @@ describe("ARC v2 — multi-vendor contract generation + OTP sign", () => {
       `DELETE FROM tbl_category_department WHERE category_id = $1 AND department_id = $2`,
       [CATEGORY, DEPT]
     );
+    await cleanupArcEvalPerms(db, [BUYER]);
   });
 
   test("committee post-approval hook generates one contract per awarded vendor", async () => {
@@ -145,7 +150,9 @@ describe("ARC v2 — multi-vendor contract generation + OTP sign", () => {
     expect(contracts.length).toBe(2);
     const vendorIds = contracts.map(c => c.vendor_id).sort((a, b) => a - b);
     expect(vendorIds).toEqual([VENDOR_A, VENDOR_B].sort((a, b) => a - b));
-    expect(contracts.every(c => c.status === 'awaiting_acceptance')).toBe(true);
+    // Born as buyer-only drafts, held for review.
+    expect(contracts.every(c => c.status === 'generated')).toBe(true);
+    expect(contracts.every(c => c.awaiting_until === null)).toBe(true);
 
     // Each contract has one line with committed_qty matching the allocation.
     for (const c of contracts) {
@@ -157,6 +164,27 @@ describe("ARC v2 — multi-vendor contract generation + OTP sign", () => {
       expect(Number(lines[0].unit_rate)).toBe(c.vendor_id === VENDOR_A ? 90 : 95);
     }
 
+    const arc = await db.one(`SELECT status FROM tbl_arc WHERE id = $1`, [arcId]);
+    expect(arc.status).toBe('contract_generated');
+  });
+
+  test("vendors cannot open or sign a draft before the buyer sends it", async () => {
+    const contracts = await db.any(`SELECT * FROM tbl_arc_contract WHERE arc_id = $1`, [arcId]);
+    const contractA = contracts.find(c => c.vendor_id === VENDOR_A);
+    expect((await vendorAClient.get(`/api/v1/arc-v2/vendor/contracts/${contractA.id}`)).status).toBe(404);
+    expect((await vendorAClient.post(`/api/v1/arc-v2/vendor/contracts/${contractA.id}/otp/request`).send({})).status).toBe(409);
+    const pending = await vendorAClient.get(`/api/v1/arc-v2/vendor/pending-acceptance`);
+    expect(pending.body.data.contracts.map(c => c.id)).not.toContain(contractA.id);
+  });
+
+  test("buyer sends both contract copies — contracts awaiting acceptance, ARC awaiting vendors", async () => {
+    const send = await buyerClient.post(`/api/v1/arc-v2/${arcId}/contracts/send`).send({});
+    expect(send.status).toBe(200);
+    expect(send.body.data.sent).toHaveLength(2);
+    expect(send.body.data.arc_status).toBe('awaiting_vendor_acceptance');
+    const contracts = await db.any(`SELECT * FROM tbl_arc_contract WHERE arc_id = $1`, [arcId]);
+    expect(contracts.every(c => c.status === 'awaiting_acceptance')).toBe(true);
+    expect(contracts.every(c => c.awaiting_until !== null)).toBe(true);
     const arc = await db.one(`SELECT status FROM tbl_arc WHERE id = $1`, [arcId]);
     expect(arc.status).toBe('awaiting_vendor_acceptance');
   });

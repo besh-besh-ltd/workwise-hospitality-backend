@@ -249,6 +249,30 @@ describe("PR derived progress across the RFQ / PO lifecycle", () => {
     expect(await headerProgress(pr)).toBe("partly_ordered");
   });
 
+  it("rfq item closed without award, RFQ still open → that line back in the pool; the awarded one stays ordered", async () => {
+    const pr = await approved([catalogLine(V.variant_id), catalogLine(W.variant_id)], "progress-item-closed");
+    const [awarded, unawarded] = pr.line_ids;
+    const { rfq_id: rfqId } = await convert(pr.line_ids);
+    await setRfq(rfqId, 1, 1);
+    await po(rfqId, awarded, "approved");
+    expect((await lineOf(pr, unawarded)).progress).toBe("in_sourcing");
+
+    // The item's closure, as POST /rfq/:id/items/close writes it.
+    await db.none(
+      `UPDATE tbl_rfq_products
+          SET closed_at = now(), closed_by = $2, close_reason_code = 'no_quotes_received'
+        WHERE id = $1`,
+      [await productOf(unawarded), BUY]
+    );
+
+    expect((await lineOf(pr, awarded)).progress).toBe("ordered");
+    const line = await lineOf(pr, unawarded);
+    expect(line.progress).toBe("in_pool");
+    expect(line.links[0]).toMatchObject({ rfq_id: rfqId, live: false, po: [] });
+    expect(await poolLineIds(pr)).toEqual([unawarded]);
+    expect(await headerProgress(pr)).toBe("partly_ordered");
+  });
+
   it("rfq-approval-rejected → still in_sourcing: pending approval, then back to an unpublished draft", async () => {
     const pr = await approved([catalogLine(V.variant_id)], "progress-approval-rejected");
     const lineId = pr.line_ids[0];

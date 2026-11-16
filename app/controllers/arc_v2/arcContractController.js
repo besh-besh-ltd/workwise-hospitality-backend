@@ -2,7 +2,7 @@ import db from '../../config/dbConn.js';
 import arcModel from '../../models/arc_v2/arcModel.js';
 import rbacModel from '../../models/rbacModel.js';
 import arcEvalModel, { normalizeArcCharges } from '../../models/arc_v2/arcEvaluationModel.js';
-import arcContractModel from '../../models/arc_v2/arcContractModel.js';
+import arcContractModel, { DRAFT_CONTRACT_STATUS } from '../../models/arc_v2/arcContractModel.js';
 import arcContractClarificationModel from '../../models/arc_v2/arcContractClarificationModel.js';
 import arcAmendmentModel from '../../models/arc_v2/arcAmendmentModel.js';
 import arcAmendmentDocumentModel from '../../models/arc_v2/arcAmendmentDocumentModel.js';
@@ -18,6 +18,7 @@ import { userCanAccessArc, userCanReadArc } from '../../helper/arc_v2/arcScope.j
 import arcHotelModel from '../../models/arc_v2/arcHotelModel.js';
 import { fulfilmentAssignments, ROUTABLE_CONTRACT_STATUSES } from '../../services/vendorNetwork/subjects/arcHotelSubject.js';
 import { supplierDetailsFor } from '../../helper/gstState.js';
+import { heldArcPermissions } from '../../middleware/arcPermission.js';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
@@ -74,9 +75,15 @@ function amountInWords(value) {
 // Replaces the legacy lineFreight() which used the old {value,type:'pct'|'absolute'}
 // shape. Now routes through pricingEngine.calculateLineTotal (same engine the
 // vendor's quote preview uses) so the document totals always match the stored quote.
-// Returns { base, base_tax, chargesTotal, allIn, chargesDisplay } where:
-//   allIn = base + base_tax + chargesTotal  (engine `total`)
-//   chargesDisplay = ₹ string for non-zero aggregate freight/charges
+// Returns { base, base_tax, chargesTotal, chargesTax, rateExclTax, allIn, chargesDisplay }:
+//   chargesTotal = Σ charge amounts BEFORE tax (freight etc.)
+//   chargesTax   = GST on those charges
+//   rateExclTax  = base + chargesTotal — the per-unit awarded rate EXCLUDING GST
+//   allIn        = base + base_tax + charges incl. their tax (engine `total`)
+//   chargesDisplay = ₹ string for non-zero freight/charges (pre-tax amounts)
+// The Schedule of Rates is stated exclusive of tax (GST is charged extra on the
+// invoice), so it is built from rateExclTax. It used to print allIn, which put
+// GST inside the "awarded rate" and the "Value (excl. tax)" total.
 function lineEngineOut(l) {
   let charges = l.charges;
   if (typeof charges === 'string') { try { charges = JSON.parse(charges); } catch (_) { charges = null; } }
@@ -95,7 +102,11 @@ function lineEngineOut(l) {
     })),
   };
   const out = pricingEngine.calculateLineTotal(engineInput);
-  const chargesTotal = out.charges_total;
+  const r2 = (n) => Math.round(Number(n || 0) * 100) / 100;
+  // The engine's charges_total includes each charge's tax; the schedule needs
+  // the pre-tax amounts.
+  const chargesTotal = r2(out.charges.reduce((sum, c) => sum + Number(c.amount || 0), 0));
+  const chargesTax = r2(Number(out.charges_total || 0) - chargesTotal);
   // Build a human-readable display for the charges column.
   let chargesDisplay = '';
   if (chargesTotal > 0 && out.charges.length > 0) {
@@ -105,6 +116,8 @@ function lineEngineOut(l) {
     base:           out.base,
     base_tax:       out.base_tax,
     chargesTotal,
+    chargesTax,
+    rateExclTax:    r2(Number(out.base || 0) + chargesTotal),
     allIn:          out.total,  // base + base_tax + all charges (incl. charge taxes)
     chargesDisplay,
   };
@@ -139,13 +152,14 @@ export function renderContractDocumentHtml(ctx, vendor, lines, { signed = false,
   let grand = 0;
   const rows = lines.map((l, i) => {
     const basic = Number(l.unit_rate || 0);
-    // Phase 2 — engine-computed per-unit all-in price (base + base_tax + charges).
+    // Engine-computed per-unit pricing. The awarded rate and the value are
+    // EXCLUSIVE of GST (basic rate + pre-tax freight/charges), matching the
+    // column headings, the total's label and clause 2's "GST charged extra".
     const engine = lineEngineOut(l);
     const frtDisplay = engine.chargesTotal > 0 ? inr(engine.chargesTotal) : '—';
-    // all-in per unit = engine.allIn (base + tax + charges at qty=1)
-    const allInPerUnit = engine.allIn;
+    const ratePerUnit = engine.rateExclTax;
     const qty = Number(l.committed_qty || 0);
-    const value = allInPerUnit * qty;
+    const value = Math.round(ratePerUnit * qty * 100) / 100;
     grand += value;
     return `<tr>
       <td class="c">${i + 1}</td>
@@ -153,7 +167,7 @@ export function renderContractDocumentHtml(ctx, vendor, lines, { signed = false,
       <td class="c">${esc(l.uom || '—')}</td>
       <td class="r">${inr(basic)}</td>
       <td class="r">${frtDisplay}</td>
-      <td class="r"><strong>${inr(allInPerUnit)}</strong></td>
+      <td class="r"><strong>${inr(ratePerUnit)}</strong></td>
       <td class="r">${Number(l.gst_pct ?? 0)}%</td>
       <td class="r">${qty.toLocaleString('en-IN')}</td>
       <td class="r"><strong>${inr(value)}</strong></td>
@@ -457,8 +471,6 @@ export async function generateContractsForArc(arcId, { txContext, generatedBy })
   }
 
   const arc = await arcModel.getById(arcId, t);
-  const acceptanceWindow = new Date();
-  acceptanceWindow.setDate(acceptanceWindow.getDate() + 7); // default 7-day window
   const contracts = [];
 
   // On a clarification-driven REGENERATION a sibling vendor on this ARC may
@@ -475,11 +487,15 @@ export async function generateContractsForArc(arcId, { txContext, generatedBy })
     const contract = await arcContractModel.createContract({
       arc_id:          arcId,
       vendor_id:       vendorId,
+      // Born a buyer-only DRAFT: the buyer reviews the contract copy and sends
+      // it (sendContracts → awaiting_acceptance, which also starts the 7-day
+      // acceptance window). Until then the vendor cannot see or sign it.
+      status:          DRAFT_CONTRACT_STATUS,
       // The draft PDF is rendered + uploaded to S3 right after this tx commits
       // (generateContractPdfsForArc) — kept out of the tx so a slow render
       // never holds the approval transaction open.
       document_s3_url: null,
-      awaiting_until:  acceptanceWindow,
+      awaiting_until:  null,
     }, t);
 
     for (const award of vendorAwards) {
@@ -630,6 +646,9 @@ export async function getContractDetail(req, res) {
     const vendorUserId = req.user?.id;
     const contract = await arcContractModel.getById(id);
     if (!contract) return bad(res, 404, 'Contract not found', 2);
+    // An unsent DRAFT (buyer still reviewing the copy) does not exist yet as far
+    // as any vendor is concerned — answer exactly like a missing contract.
+    if (contract.status === DRAFT_CONTRACT_STATUS) return bad(res, 404, 'Contract not found', 2);
     // Tenant guard — a vendor reads its own contract, or (Vendor Networks) the hotels of
     // it that it fulfils as a member entity of the contract vendor's network, or has been
     // asked to fulfil (a PENDING assignment: it reviews the contract before accepting).
@@ -820,6 +839,10 @@ export async function verifyOtp(req, res) {
     const contract = await arcContractModel.getById(id);
     if (!contract) return bad(res, 404, 'Contract not found', 2);
     if (contract.vendor_id !== vendorUserId) return bad(res, 403, 'Not the contracted vendor');
+    // Only a SENT contract can be signed. An OTP issued while it was awaiting
+    // acceptance must not sign it after it was pulled back to a draft (a
+    // clarification re-issue) or moved on.
+    if (contract.status !== 'awaiting_acceptance') return bad(res, 409, `Contract not awaiting acceptance (status=${contract.status})`);
     const result = await arcContractModel.verifyOtp(id, vendorUserId, code);
     if (!result.ok) return bad(res, 400, `OTP verification failed: ${result.reason}`);
 
@@ -902,16 +925,31 @@ export async function declineContract(req, res) {
     const contract = await arcContractModel.getById(id);
     if (!contract) return bad(res, 404, 'Contract not found', 2);
     if (contract.vendor_id !== vendorUserId) return bad(res, 403, 'Not the contracted vendor');
+    if (contract.status === DRAFT_CONTRACT_STATUS) return bad(res, 404, 'Contract not found', 2);
+    // Only a contract that was sent and is waiting on the vendor can be declined
+    // (not a signed, expired or terminated one).
+    if (contract.status !== 'awaiting_acceptance') {
+      return bad(res, 409, `Contract not awaiting acceptance (status=${contract.status})`);
+    }
     // respond AFTER the commit — never inside db.tx, or the caller can read
     // pre-commit state on its next request (mirrors verifyOtp above).
     const updated = await db.tx(async (t) => {
-      const row = await arcContractModel.setStatus(id, 'declined', { terminated_reason: reason }, t);
+      // Guarded on the from-status: a concurrent sign/decline wins once.
+      const row = await t.oneOrNone(
+        `UPDATE tbl_arc_contract
+            SET status = 'declined', terminated_reason = COALESCE($2, terminated_reason), updated_at = CURRENT_TIMESTAMP
+          WHERE id = $1 AND status = 'awaiting_acceptance'
+        RETURNING *`,
+        [id, reason]
+      );
+      if (!row) return null;
       await logArcEvent({
         arcId: contract.arc_id, eventType: ARC_EVENT_TYPES.CONTRACT_DECLINED,
         actorId: vendorUserId, payload: { contract_id: id, reason }, txContext: t,
       });
       return row;
     });
+    if (!updated) return bad(res, 409, 'Contract is no longer awaiting acceptance');
     ok(res, { contract: updated }, 'Contract declined');
     // Notify creator + comm evaluators (BOTH email) post-commit
     await notifyArcEvent({ arcId: contract.arc_id, eventType: ARC_EVENT_TYPES.CONTRACT_DECLINED, actorId: vendorUserId, payload: {} });
@@ -1079,6 +1117,214 @@ export async function getVendorDocumentsBundle(req, res) {
     return ok(res, { vendor_name: contract.vendor_name, vendor_id: vendorId, files });
   } catch (err) {
     logger.error({ err }, '[contractController.getVendorDocumentsBundle]');
+    return bad(res, 500, err.message || 'Internal error', 3);
+  }
+}
+
+// ============================================================
+// Buyer-side: review the contract copies, then send them.
+//
+// The committee approval generates one DRAFT contract per awarded vendor
+// (contract 'generated', ARC 'contract_generated'). Nothing reaches the
+// vendors until a buyer with commercial write access sends them:
+//   GET  /v1/arc-v2/:id/contracts/review                    (COMM_READ)
+//   GET  /v1/arc-v2/:id/contracts/:contractId/preview       (COMM_READ)
+//   POST /v1/arc-v2/:id/contracts/send  { contract_ids? }   (COMM_WRITE)
+// The route gate (requireArcPermission) checks the permission in the ARC's
+// own scope; the contract must also belong to that ARC.
+// ============================================================
+
+const SEND_PERMISSIONS = ['arc-comm.evaluate', 'arc.admin'];
+
+class SendContractsError extends Error {
+  constructor(httpStatus, message, code) {
+    super(message);
+    this.httpStatus = httpStatus;
+    this.code = code;
+  }
+}
+
+async function userCanSendContracts(req, arc) {
+  if (Number(req.user?.user_type) === 8) return true;
+  const held = await heldArcPermissions(req.user?.id, arc);
+  return SEND_PERMISSIONS.some((k) => held.has(k));
+}
+
+/** The exact document a vendor signs, as HTML (the PDF is rendered from it). */
+async function renderContractPreviewHtml(contract) {
+  const ctx = await loadContractDocContext(contract.arc_id);
+  if (!ctx) return null;
+  const [lines, vendor, annexures] = await Promise.all([
+    arcContractModel.listLines(contract.id),
+    loadContractVendorParty(contract),
+    ctx.is_group ? loadContractAnnexures(contract.arc_id, contract.id) : Promise.resolve([]),
+  ]);
+  const signed = contract.status === 'active' || !!contract.signed_by_vendor_at;
+  return renderContractDocumentHtml(ctx, vendor, lines, {
+    signed, signedAt: contract.signed_by_vendor_at || null, annexures,
+  });
+}
+
+export async function getContractReview(req, res) {
+  try {
+    const arcId = Number(req.params.id);
+    const arc = await arcModel.getById(arcId);
+    if (!arc) return bad(res, 404, 'ARC not found', 2);
+
+    const contracts = await arcContractModel.listForArc(arcId);
+    const withLines = await Promise.all(contracts.map(async (c) => {
+      const lines = await arcContractModel.listLines(c.id);
+      const committed = lines.reduce((s, l) => s + Number(l.unit_rate || 0) * Number(l.committed_qty || 0), 0);
+      return {
+        id: Number(c.id),
+        vendor_id: Number(c.vendor_id),
+        vendor_name: c.vendor_name,
+        vendor_email: c.vendor_email,
+        status: c.status,
+        document_s3_url: c.document_s3_url || null,
+        awaiting_until: c.awaiting_until,
+        signed_by_vendor_at: c.signed_by_vendor_at,
+        committed_value: Math.round(committed * 100) / 100,
+        lines: lines.map((l) => ({
+          id: Number(l.id),
+          arc_item_id: Number(l.arc_item_id),
+          variant_name: l.variant_name,
+          uom: l.uom,
+          unit_rate: l.unit_rate,
+          gst_pct: l.gst_pct,
+          committed_qty: l.committed_qty,
+          payment_terms: l.payment_terms,
+          delivery_terms: l.delivery_terms,
+        })),
+      };
+    }));
+    return ok(res, {
+      arc: { id: Number(arc.id), arc_number: arc.arc_number, status: arc.status },
+      contracts: withLines,
+      drafts: withLines.filter((c) => c.status === DRAFT_CONTRACT_STATUS).length,
+      can_send: arc.status === 'contract_generated' && await userCanSendContracts(req, arc),
+    });
+  } catch (err) {
+    logger.error({ err }, '[contractController.getContractReview]');
+    return bad(res, 500, err.message || 'Internal error', 3);
+  }
+}
+
+export async function getContractPreview(req, res) {
+  try {
+    const arcId = Number(req.params.id);
+    const contractId = Number(req.params.contractId);
+    if (!contractId) return bad(res, 400, 'contractId is required');
+    const contract = await arcContractModel.getById(contractId);
+    // A contract of another ARC answers like a missing one — the route gate
+    // only proved access to :id.
+    if (!contract || Number(contract.arc_id) !== arcId) return bad(res, 404, 'Contract not found', 2);
+    const html = await renderContractPreviewHtml(contract);
+    if (!html) return bad(res, 404, 'ARC not found', 2);
+    return ok(res, {
+      contract: {
+        id: Number(contract.id),
+        vendor_id: Number(contract.vendor_id),
+        vendor_name: contract.vendor_name,
+        status: contract.status,
+        document_s3_url: contract.document_s3_url || null,
+      },
+      html,
+    });
+  } catch (err) {
+    logger.error({ err }, '[contractController.getContractPreview]');
+    return bad(res, 500, err.message || 'Internal error', 3);
+  }
+}
+
+export async function sendContracts(req, res) {
+  try {
+    const arcId = Number(req.params.id);
+    const userId = req.user?.id;
+    const raw = req.body?.contract_ids;
+    let contractIds = null;
+    if (raw !== undefined && raw !== null) {
+      if (!Array.isArray(raw) || raw.length === 0) return bad(res, 400, 'contract_ids must be a non-empty array of contract ids');
+      contractIds = [...new Set(raw.map(Number))];
+      if (contractIds.some((n) => !Number.isInteger(n) || n <= 0)) {
+        return bad(res, 400, 'contract_ids must be a non-empty array of contract ids');
+      }
+    }
+
+    let result;
+    try {
+      result = await db.tx(async (t) => {
+        // Lock the ARC row: concurrent sends serialise here.
+        const arc = await t.oneOrNone(`SELECT id, status FROM tbl_arc WHERE id = $1 FOR UPDATE`, [arcId]);
+        if (!arc) throw new SendContractsError(404, 'ARC not found', 'NOT_FOUND');
+        if (arc.status !== 'contract_generated') {
+          throw new SendContractsError(409,
+            `There are no contract copies waiting to be sent (status=${arc.status})`, 'NOTHING_TO_SEND');
+        }
+        const sent = await arcContractModel.sendDrafts(arcId, contractIds, t);
+        if (sent.length === 0) {
+          throw new SendContractsError(409, 'These contracts were already sent', 'NOTHING_TO_SEND');
+        }
+        if (contractIds && sent.length !== contractIds.length) {
+          // Some ids are not drafts of this ARC: send nothing (rollback).
+          throw new SendContractsError(409,
+            'Some of these contracts are not unsent drafts of this rate contract — reload and try again', 'NOT_DRAFT');
+        }
+        const { remaining } = await t.one(
+          `SELECT COUNT(*)::int AS remaining FROM tbl_arc_contract WHERE arc_id = $1 AND status = 'generated'`,
+          [arcId]
+        );
+        let arcStatus = arc.status;
+        if (remaining === 0) {
+          const flipped = await t.oneOrNone(
+            `UPDATE tbl_arc SET status = 'awaiting_vendor_acceptance', updated_at = CURRENT_TIMESTAMP
+              WHERE id = $1 AND status = 'contract_generated' RETURNING status`,
+            [arcId]
+          );
+          if (flipped) arcStatus = flipped.status;
+        }
+        for (const c of sent) {
+          await logArcEvent({
+            arcId, eventType: ARC_EVENT_TYPES.CONTRACT_AWAITING_ACCEPTANCE,
+            actorId: userId,
+            payload: { contract_id: Number(c.id), vendor_id: Number(c.vendor_id), awaiting_until: c.awaiting_until },
+            txContext: t,
+          });
+        }
+        return { sent, arcStatus, remaining };
+      });
+    } catch (e) {
+      if (e instanceof SendContractsError) {
+        return res.status(e.httpStatus).json({ status: 0, code: e.code, message: e.message });
+      }
+      throw e;
+    }
+
+    // After commit. A draft PDF that failed to render at approval time gets
+    // another try before the vendor is told to open it (best-effort).
+    if (result.sent.some((c) => !c.document_s3_url)) await generateContractPdfsForArc(arcId);
+    // Award email + in-app, only to the vendors whose contracts were just sent
+    // (a signed sibling on a re-issued split award is not asked again).
+    await notifyArcEvent({
+      arcId, eventType: ARC_EVENT_TYPES.CONTRACT_AWAITING_ACCEPTANCE,
+      actorId: userId, payload: { vendorIds: result.sent.map((c) => Number(c.vendor_id)) },
+    });
+
+    const vendors = await db.any(
+      `SELECT id, name FROM tbl_users WHERE id = ANY($1::int[])`,
+      [result.sent.map((c) => Number(c.vendor_id))]
+    );
+    const nameOf = new Map(vendors.map((v) => [Number(v.id), v.name]));
+    return ok(res, {
+      sent: result.sent.map((c) => ({
+        id: Number(c.id), vendor_id: Number(c.vendor_id), vendor_name: nameOf.get(Number(c.vendor_id)) || null,
+        status: c.status, awaiting_until: c.awaiting_until,
+      })),
+      arc_status: result.arcStatus,
+      drafts_remaining: result.remaining,
+    }, `Sent to ${result.sent.length} vendor${result.sent.length === 1 ? '' : 's'}`);
+  } catch (err) {
+    logger.error({ err }, '[contractController.sendContracts]');
     return bad(res, 500, err.message || 'Internal error', 3);
   }
 }

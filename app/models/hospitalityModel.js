@@ -1418,6 +1418,7 @@ recomputeVendorsForRfq: async (rfq_id, hotel_ids, txContext) => {
 /**
  * Non-destructive vendor refresh for an RFQ.
  * Adds any missing eligible vendors to each product but never removes existing ones.
+ * Items the buyer closed without award are left alone.
  */
 addMissingVendorsForRfq: async (rfq_id, hotel_ids, options = {}) => {
   const rfqProducts = await db.any(
@@ -1425,7 +1426,7 @@ addMissingVendorsForRfq: async (rfq_id, hotel_ids, options = {}) => {
             COALESCE(pv.name, '') AS product_name
      FROM tbl_rfq_products rp
      LEFT JOIN tbl_product_variant pv ON pv.id = rp.product_variant_id
-     WHERE rp.rfq_id = $1`,
+     WHERE rp.rfq_id = $1 AND rp.closed_at IS NULL`,
     [rfq_id]
   );
 
@@ -2247,6 +2248,8 @@ getVendorHotelCategoryMappings: async (vendorId) => {
         AND NOT EXISTS (
           SELECT 1 FROM finalized_products fp WHERE fp.rfq_product_id = rp.id
         )
+        -- Skip items the buyer closed without award.
+        AND rp.closed_at IS NULL
         AND NOT EXISTS (
           SELECT 1 FROM tbl_rfq_product_vendors rpv
           WHERE rpv.rfq_id = r.id
@@ -2282,6 +2285,8 @@ getVendorHotelCategoryMappings: async (vendorId) => {
        SELECT rp.rfq_id, rp.product_variant_id, $3, rp.variant
        FROM tbl_rfq_products rp
        WHERE rp.rfq_id = $2
+         -- Items the buyer closed without award take no new vendors.
+         AND rp.closed_at IS NULL
          AND EXISTS (
            SELECT 1 FROM tbl_product_variant_vendor_mapping m
            WHERE m.product_variant_id = rp.product_variant_id

@@ -1769,15 +1769,20 @@ const arcEvalModel = {
 
       if (s.key === 'awarding') {
         const vc = vendorContract?.status;
-        if (vc && ['generated', 'awaiting_acceptance'].includes(vc)) {
+        // 'generated' is the buyer's unsent DRAFT — it falls to the final
+        // branch (awaiting_decision) until the buyer sends it.
+        if (vc === 'awaiting_acceptance') {
           vendorState = 'active';
           vendorReason = 'awaiting_sign';
           vendor_action = 'sign_contract';
         } else if (vc && ['active', 'expiring_soon', 'expired', 'terminated', 'declined'].includes(vc)) {
           vendorState = 'complete';
           vendorReason = vc;
-        } else if (['complete', 'active'].includes(s.state) && !vendorContract) {
-          // ARC moved past committee with no contract for this vendor → not awarded.
+        } else if (s.state === 'complete' && !vendorContract) {
+          // Contracts are out (awarding complete) and this vendor holds none →
+          // not awarded. Only on 'complete': while the committee votes or the
+          // buyer reviews the contract copies (awarding 'active'), no vendor
+          // holds a contract yet, so this must not tell anyone they lost.
           vendorState = 'complete';
           vendorReason = 'not_awarded';
         } else {
@@ -1824,7 +1829,7 @@ const arcEvalModel = {
     // Phase 1 §3 — overview-first: until terms accepted, always land on overview.
     let default_stage = 'overview';
     const contractStatus = vendorContract?.status;
-    if (contractStatus && ['generated', 'awaiting_acceptance'].includes(contractStatus)) {
+    if (contractStatus === 'awaiting_acceptance') {
       default_stage = 'awarding';
     } else if (contractStatus && ['active', 'expiring_soon'].includes(contractStatus)) {
       default_stage = 'active';

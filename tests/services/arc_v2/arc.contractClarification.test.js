@@ -114,6 +114,8 @@ describe("ARC — vendor contract clarification loop (surgical)", () => {
       }],
     });
     await buyerClient.post(`/api/v1/arc-v2/evaluation/${arcId}/comm-eval/finalize`).send({});
+    // Committee approval holds the copy as a draft; the buyer sends it.
+    await buyerClient.post(`/api/v1/arc-v2/${arcId}/contracts/send`).send({});
 
     contractId = (await db.one(
       `SELECT id FROM tbl_arc_contract WHERE arc_id = $1 AND vendor_id = $2`, [arcId, VENDOR])).id;
@@ -221,14 +223,22 @@ describe("ARC — vendor contract clarification loop (surgical)", () => {
     expect(cl.status).toBe("revised");
 
     // Resolving the last one re-routes through the committee (auto-approved here)
-    // and regenerates the contract for re-acceptance at the revised rate.
+    // and regenerates the contract at the revised rate — as a DRAFT the buyer
+    // reviews again before the vendor re-accepts.
     const arc = await db.one(`SELECT status FROM tbl_arc WHERE id = $1`, [arcId]);
-    expect(arc.status).toBe("awaiting_vendor_acceptance");
-    const contract = await db.one(`SELECT status FROM tbl_arc_contract WHERE id = $1`, [contractId]);
-    expect(contract.status).toBe("awaiting_acceptance");
+    expect(arc.status).toBe("contract_generated");
+    const draft = await db.one(`SELECT status FROM tbl_arc_contract WHERE id = $1`, [contractId]);
+    expect(draft.status).toBe("generated");
     const line = await db.one(`SELECT id, unit_rate FROM tbl_arc_contract_line WHERE arc_contract_id = $1`, [contractId]);
     expect(Number(line.unit_rate)).toBe(95);
     expect(Number(line.id)).toBe(Number(lineId)); // idempotent regeneration keeps the line id
+
+    // The vendor cannot open the re-issued copy until the buyer sends it.
+    expect((await vendorClient.get(`/api/v1/arc-v2/vendor/contracts/${contractId}`)).status).toBe(404);
+    const send = await buyerClient.post(`/api/v1/arc-v2/${arcId}/contracts/send`).send({});
+    expect(send.status).toBe(200);
+    expect((await db.one(`SELECT status FROM tbl_arc WHERE id = $1`, [arcId])).status).toBe("awaiting_vendor_acceptance");
+    expect((await db.one(`SELECT status FROM tbl_arc_contract WHERE id = $1`, [contractId])).status).toBe("awaiting_acceptance");
   });
 
   test("vendor sees the resolved clarification on re-review", async () => {
@@ -260,6 +270,8 @@ describe("ARC — vendor contract clarification loop (surgical)", () => {
 
     const after = await db.one(`SELECT payment_terms FROM tbl_arc_contract_line WHERE id = $1`, [lineId]);
     expect(after.payment_terms).toBe(before.payment_terms);
+    expect((await db.one(`SELECT status FROM tbl_arc_contract WHERE id = $1`, [contractId])).status).toBe("generated");
+    expect((await buyerClient.post(`/api/v1/arc-v2/${arcId}/contracts/send`).send({})).status).toBe(200);
     const contract = await db.one(`SELECT status FROM tbl_arc_contract WHERE id = $1`, [contractId]);
     expect(contract.status).toBe("awaiting_acceptance");
     const cl = await db.one(`SELECT status FROM tbl_arc_contract_clarification WHERE id = $1`, [clarId]);
@@ -369,6 +381,7 @@ describe("ARC — clarification on a split award preserves a signed sibling", ()
       ],
     });
     await buyerC.post(`/api/v1/arc-v2/evaluation/${arcId}/comm-eval/finalize`).send({});
+    await buyerC.post(`/api/v1/arc-v2/${arcId}/contracts/send`).send({});
 
     contractA = (await db.one(`SELECT id FROM tbl_arc_contract WHERE arc_id = $1 AND vendor_id = $2`, [arcId, VENDOR])).id;
     contractB = (await db.one(`SELECT id FROM tbl_arc_contract WHERE arc_id = $1 AND vendor_id = $2`, [arcId, VENDOR_B])).id;
@@ -421,9 +434,19 @@ describe("ARC — clarification on a split award preserves a signed sibling", ()
     const lineBRate = await db.one(`SELECT unit_rate FROM tbl_arc_contract_line WHERE arc_contract_id = $1`, [contractB]);
     expect(Number(lineBRate.unit_rate)).toBe(70);
 
-    const cA = await db.one(`SELECT status FROM tbl_arc_contract WHERE id = $1`, [contractA]);
-    expect(cA.status).toBe("awaiting_acceptance");
+    // A's re-issued copy is a draft for the buyer to review; B stays signed.
+    expect((await db.one(`SELECT status FROM tbl_arc_contract WHERE id = $1`, [contractA])).status).toBe("generated");
+    expect((await db.one(`SELECT status FROM tbl_arc WHERE id = $1`, [arcId])).status).toBe("contract_generated");
     const lineARate = await db.one(`SELECT unit_rate FROM tbl_arc_contract_line WHERE arc_contract_id = $1`, [contractA]);
     expect(Number(lineARate.unit_rate)).toBe(95);
+
+    // Sending only touches the draft: exactly one contract (A) goes out.
+    const send = await buyerC.post(`/api/v1/arc-v2/${arcId}/contracts/send`).send({});
+    expect(send.status).toBe(200);
+    expect(send.body.data.sent.map((c) => Number(c.id))).toEqual([Number(contractA)]);
+    const cA = await db.one(`SELECT status FROM tbl_arc_contract WHERE id = $1`, [contractA]);
+    expect(cA.status).toBe("awaiting_acceptance");
+    expect((await db.one(`SELECT status FROM tbl_arc_contract WHERE id = $1`, [contractB])).status).toBe("active");
+    expect((await db.one(`SELECT status FROM tbl_arc WHERE id = $1`, [arcId])).status).toBe("awaiting_vendor_acceptance");
   });
 });

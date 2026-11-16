@@ -139,7 +139,7 @@ describe("ARC — auto-approved instances still fire post-approval hooks", () =>
     expect(lc.body.data.stages.find((s) => s.key === "technical")).toMatchObject({ state: "complete" });
   });
 
-  test("finalizeCommEval auto-approves AND generates contracts + activates the contract stage", async () => {
+  test("finalizeCommEval auto-approves AND generates draft contracts held on Awarding for review", async () => {
     const alloc = await buyerClient.post(`/api/v1/arc-v2/evaluation/${arcId}/comm-eval/allocation`).send({
       item_id: itemId,
       allocations: [{
@@ -162,12 +162,25 @@ describe("ARC — auto-approved instances still fire post-approval hooks", () =>
     const contracts = await db.any(`SELECT id, vendor_id FROM tbl_arc_contract WHERE arc_id = $1`, [arcId]);
     expect(contracts.length).toBe(1);
     const arc = await db.one(`SELECT status FROM tbl_arc WHERE id = $1`, [arcId]);
-    expect(arc.status).toBe("awaiting_vendor_acceptance");
+    expect(arc.status).toBe("contract_generated");
 
     const events = (await db.any(
       `SELECT event_type FROM tbl_arc_event_log WHERE arc_id = $1`, [arcId])).map((e) => e.event_type);
     expect(events).toContain("committee_decision");
     expect(events).toContain("contract_generated");
+    expect(events).not.toContain("contract_awaiting_acceptance");
+
+    const lc = await buyerClient.get(`/api/v1/arc-v2/${arcId}/lifecycle`);
+    expect(lc.body.data.stages.find((s) => s.key === "awarding")).toMatchObject({ state: "active", reason: "contract_review" });
+    expect(lc.body.data.stages.find((s) => s.key === "active")).toMatchObject({ state: "locked", reason: "contracts_in_review" });
+    expect(lc.body.data.default_stage).toBe("awarding");
+  });
+
+  test("sending the reviewed copies activates the contract stage", async () => {
+    const send = await buyerClient.post(`/api/v1/arc-v2/${arcId}/contracts/send`).send({});
+    expect(send.status).toBe(200);
+    const arc = await db.one(`SELECT status FROM tbl_arc WHERE id = $1`, [arcId]);
+    expect(arc.status).toBe("awaiting_vendor_acceptance");
 
     const lc = await buyerClient.get(`/api/v1/arc-v2/${arcId}/lifecycle`);
     expect(lc.body.data.stages.find((s) => s.key === "awarding")).toMatchObject({ state: "complete" });

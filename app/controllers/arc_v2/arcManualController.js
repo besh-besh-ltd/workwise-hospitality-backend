@@ -37,6 +37,9 @@ import { userCanAccessArc } from '../../helper/arc_v2/arcScope.js';
 // ---- target-stage model (spec §2.2) -----------------------------------------
 const TARGET_STAGES = ['draft', 'floated', 'evaluation', 'sig_pending', 'active', 'ended'];
 const ENDED_SUB_STATUSES = ['expired', 'terminated', 'closed_no_award'];
+// Automatic ARC number format, ARC-<fy>-<n> (e.g. ARC-2026-27-0001). Reserved
+// for the counter, so a hand-typed number may not use it.
+const AUTO_ARC_NUMBER_RE = /^ARC-\d{4}-\d{2}-\d+$/i;
 // Ordinal rank for "is this stage at-or-past X" comparisons.
 const STAGE_RANK = { draft: 0, floated: 1, evaluation: 2, sig_pending: 3, active: 4, ended: 5 };
 
@@ -255,6 +258,12 @@ export async function createDraft(req, res) {
     // arc_number: blank → server-generated (FY-formatted, minted inside the tx
     // below); supplied → respected as-is but UNIQUE-checked here.
     let arcNumber = typeof header.arc_number === 'string' ? header.arc_number.trim() : '';
+    // The ARC-<fy>-<n> format belongs to the counter (arcModel.nextArcNumber).
+    // A typed number in it would either collide with a number the counter is
+    // about to hand out, or push every later number for every company past it.
+    if (AUTO_ARC_NUMBER_RE.test(arcNumber)) {
+      return bad(res, 400, 'ARC numbers like ARC-2026-27-0001 are given automatically. Leave the ARC number blank, or enter your own reference in a different format.', 0);
+    }
     if (arcNumber) {
       const existing = await arcModel.getByNumber(arcNumber);
       if (existing) return bad(res, 409, `ARC number ${arcNumber} already exists`, 0);

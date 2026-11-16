@@ -1,5 +1,6 @@
 import { Router } from 'express';
 import rfqController from '../../controllers/rfq/rfqController.js';
+import rfqItemClosureController from '../../controllers/rfq/rfqItemClosureController.js';
 import noLogin from '../../middleware/noLogin.js';
 import { validateBody, validateParam } from '../../validations/paramValidation/userValidation.js';
 import { validateDbBody } from '../../validations/dbValidation/userDbValidation.js';
@@ -362,6 +363,32 @@ RfqRoutes.post(
   acl([2, 8]),
 
   rfqController.closeRFQ
+);
+// Items closed without award (app/services/rfq/rfqItemClosure.js). Creator
+// only, enforced in the service, the same rule as close-rfq above.
+RfqRoutes.get(
+  '/:id/close-preview',
+  passportSignIn,
+  validateDbBody.user_id_profileexists,
+  acl([2, 8]),
+  requirePositiveIntParam('id'),
+  rfqItemClosureController.closePreview
+);
+RfqRoutes.post(
+  '/:id/items/close',
+  passportSignIn,
+  validateDbBody.user_id_profileexists,
+  acl([2, 8]),
+  requirePositiveIntParam('id'),
+  rfqItemClosureController.closeRfqItems
+);
+RfqRoutes.post(
+  '/:id/items/reopen',
+  passportSignIn,
+  validateDbBody.user_id_profileexists,
+  acl([2, 8]),
+  requirePositiveIntParam('id'),
+  rfqItemClosureController.reopenRfqItems
 );
 RfqRoutes.post(
   '/withdraw-publish/:id',

@@ -217,6 +217,23 @@ describe("Group ARC — from draft to a hotel's call-off, end to end", () => {
     ].sort((x, y) => x[0] - y[0] || x[1] - y[1]));
   });
 
+  test("head office reviews each group contract copy (with its hotel annexure) and sends them", async () => {
+    // Committee approval holds the copies as drafts — the vendors have nothing yet.
+    expect((await db.one(`SELECT status FROM tbl_arc WHERE id = $1`, [arcId])).status).toBe("contract_generated");
+    const review = await ho.get(`/api/v1/arc-v2/${arcId}/contracts/review`);
+    expect(review.status).toBe(200);
+    expect(review.body.data.contracts.map((c) => c.status)).toEqual(["generated", "generated"]);
+    const alphaCopy = review.body.data.contracts.find((c) => c.vendor_id === ALPHA);
+    const preview = await ho.get(`/api/v1/arc-v2/${arcId}/contracts/${alphaCopy.id}/preview`);
+    expect(preview.status).toBe(200);
+    expect(preview.body.data.html).toMatch(/Annexure A/);
+
+    const sent = await ho.post(`/api/v1/arc-v2/${arcId}/contracts/send`).send({});
+    expect(sent.status).toBe(200);
+    expect(sent.body.data.sent).toHaveLength(2);
+    expect((await db.one(`SELECT status FROM tbl_arc WHERE id = $1`, [arcId])).status).toBe("awaiting_vendor_acceptance");
+  });
+
   test("both vendors see their hotels and sign; the contract goes live", async () => {
     for (const [client, vendorId, hotels] of [[alpha, ALPHA, [A1, A2]], [beta, BETA, [A3]]]) {
       const { id: contractId } = await db.one(`SELECT id FROM tbl_arc_contract WHERE arc_id = $1 AND vendor_id = $2`, [arcId, vendorId]);

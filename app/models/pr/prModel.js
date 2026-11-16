@@ -1065,7 +1065,8 @@ const DUPLICATE_RFQ_SQL = (r, company, variant) => `(
   ${r}.hospitality_company_id = ${company}
   AND ${r}.status <> 2
   AND (${r}."timestamp" AT TIME ZONE 'UTC') >= NOW() - INTERVAL '30 days'
-  AND EXISTS (SELECT 1 FROM tbl_rfq_products _dup_rp WHERE _dup_rp.rfq_id = ${r}.id AND _dup_rp.product_variant_id = ${variant}))`;
+  AND EXISTS (SELECT 1 FROM tbl_rfq_products _dup_rp WHERE _dup_rp.rfq_id = ${r}.id AND _dup_rp.product_variant_id = ${variant}
+                AND _dup_rp.closed_at IS NULL))`;
 
 /**
  * Open PRs and live RFQs for `variantId` in the company (DUPLICATE_PR_SQL /
