@@ -22,6 +22,10 @@ import { heldArcPermissions } from '../../middleware/arcPermission.js';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
+import {
+  OTP_RESEND_COOLDOWN_SECONDS, signingOtpRecipients, sendSigningOtp, maskEmail,
+  NO_EMAIL_MESSAGE, SEND_FAILED_MESSAGE, sendTooSoon,
+} from '../../services/arcSigningOtpService.js';
 
 /**
  * ARC v2 — Contract generation, OTP signature, vendor portal endpoints.
@@ -810,20 +814,40 @@ export async function requestOtp(req, res) {
     if (!contract) return bad(res, 404, 'Contract not found', 2);
     if (contract.vendor_id !== vendorUserId) return bad(res, 403, 'Not the contracted vendor');
     if (contract.status !== 'awaiting_acceptance') return bad(res, 409, `Contract not awaiting acceptance (status=${contract.status})`);
-    const { code, expiresAt } = await arcContractModel.createOtp(id, vendorUserId);
+
+    const wait = await arcContractModel.otpCooldownSeconds(id, vendorUserId, OTP_RESEND_COOLDOWN_SECONDS);
+    if (wait > 0) return sendTooSoon(res, wait);
+    const recipients = await signingOtpRecipients({ vendorEmail: contract.vendor_email, vendorName: contract.vendor_name, user: req.user });
+    if (!recipients.length) return bad(res, 400, NO_EMAIL_MESSAGE);
+
+    // The code is emailed (REQ-2026-0092: it used to reach nobody in production).
+    // A code whose email didn't go out is deleted, so it can't block a retry.
+    const { id: otpId, code, expiresAt } = await arcContractModel.createOtp(id, vendorUserId);
+    const sentTo = await sendSigningOtp({
+      recipients, code, expiresAt, documentLabel: 'rate contract', arcNumber: contract.arc_number, arcTitle: contract.arc_title,
+    });
+    if (!sentTo.length) {
+      await arcContractModel.deleteOtp(otpId);
+      logger.error({ contractId: id }, '[contractController.requestOtp] signing code email not sent');
+      return bad(res, 502, SEND_FAILED_MESSAGE, 3);
+    }
     await logArcEvent({
       arcId: contract.arc_id, eventType: ARC_EVENT_TYPES.CONTRACT_OTP_REQUESTED,
-      actorId: vendorUserId, payload: { contract_id: id, expires_at: expiresAt },
+      actorId: vendorUserId, payload: { contract_id: id, expires_at: expiresAt, emailed: sentTo.length },
     });
-    // In-app OTP confirmation to the vendor (not email — OTP is its own channel)
+    // In-app note to the vendor that a code was requested (the code itself is only in the email).
     await notifyArcEvent({
       arcId: contract.arc_id, eventType: ARC_EVENT_TYPES.CONTRACT_OTP_REQUESTED,
       actorId: null, payload: { vendorId: vendorUserId },
     });
-    // The OTP would normally be sent via SMS + email helpers. For now return it
-    // in dev only (the SMS/email helpers expect tenant SMTP/SMS config).
+    // Outside production the code is also returned, for tests and local work.
     const exposeInPayload = process.env.NODE_ENV !== 'production';
-    return ok(res, { otp_expires_at: expiresAt, dev_code: exposeInPayload ? code : undefined });
+    return ok(res, {
+      otp_expires_at: expiresAt,
+      sent_to: sentTo.map(maskEmail),
+      resend_after_seconds: OTP_RESEND_COOLDOWN_SECONDS,
+      dev_code: exposeInPayload ? code : undefined,
+    });
   } catch (err) {
     logger.error({ err }, '[contractController.requestOtp]');
     return bad(res, 500, err.message || 'Internal error', 3);

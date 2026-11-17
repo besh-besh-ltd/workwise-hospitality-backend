@@ -301,13 +301,36 @@ const arcContractModel = {
     const code = (Math.floor(Math.random() * 900000) + 100000).toString();
     const otpHash = crypto.createHash('sha256').update(code).digest('hex');
     const expiresAt = new Date(Date.now() + ttlSeconds * 1000);
-    await runner.none(
+    const row = await runner.one(
       `INSERT INTO tbl_arc_contract_signature_otp
          (arc_contract_id, vendor_user_id, otp_hash, expires_at, attempts)
-       VALUES ($1, $2, $3, $4, 0)`,
+       VALUES ($1, $2, $3, $4, 0)
+       RETURNING id`,
       [arcContractId, vendorUserId, otpHash, expiresAt]
     );
-    return { code, expiresAt };
+    return { id: Number(row.id), code, expiresAt };
+  },
+
+  /**
+   * Seconds until this vendor may ask for another contract signing code, 0 when
+   * they may now. Counts contract codes only (addendum codes share the table).
+   */
+  otpCooldownSeconds: async (arcContractId, vendorUserId, cooldownSeconds, txContext = null) => {
+    const row = await (txContext || db).one(
+      `SELECT CEIL(EXTRACT(EPOCH FROM (MAX(created_at) + make_interval(secs => $3) - CURRENT_TIMESTAMP)))::int AS wait
+         FROM tbl_arc_contract_signature_otp
+        WHERE arc_contract_id = $1 AND vendor_user_id = $2 AND arc_amendment_document_id IS NULL`,
+      [arcContractId, vendorUserId, cooldownSeconds]
+    );
+    return Math.max(0, Number(row.wait) || 0);
+  },
+
+  /** Removes an unused code, e.g. one whose email could not be sent. */
+  deleteOtp: async (otpId, txContext = null) => {
+    await (txContext || db).none(
+      `DELETE FROM tbl_arc_contract_signature_otp WHERE id = $1 AND verified_at IS NULL`,
+      [otpId]
+    );
   },
 
   verifyOtp: async (arcContractId, vendorUserId, code, { maxAttempts = 5 } = {}, txContext = null) => {
