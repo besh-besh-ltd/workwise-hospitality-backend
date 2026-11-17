@@ -31,11 +31,13 @@ const arcAmendmentDocumentModel = {
     return (txContext || db).oneOrNone(
       `SELECT d.*, am.amendment_type, am.payload, am.amendment_from, am.amendment_to,
               am.arc_contract_id AS am_contract_id, c.vendor_id, c.arc_id,
-              v.name AS vendor_name, v.email AS vendor_email
+              v.name AS vendor_name, v.email AS vendor_email,
+              a.arc_number, a.title AS arc_title
          FROM tbl_arc_amendment_document d
          JOIN tbl_arc_amendment am ON am.id = d.arc_amendment_id
          JOIN tbl_arc_contract   c  ON c.id  = d.arc_contract_id
          LEFT JOIN tbl_users     v  ON v.id  = c.vendor_id
+         LEFT JOIN tbl_arc       a  ON a.id  = c.arc_id
         WHERE d.id = $1`,
       [id]
     );
@@ -102,13 +104,25 @@ const arcAmendmentDocumentModel = {
     const code = (Math.floor(Math.random() * 900000) + 100000).toString();
     const otpHash = crypto.createHash('sha256').update(code).digest('hex');
     const expiresAt = new Date(Date.now() + ttlSeconds * 1000);
-    await runner.none(
+    const row = await runner.one(
       `INSERT INTO tbl_arc_contract_signature_otp
          (arc_contract_id, vendor_user_id, otp_hash, expires_at, attempts, arc_amendment_document_id)
-       VALUES ($1, $2, $3, $4, 0, $5)`,
+       VALUES ($1, $2, $3, $4, 0, $5)
+       RETURNING id`,
       [arcContractId, vendorUserId, otpHash, expiresAt, addendumDocumentId]
     );
-    return { code, expiresAt };
+    return { id: Number(row.id), code, expiresAt };
+  },
+
+  /** Seconds until this vendor may ask for another code for this addendum, 0 when they may now. */
+  otpCooldownSeconds: async (addendumDocumentId, vendorUserId, cooldownSeconds, txContext = null) => {
+    const row = await (txContext || db).one(
+      `SELECT CEIL(EXTRACT(EPOCH FROM (MAX(created_at) + make_interval(secs => $3) - CURRENT_TIMESTAMP)))::int AS wait
+         FROM tbl_arc_contract_signature_otp
+        WHERE arc_amendment_document_id = $1 AND vendor_user_id = $2`,
+      [addendumDocumentId, vendorUserId, cooldownSeconds]
+    );
+    return Math.max(0, Number(row.wait) || 0);
   },
 
   verifyOtp: async (addendumDocumentId, vendorUserId, code, { maxAttempts = 5 } = {}, txContext = null) => {

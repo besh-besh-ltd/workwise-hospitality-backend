@@ -6,6 +6,11 @@ import { voidAmendmentOnDecline, renderAndStoreAddendumPdf } from '../../service
 import { loadContractDocContext } from './arcContractController.js';
 import { logArcEvent, ARC_EVENT_TYPES } from '../../services/arcEventLogService.js';
 import { notifyArcEvent } from '../../services/arcNotificationService.js';
+import arcContractModel from '../../models/arc_v2/arcContractModel.js';
+import {
+  OTP_RESEND_COOLDOWN_SECONDS, signingOtpRecipients, sendSigningOtp, maskEmail,
+  NO_EMAIL_MESSAGE, SEND_FAILED_MESSAGE, sendTooSoon,
+} from '../../services/arcSigningOtpService.js';
 
 /**
  * ARC v2 — Addendum re-signing controller (vendor portal).
@@ -41,18 +46,38 @@ export async function requestAddendumOtp(req, res) {
     if (!doc) return bad(res, 404, 'Addendum not found', 2);
     if (Number(doc.vendor_id) !== Number(vendorUserId)) return bad(res, 403, 'Not the contracted vendor');
     if (doc.status !== 'awaiting_signature') return bad(res, 409, `Addendum not awaiting signature (status=${doc.status})`);
-    const { code, expiresAt } = await arcAmendmentDocumentModel.createOtp(id, doc.arc_contract_id, vendorUserId);
+
+    const wait = await arcAmendmentDocumentModel.otpCooldownSeconds(id, vendorUserId, OTP_RESEND_COOLDOWN_SECONDS);
+    if (wait > 0) return sendTooSoon(res, wait);
+    const recipients = await signingOtpRecipients({ vendorEmail: doc.vendor_email, vendorName: doc.vendor_name, user: req.user });
+    if (!recipients.length) return bad(res, 400, NO_EMAIL_MESSAGE);
+
+    // Emailed, as for the contract itself (REQ-2026-0092). An unsent code is deleted.
+    const { id: otpId, code, expiresAt } = await arcAmendmentDocumentModel.createOtp(id, doc.arc_contract_id, vendorUserId);
+    const sentTo = await sendSigningOtp({
+      recipients, code, expiresAt, documentLabel: 'addendum to rate contract', arcNumber: doc.arc_number, arcTitle: doc.arc_title,
+    });
+    if (!sentTo.length) {
+      await arcContractModel.deleteOtp(otpId);
+      logger.error({ addendumId: id }, '[arcAddendum.requestAddendumOtp] signing code email not sent');
+      return bad(res, 502, SEND_FAILED_MESSAGE, 3);
+    }
     await logArcEvent({
       arcId: doc.arc_id, eventType: ARC_EVENT_TYPES.CONTRACT_OTP_REQUESTED,
-      actorId: vendorUserId, payload: { addendum_document_id: id, expires_at: expiresAt },
+      actorId: vendorUserId, payload: { addendum_document_id: id, expires_at: expiresAt, emailed: sentTo.length },
     });
-    // In-app OTP confirmation to the vendor (no email — OTP is its own channel)
+    // In-app note to the vendor that a code was requested (the code itself is only in the email).
     await notifyArcEvent({
       arcId: doc.arc_id, eventType: ARC_EVENT_TYPES.CONTRACT_OTP_REQUESTED,
       actorId: null, payload: { vendorId: vendorUserId },
     });
     const expose = process.env.NODE_ENV !== 'production';
-    return ok(res, { otp_expires_at: expiresAt, dev_code: expose ? code : undefined });
+    return ok(res, {
+      otp_expires_at: expiresAt,
+      sent_to: sentTo.map(maskEmail),
+      resend_after_seconds: OTP_RESEND_COOLDOWN_SECONDS,
+      dev_code: expose ? code : undefined,
+    });
   } catch (err) {
     logger.error({ err }, '[arcAddendum.requestAddendumOtp]');
     return bad(res, 500, err.message || 'Internal error', 3);
