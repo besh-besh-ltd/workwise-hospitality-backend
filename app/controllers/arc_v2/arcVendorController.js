@@ -24,8 +24,15 @@ import path from 'path';
 // Server-stamped quote / invitation times are UTC; the vendor screens read ARC
 // times as IST wall clock (REQ-2026-0093). A Manual ARC's times were typed in
 // IST, so they pass through untouched. See app/helper/arc_v2/arcAuditTime.js.
+// It runs after a vendor's action has committed, so a failed lookup must not
+// turn a saved quote into an error response: log it and send the times as stored.
 async function auditTimesInIst(arcId) {
-  return !(await arcManualEntryModel.getByArc(arcId))?.is_manual;
+  try {
+    return !(await arcManualEntryModel.getByArc(arcId))?.is_manual;
+  } catch (err) {
+    logger.warn({ err, arcId }, '[vendorController] manual-ARC lookup failed; audit times sent unconverted');
+    return false;
+  }
 }
 
 // ── Phase 2 — pricing engine helpers ────────────────────────────────────────
