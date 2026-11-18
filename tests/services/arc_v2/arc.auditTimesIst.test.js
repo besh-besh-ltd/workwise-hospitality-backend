@@ -12,7 +12,8 @@
 //   3. Vendor GET /vendor/requests/:arcId — quote + invitation times in IST;
 //      terms_accepted_at (already written in IST) untouched.
 //   4. Vendor GET /vendor/quote/:arcId/history — version submitted_at in IST.
-//   5. A Manual ARC's typed (IST) times pass through untouched.
+//   5. Vendor quote PDF — "Submitted … on" prints the IST time.
+//   6. A Manual ARC's typed (IST) times pass through untouched.
 
 import { httpClient } from "../../helpers/http.js";
 import { db } from "../../setup/db.js";
@@ -21,6 +22,7 @@ import { TEST_CATEGORIES } from "../../fixtures/vendors.js";
 import { seedAutoApproveArcPolicy, cleanupArcPublishPolicy } from "../../helpers/arcPublishPolicy.js";
 import { grantFixtureVendorHotelSubs, revokeVendorSubs } from "../../helpers/arcGroupSeed.js";
 import { utcToIstWallClock, istAuditTimes } from "../../../app/helper/arc_v2/arcAuditTime.js";
+import { pdfRenderer } from "../../../app/util/pdfRenderer.js";
 
 const STORED_UTC = "2026-11-17 09:43:20";   // what CURRENT_TIMESTAMP wrote (UTC)
 const SHOWN_IST  = "2026-11-17 15:13:20";   // what the screens must print
@@ -187,6 +189,23 @@ describe("ARC v2 — audit times in IST through the API", () => {
     expect(r.status).toBe(200);
     expect(r.body.data.versions.length).toBeGreaterThan(0);
     for (const v of r.body.data.versions) expect(v.submitted_at).toBe(SHOWN_IST);
+  });
+
+  test("vendor quote PDF: 'Submitted … on' prints the IST time", async () => {
+    // Capture the HTML the endpoint hands the (jest-stubbed) renderer.
+    const original = pdfRenderer.renderToFile;
+    let html = null;
+    pdfRenderer.renderToFile = async (h, file, opts) => { html = h; return original.call(pdfRenderer, h, file, opts); };
+    try {
+      const r = await vendorClient.get(`/api/v1/arc-v2/vendor/quote/${arcId}/pdf`);
+      expect(r.status).toBe(200);
+    } finally {
+      pdfRenderer.renderToFile = original;
+    }
+    expect(html).toBeTruthy();
+    const submittedLine = (html.match(/Submitted by[\s\S]*?<\/div>/) || [""])[0];
+    expect(submittedLine).toMatch(/17 Nov 2026,\s*3:13\s*pm/i);
+    expect(submittedLine).not.toMatch(/9:43/);
   });
 
   test("a Manual ARC's typed times pass through untouched", async () => {

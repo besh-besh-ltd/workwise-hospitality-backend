@@ -1849,7 +1849,7 @@ function renderVendorQuoteHtml(ctx) {
     <div class="cell"><div class="k">Items in Scope</div><div class="v">${items.length}</div></div>
     <div class="cell"><div class="k">Submission Window</div><div class="v">${dtFull(arc.submission_start_at)} → ${dtFull(arc.submission_end_at)}</div></div>
     <div class="cell"><div class="k">Contract Term</div><div class="v">${dDate(arc.contract_start_at)} → ${dDate(arc.contract_end_at)}</div></div>
-    <div class="cell"><div class="k">Generated</div><div class="v">${dtFull(new Date())}</div></div>
+    <div class="cell"><div class="k">Generated</div><div class="v">${dtFull(utcToIstWallClock(new Date()))}</div></div>
   </div>
 
   <div class="terms">
@@ -1943,6 +1943,8 @@ export async function downloadQuotePdf(req, res) {
     ]);
 
     const vendor = { name: vendorRow?.name || 'Vendor', email: vendorRow?.email || null, gstin: quote.gstin_used || null };
+    // The PDF prints "Submitted … on <time>" — in IST, like the screens (REQ-2026-0093).
+    if (await auditTimesInIst(arcId)) istAuditTimes(quote, ARC_AUDIT_FIELDS.quote);
     const html = renderVendorQuoteHtml({ arc, names: names || {}, vendor, quote, items, lines, tech });
 
     tmpPath = path.join(os.tmpdir(), `arc-quote-${arcId}-${vendorId}-${Date.now()}.pdf`);
