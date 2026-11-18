@@ -19,6 +19,7 @@ import { arcVendorRequests } from '../../services/notificationLinks.js';
 import { sendMail } from '../../helper/common.js';
 import { arcMomentIst, windowClosed, windowNotOpen, nowIst } from '../../helper/arcTime.js';
 import { currentFinancialYearIst } from '../../helper/financialYear.js';
+import { istAuditTimes, ARC_AUDIT_FIELDS } from '../../helper/arc_v2/arcAuditTime.js';
 import {
   createApprovalInstance,
   cancelApprovalInstance,
@@ -1329,6 +1330,13 @@ export async function getById(req, res) {
     if (arc.is_group) {
       const split = await arcHotelModel.listItemHotelQtys(id);
       for (const it of items) it.hotel_qtys = split[String(it.id)] || [];
+    }
+    // Server-stamped times (a vendor's submission, the ARC's created/updated)
+    // are UTC; the ARC screens read them as IST wall clock (REQ-2026-0093).
+    // A Manual ARC's times were typed in IST and pass through.
+    if (!arc.is_manual) {
+      istAuditTimes(arc, ARC_AUDIT_FIELDS.arc);
+      for (const inv of invitations) istAuditTimes(inv, ARC_AUDIT_FIELDS.invitation);
     }
     return ok(res, { arc, items, invitations });
   } catch (err) {

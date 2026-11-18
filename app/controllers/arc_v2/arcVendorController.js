@@ -11,6 +11,8 @@ import pricingEngine, { deriveMrpLine } from '../../services/pricingEngine.js';
 import { arcMomentIst, windowNotOpen, windowClosed } from '../../helper/arcTime.js';
 import { vendorCanSubmitForHotels, resolveArcVendorCoverage } from '../../helper/arc_v2/arcEligibility.js';
 import arcHotelModel from '../../models/arc_v2/arcHotelModel.js';
+import arcManualEntryModel from '../../models/arc_v2/arcManualEntryModel.js';
+import { istAuditTimes, utcToIstWallClock, ARC_AUDIT_FIELDS } from '../../helper/arc_v2/arcAuditTime.js';
 import { orgKeysFor } from '../../services/vendorNetwork/orgKeySql.js';
 import axios from 'axios';
 import crypto from 'crypto';
@@ -18,6 +20,20 @@ import { pdfRenderer } from '../../util/pdfRenderer.js';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
+
+// Server-stamped quote / invitation times are UTC; the vendor screens read ARC
+// times as IST wall clock (REQ-2026-0093). A Manual ARC's times were typed in
+// IST, so they pass through untouched. See app/helper/arc_v2/arcAuditTime.js.
+// It runs after a vendor's action has committed, so a failed lookup must not
+// turn a saved quote into an error response: log it and send the times as stored.
+async function auditTimesInIst(arcId) {
+  try {
+    return !(await arcManualEntryModel.getByArc(arcId))?.is_manual;
+  } catch (err) {
+    logger.warn({ err, arcId }, '[vendorController] manual-ARC lookup failed; audit times sent unconverted');
+    return false;
+  }
+}
 
 // ── Phase 2 — pricing engine helpers ────────────────────────────────────────
 
@@ -580,6 +596,12 @@ export async function getRequestDetail(req, res) {
       const mine = coverage.find((v) => Number(v.id) === myKey);
       renewal_needed_hotel_ids = mine ? mine.renewal_needed_hotel_ids : invitedHotelIds;
     }
+    if (await auditTimesInIst(arcId)) {
+      istAuditTimes(arc, ARC_AUDIT_FIELDS.arc);
+      istAuditTimes(invitation, ARC_AUDIT_FIELDS.invitation);
+      istAuditTimes(quote, ARC_AUDIT_FIELDS.quote);
+      istAuditTimes(tech_envelope, ['tech_submitted_at']);
+    }
     return ok(res, {
       arc, items, invitation, quote, lines, tech_envelope,
       vendor_profile_gstin: profile?.gstin || null,
@@ -797,6 +819,7 @@ export async function saveQuoteDraft(req, res) {
       }
       return { quote, lines: upserted };
     });
+    if (await auditTimesInIst(arc_id)) istAuditTimes(result.quote, ARC_AUDIT_FIELDS.quote);
     return ok(res, { quote: result.quote, lines: result.lines });
   } catch (err) {
     logger.error({ err }, '[vendorController.saveQuoteDraft]');
@@ -925,6 +948,7 @@ export async function submitQuote(req, res) {
     // was unreachable (it sat after `return db.tx(...)`), so buyers were never
     // told a vendor had submitted — now it fires after the commit succeeds.
     await notifyArcEvent({ arcId: arc_id, eventType: ARC_EVENT_TYPES.VENDOR_SUBMITTED, actorId: vendorId, payload: {} });
+    if (await auditTimesInIst(arc_id)) istAuditTimes(result.quote, ARC_AUDIT_FIELDS.quote);
     return ok(res, { quote: result.quote }, 'Quote submitted');
   } catch (err) {
     logger.error({ err }, '[vendorController.submitQuote]');
@@ -953,6 +977,7 @@ export async function withdrawQuote(req, res) {
     });
     // Notify creator post-commit (email BOTH)
     await notifyArcEvent({ arcId: arc_id, eventType: ARC_EVENT_TYPES.VENDOR_WITHDREW, actorId: vendorId, payload: {} });
+    if (await auditTimesInIst(arc_id)) istAuditTimes(quote, ARC_AUDIT_FIELDS.quote);
     return ok(res, { quote }, 'Quote withdrawn');
   } catch (err) {
     logger.error({ err }, '[vendorController.withdrawQuote]');
@@ -981,6 +1006,9 @@ export async function getQuoteHistory(req, res) {
     // Resolve the vendor's own quote (vendor-scoped) for context.
     const quote = await arcEvalModel.getQuote(arcId, vendorId);
     const versions = await arcEvalModel.listQuoteVersions(arcId, vendorId);
+    if (await auditTimesInIst(arcId)) {
+      for (const v of versions) istAuditTimes(v, ARC_AUDIT_FIELDS.quoteVersion);
+    }
     return ok(res, {
       quote_id: quote?.id || null,
       versions: versions.map((v) => ({
@@ -1374,7 +1402,10 @@ export async function submitTechEnvelope(req, res) {
     });
     // Notify technical evaluators only (in-app) post-commit
     await notifyArcEvent({ arcId, eventType: ARC_EVENT_TYPES.VENDOR_TECH_SUBMITTED, actorId: vendorId, payload: {} });
-    return ok(res, { tech_submitted_at: result.tech_submitted_at }, 'Technical envelope submitted');
+    const techSubmittedAt = (await auditTimesInIst(arcId))
+      ? utcToIstWallClock(result.tech_submitted_at)
+      : result.tech_submitted_at;
+    return ok(res, { tech_submitted_at: techSubmittedAt }, 'Technical envelope submitted');
   } catch (err) {
     logger.error({ err }, '[vendorController.submitTechEnvelope]');
     return bad(res, 500, err.message || 'Internal error', 3);
@@ -1825,7 +1856,7 @@ function renderVendorQuoteHtml(ctx) {
     <div class="cell"><div class="k">Items in Scope</div><div class="v">${items.length}</div></div>
     <div class="cell"><div class="k">Submission Window</div><div class="v">${dtFull(arc.submission_start_at)} → ${dtFull(arc.submission_end_at)}</div></div>
     <div class="cell"><div class="k">Contract Term</div><div class="v">${dDate(arc.contract_start_at)} → ${dDate(arc.contract_end_at)}</div></div>
-    <div class="cell"><div class="k">Generated</div><div class="v">${dtFull(new Date())}</div></div>
+    <div class="cell"><div class="k">Generated</div><div class="v">${dtFull(utcToIstWallClock(new Date()))}</div></div>
   </div>
 
   <div class="terms">
@@ -1919,6 +1950,8 @@ export async function downloadQuotePdf(req, res) {
     ]);
 
     const vendor = { name: vendorRow?.name || 'Vendor', email: vendorRow?.email || null, gstin: quote.gstin_used || null };
+    // The PDF prints "Submitted … on <time>" — in IST, like the screens (REQ-2026-0093).
+    if (await auditTimesInIst(arcId)) istAuditTimes(quote, ARC_AUDIT_FIELDS.quote);
     const html = renderVendorQuoteHtml({ arc, names: names || {}, vendor, quote, items, lines, tech });
 
     tmpPath = path.join(os.tmpdir(), `arc-quote-${arcId}-${vendorId}-${Date.now()}.pdf`);
