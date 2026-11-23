@@ -20,6 +20,7 @@ import { sendMail } from '../../helper/common.js';
 import { arcMomentIst, windowClosed, windowNotOpen, nowIst } from '../../helper/arcTime.js';
 import { currentFinancialYearIst } from '../../helper/financialYear.js';
 import { istAuditTimes, ARC_AUDIT_FIELDS } from '../../helper/arc_v2/arcAuditTime.js';
+import { attachWaitingOn, submissionWindowClosed } from '../../services/arcWaitingOnService.js';
 import {
   createApprovalInstance,
   cancelApprovalInstance,
@@ -1197,6 +1198,19 @@ export async function getArcListView(req, res) {
     //    card renders: awarded_vendors, committed/consumed value, amendments…).
     const total = filtered.length;
     const data = filtered.slice((page - 1) * limit, (page - 1) * limit + limit);
+
+    // 9. who each row on this page is waiting on (REQ-2026-0094). Page rows
+    //    only, read-only; a failure here must never take the listing down —
+    //    the card simply shows no "Waiting on" line.
+    try {
+      await attachWaitingOn(data);
+    } catch (err) {
+      logger.error({ err }, '[arcController.getArcListView] waiting_on failed');
+      data.forEach((r) => {
+        if (r.waiting_on === undefined) r.waiting_on = null;
+        if (r.submission_window_closed === undefined) r.submission_window_closed = submissionWindowClosed(r);
+      });
+    }
 
     return ok(res, { rows: data, facets, tab_counts, total, page, limit });
   } catch (err) {
