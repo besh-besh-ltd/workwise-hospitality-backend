@@ -38,6 +38,14 @@
 //
 // Only names (and a vendor's company) leave the server — no ids, emails or
 // phone numbers. The rows passed in are already RBAC-scoped by the listing.
+//
+// Vendor masking: before the commercial stage opens (bidding window and
+// technical evaluation) a vendor is never named — only `VEN-<n>`, its place in
+// the rate contract's invitation list. From the commercial stage on (after
+// technical evaluation, or straight after bidding when there are no technical
+// clauses) real names are shown, as everywhere else on the platform. Of the
+// rows here, only "vendors yet to respond" fall before commercial; the
+// technical stages name buyer-side evaluators/approvers, never vendors.
 import db from '../config/dbConn.js';
 import rbacModel from '../models/rbacModel.js';
 import arcEvalModel from '../models/arc_v2/arcEvaluationModel.js';
@@ -291,34 +299,46 @@ async function loadPendingApprovals(runner, arcIds) {
   return byArc;
 }
 
-/** Vendors still to respond (open window) and still to sign (awaiting acceptance). */
+/**
+ * Vendors still to respond (open window) and still to sign (awaiting acceptance).
+ *
+ * Vendor identity is masked until the commercial stage opens: the open window
+ * is before technical evaluation, so a vendor yet to respond is shown as a code,
+ * never its name or company. The code is `VEN-<n>`, n being the vendor's place
+ * in that rate contract's invitation list (stable for the contract, never
+ * derived from the name or user id). Vendors yet to sign come after award —
+ * the commercial stage has revealed them — so they keep their names.
+ */
 async function loadPendingVendors(runner, respondIds, signIds) {
   const out = { respond: new Map(), sign: new Map() };
   if (respondIds.length === 0 && signIds.length === 0) return out;
   const rows = await runner.any(
-    `SELECT 'respond' AS src, i.arc_id::bigint AS arc_id, uv.name,
-            COALESCE(tc.company_name, uv.organization_name) AS company
-       FROM tbl_arc_invitation i
-       JOIN tbl_users uv ON uv.id = i.vendor_id
-       LEFT JOIN tbl_company tc ON tc.id = uv.company_id
-      WHERE i.arc_id = ANY($1::int[])
-        AND i.status IN ('invited', 'viewed')
+    `SELECT 'respond' AS src, x.arc_id, ('VEN-' || x.pos) AS name, NULL::text AS company, x.pos AS ord
+       FROM (
+         SELECT i.arc_id::bigint AS arc_id, i.status,
+                ROW_NUMBER() OVER (PARTITION BY i.arc_id ORDER BY i.id) AS pos
+           FROM tbl_arc_invitation i
+          WHERE i.arc_id = ANY($1::int[])
+       ) x
+      WHERE x.status IN ('invited', 'viewed')
      UNION ALL
      SELECT 'sign' AS src, c.arc_id::bigint AS arc_id, uv.name,
-            COALESCE(tc.company_name, uv.organization_name) AS company
+            COALESCE(tc.company_name, uv.organization_name) AS company, 0 AS ord
        FROM tbl_arc_contract c
        JOIN tbl_users uv ON uv.id = c.vendor_id
        LEFT JOIN tbl_company tc ON tc.id = uv.company_id
       WHERE c.arc_id = ANY($2::int[])
         AND c.status = 'awaiting_acceptance'
-      ORDER BY 1, 2, 3`,
+      ORDER BY 1, 2, 5, 3`,
     [respondIds, signIds]
   );
   for (const r of rows) {
     const m = out[r.src];
     const arcId = Number(r.arc_id);
     if (!m.has(arcId)) m.set(arcId, []);
-    m.get(arcId).push({ name: r.name, company: r.company || null });
+    m.get(arcId).push(r.src === 'respond'
+      ? { name: r.name }
+      : { name: r.name, company: r.company || null });
   }
   return out;
 }

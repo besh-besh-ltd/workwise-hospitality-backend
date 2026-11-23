@@ -307,11 +307,22 @@ describe("ARC waiting_on — POST /arc-v2/list-view", () => {
     }
   });
 
-  test("floated with the window open waits on the vendors who have not responded", () => {
+  test("floated with the window open waits on the vendors who have not responded — by code, never by name", () => {
     expect(w("OPEN")).toMatchObject({ kind: "vendors", role: "Vendors yet to respond" });
-    expect(peopleNames("OPEN")).toEqual([names[VENDOR_B]]);
+    // vendor_beta was the second vendor invited → VEN-2; no company either.
+    expect(w("OPEN").people).toEqual([{ name: "VEN-2" }]);
+    expect(JSON.stringify(w("OPEN"))).not.toContain(names[VENDOR_B]);
     expect(rowsById.get(ids.OPEN).submission_window_closed).toBe(false);
     expect(w("ALLIN")).toMatchObject({ kind: "window", people: [] });
+  });
+
+  test("no vendor is named anywhere before the commercial stage opens", () => {
+    const preCommercial = ["OPEN", "ALLIN", "PASTTECH", "CLOSEDCOMM", "NOQUOTE", "TECHBACK", "PUBLISH", "DRAFT"];
+    const vendorNames = [names[VENDOR_A], names[VENDOR_B]];
+    for (const key of preCommercial) {
+      const payload = JSON.stringify(rowsById.get(ids[key]).waiting_on);
+      for (const n of vendorNames) expect(payload).not.toContain(n);
+    }
   });
 
   test("the client's case: floated past its window with all quotes in waits on the technical evaluators", () => {
