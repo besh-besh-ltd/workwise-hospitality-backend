@@ -227,38 +227,47 @@ const toAbsoluteAmount = (value, mode, lineTotal) => {
 };
 
 /**
- * Decide whether the buyer's target is worse than the vendor's quoted value
- * (target > quoted — lower is always better for the buyer on base price / charges).
- * Modes may differ; in that case both are normalized to absolute ₹ using
- * lineTotal = vendorQuote.quantity * vendorQuote.unit_price, per spec.
+ * Compare the buyer's target with the vendor's quoted value: 'greater',
+ * 'equal' or 'lower'. Modes may differ; in that case both are normalized to
+ * absolute ₹ using lineTotal = vendorQuote.quantity * vendorQuote.unit_price,
+ * per spec.
  *
- * Returns true only when we can confidently compare AND target > quoted.
- * Any uncertainty (missing/non-numeric values, no usable line total for mixed-mode)
- * returns false so the row is still shown — never hide on doubt.
+ * Returns null on any uncertainty (missing/non-numeric values, no usable line
+ * total for mixed-mode) so the row is still shown — never hide on doubt.
  */
-const isTargetWorseThanQuoted = (quoted, target, vendorMode, targetMode, vendorQuote) => {
-  if (quoted == null || quoted === '') return false;
-  if (target == null || target === '') return false;
+const compareTargetWithQuoted = (quoted, target, vendorMode, targetMode, vendorQuote) => {
+  if (quoted == null || quoted === '') return null;
+  if (target == null || target === '') return null;
   const qNum = Number(quoted);
   const tNum = Number(target);
-  if (!isFinite(qNum) || !isFinite(tNum)) return false;
-  if (vendorMode === targetMode) return tNum > qNum;
-  const lineTotal = Number(vendorQuote?.unit_price) * Number(vendorQuote?.quantity);
-  const qAmt = toAbsoluteAmount(qNum, vendorMode, lineTotal);
-  const tAmt = toAbsoluteAmount(tNum, targetMode, lineTotal);
-  if (qAmt == null || tAmt == null) return false;
-  return tAmt > qAmt;
+  if (!isFinite(qNum) || !isFinite(tNum)) return null;
+  let qAmt = qNum;
+  let tAmt = tNum;
+  if (vendorMode !== targetMode) {
+    const lineTotal = Number(vendorQuote?.unit_price) * Number(vendorQuote?.quantity);
+    qAmt = toAbsoluteAmount(qNum, vendorMode, lineTotal);
+    tAmt = toAbsoluteAmount(tNum, targetMode, lineTotal);
+    if (qAmt == null || tAmt == null) return null;
+  }
+  if (Math.abs(tAmt - qAmt) < 0.005) return 'equal';
+  return tAmt > qAmt ? 'greater' : 'lower';
 };
+
+// REQ-2026-0104 — a PRICE target (base price or a charge) may be above the
+// vendor's quote: the buyer is asking the vendor to raise that price, so the
+// vendor email shows it. Delivery days keep the old rule (fewer only).
+const TARGET_RAISE_EXCLUDED = new Set(['delivery_period']);
 
 /**
  * Render the negotiation_fields array as <li> rows showing `<quoted> → <target>`.
  * Skips `_mode` flag entries (they fold into their parent's display).
  *
- * options.hideWorseTargets — set true for the vendor-facing email: rows where the
- * buyer's target is worse (higher) than what the vendor already quoted are dropped,
- * since asking a vendor to "negotiate" up makes no sense.
+ * options.hideWorseTargets — set true for the vendor-facing email: a delivery
+ * target with MORE days than quoted is dropped. A price target above the quote is
+ * kept and marked, since the buyer is asking the vendor to raise that price
+ * (REQ-2026-0104).
  */
-const renderFieldRows = (fields = [], vendorQuote = null, chargeLabels = {}, options = {}) => {
+export const renderFieldRows = (fields = [], vendorQuote = null, chargeLabels = {}, options = {}) => {
   const { hideWorseTargets = false } = options;
   return fields
     .filter(f => f && f.name && !isModeFlagEntry(f.name))
@@ -270,8 +279,9 @@ const renderFieldRows = (fields = [], vendorQuote = null, chargeLabels = {}, opt
       const targetMode = resolveMode(f, fields, vendorQuote);
       const vendorMode = resolveVendorMode(f.name, vendorQuote) || targetMode;
       const quoted = resolveQuotedValue(f.name, vendorQuote);
-      if (hideWorseTargets && !taxDemand
-          && isTargetWorseThanQuoted(quoted, f.target, vendorMode, targetMode, vendorQuote)) {
+      const comparison = compareTargetWithQuoted(quoted, f.target, vendorMode, targetMode, vendorQuote);
+      const raisesPrice = comparison === 'greater' && !TARGET_RAISE_EXCLUDED.has(f.name);
+      if (hideWorseTargets && !taxDemand && comparison === 'greater' && !raisesPrice) {
         return null;
       }
       const targetStr = hasTarget ? formatFieldValue(f.name, f.target, targetMode) : '—';
@@ -280,6 +290,9 @@ const renderFieldRows = (fields = [], vendorQuote = null, chargeLabels = {}, opt
       let valueHtml = quotedStr
         ? `<span style="color:#475569;">${quotedStr}</span> <span style="color:#64748B;">→</span> <span style="color:#0F172A; font-weight:600;">${targetStr}</span>`
         : targetStr;
+      if (hideWorseTargets && raisesPrice && hasTarget) {
+        valueHtml += ` <span style="font-size:12px; color:#C2410C;">(above your quoted price: you may raise it)</span>`;
+      }
       // Buyer's free-text tax demand/negotiation note on this field.
       if (taxDemand) {
         valueHtml += `<br/><span style="font-size:12px; color:#15803D;">Tax: &ldquo;${taxDemand}&rdquo;</span>`;
@@ -310,8 +323,8 @@ const productNamesById = (round) => {
 /**
  * Build single-vendor negotiation fields HTML block (vendor-side email).
  * Vendor only sees their own quoted → target — no other vendor data exposed.
- * Rows where the buyer's target is worse than the vendor's current quote are
- * hidden — there's nothing to negotiate when the ask is already met or beaten.
+ * A delivery target with more days than quoted is hidden. A price target above
+ * the quote is shown and marked (REQ-2026-0104).
  */
 const buildSingleVendorTargetsHtml = (fields = [], vendorQuote = null, chargeLabels = {}) => {
   const rows = renderFieldRows(fields, vendorQuote, chargeLabels, { hideWorseTargets: true });
