@@ -15924,6 +15924,24 @@ sendFollowUpEmails: async (req, res) => {
         }
       }
 
+      // Clarification period (REQ-2026-0099): no quote may be sent or changed
+      // while the vendor clarification window is open, on an RFQ exactly as on
+      // a tender. createQuote has always refused here; this path did not, so a
+      // vendor holding a quote could still change it during the window.
+      // Same IST parse as createQuote (naive IST wall-clock column).
+      if (rfqDetails[0].vendor_clarification_date) {
+        const clarificationEndIst = getBidEndMomentIst(
+          rfqDetails[0].vendor_clarification_date
+        );
+        if (clarificationEndIst && clarificationEndIst.isAfter(istNow())) {
+          return res.status(400).json({
+            status: 3,
+            message:
+              'Quote update is blocked until the vendor clarification period ends.',
+          });
+        }
+      }
+
       // Check for open clarification - blocks all vendors from quoting
       const openClarification = await rfqModel.checkActiveClarification(
         quoteExists[0].rfq_id
